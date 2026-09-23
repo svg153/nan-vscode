@@ -1,0 +1,111 @@
+{
+  "name": "nan-builders-vscode",
+  "displayName": "NaN Builders for VS Code",
+  "description": "Use NaN Builders models natively in VS Code Chat and Agent mode.",
+  "version": "0.1.0",
+  "publisher": "svg153",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/svg153/nan-vscode.git"
+  },
+  "homepage": "https://github.com/svg153/nan-vscode#readme",
+  "bugs": {
+    "url": "https://github.com/svg153/nan-vscode/issues"
+  },
+  "engines": {
+    "vscode": "^1.104.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "keywords": [
+    "nan builders",
+    "nan",
+    "ai",
+    "chat",
+    "agent",
+    "language model",
+    "copilot",
+    "openai compatible"
+  ],
+  "extensionKind": [
+    "ui"
+  ],
+  "activationEvents": [
+    "onLanguageModelChatProvider:nan-builders",
+    "onCommand:nanBuilders.manage",
+    "onCommand:nanBuilders.refreshModels",
+    "onCommand:nanBuilders.showUsage"
+  ],
+  "main": "./out/src/extension.js",
+  "contributes": {
+    "languageModelChatProviders": [
+      {
+        "vendor": "nan-builders",
+        "displayName": "NaN Builders",
+        "managementCommand": "nanBuilders.manage"
+      }
+    ],
+    "commands": [
+      {
+        "command": "nanBuilders.manage",
+        "category": "NaN Builders",
+        "title": "Manage Provider"
+      },
+      {
+        "command": "nanBuilders.refreshModels",
+        "category": "NaN Builders",
+        "title": "Refresh Models"
+      },
+      {
+        "command": "nanBuilders.showUsage",
+        "category": "NaN Builders",
+        "title": "Show Session Usage"
+      }
+    ],
+    "configuration": {
+      "title": "NaN Builders",
+      "properties": {
+        "nanBuilders.apiBaseUrl": {
+          "type": "string",
+          "default": "https://api.nan.builders/v1",
+          "description": "NaN Builders OpenAI-compatible API base URL. Change only for development or self-hosted compatibility testing."
+        },
+        "nanBuilders.modelCacheSeconds": {
+          "type": "number",
+          "default": 300,
+          "minimum": 0,
+          "maximum": 3600,
+          "description": "How long the discovered model list is cached before refreshing."
+        },
+        "nanBuilders.showStatusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show local NaN request usage in the VS Code status bar."
+        },
+        "nanBuilders.includeUnknownModels": {
+          "type": "boolean",
+          "default": false,
+          "description": "Also show model IDs returned by NaN that are not yet in this extension's metadata catalog. Disabled by default because an unknown ID may be a non-chat endpoint; when enabled, unknown models are exposed without Agent tool-calling or vision capability."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('out',{recursive:true,force:true})\"",
+    "compile": "tsc -p .",
+    "watch": "tsc -p . -w",
+    "test:unit": "node --test out/test/*.test.js",
+    "test": "npm run compile && npm run test:unit",
+    "check": "npm run clean && npm run compile && npm run test:unit",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/vscode": "^1.104.0",
+    "@vscode/vsce": "^3.6.0",
+    "typescript": "^5.8.3"
+  }
+}

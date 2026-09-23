@@ -1,0 +1,8 @@
+.github/**
+.gitignore
+docs/**
+src/**
+test/**
+out/test/**
+tsconfig.json
+**/*.map
