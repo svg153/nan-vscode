@@ -100,7 +100,7 @@
     "test:unit": "node --test out/test/*.test.js",
     "test": "npm run compile && npm run test:unit",
     "test:insiders": "npm run compile && node scripts/run-insiders-integration.cjs",
-    "check": "npm run clean && npm run compile && npm run test:unit",
+    "check": "npm run clean && npm run compile && npm run test:unit && npm run test:insiders",
     "package": "vsce package --no-dependencies"
   },
   "devDependencies": {
