@@ -3,6 +3,7 @@
 docs/**
 src/**
 test/**
+scripts/**
 out/test/**
 tsconfig.json
 **/*.map

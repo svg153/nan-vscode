@@ -3,7 +3,10 @@ import { NAN_DASHBOARD_URL, NAN_DOCS_URL, PROVIDER_VENDOR, SECRET_API_KEY } from
 import { NanChatModelProvider } from "./provider";
 import { UsageTracker } from "./usageTracker";
 
-export function activate(context: vscode.ExtensionContext): void {
+export function activate(context: vscode.ExtensionContext): {
+  setTestApiKey(key: string): Promise<void>;
+  clearTestApiKey(): Promise<void>;
+} | undefined {
   const usage = new UsageTracker();
   const provider = new NanChatModelProvider(context, usage);
 
@@ -26,6 +29,14 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
   );
+
+  // Expose only a narrow setup hook to the isolated VS Code integration test.
+  return context.extensionMode === vscode.ExtensionMode.Test
+    ? {
+        setTestApiKey: (key) => provider.setApiKey(key),
+        clearTestApiKey: () => provider.clearApiKey(),
+      }
+    : undefined;
 }
 
 async function manageProvider(

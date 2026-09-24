@@ -97,6 +97,8 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       stream: true,
       stream_options: { include_usage: true },
       max_tokens: model.maxOutputTokens || 4096,
+      // NaN can spend several minutes in silent reasoning unless this is bounded.
+      reasoning_effort: reasoningEffort(options.modelOptions),
     };
 
     if (toolMapping.definitions.length > 0) {
@@ -104,17 +106,19 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       requestBody.tool_choice = toolMapping.toolChoice ?? "auto";
     }
 
-    const response = await this.sendChatRequest(apiKey, requestBody, token);
-    if (!response.body) {
-      throw new Error("NaN Builders returned an empty streaming response.");
-    }
-
-    const reader = response.body.getReader();
-    const textDecoder = new TextDecoder();
-    const streamDecoder = new OpenAIStreamDecoder();
-    let lastUsage: OpenAIUsage | undefined;
-
+    const cancellation = cancellationSignal(token);
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     try {
+      const response = await this.sendChatRequest(apiKey, requestBody, cancellation.signal);
+      if (!response.body) {
+        throw new Error("NaN Builders returned an empty streaming response.");
+      }
+
+      reader = response.body.getReader();
+      const textDecoder = new TextDecoder();
+      const streamDecoder = new OpenAIStreamDecoder();
+      let lastUsage: OpenAIUsage | undefined;
+
       while (!token.isCancellationRequested) {
         const { done, value } = await reader.read();
         if (done) {
@@ -143,14 +147,17 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
           lastUsage = event.usage;
         }
       }
+      if (!token.isCancellationRequested) {
+        this.usage.record(model.id, lastUsage);
+      }
+    } catch (error) {
+      if (!token.isCancellationRequested) {
+        throw error;
+      }
     } finally {
-      reader.releaseLock();
+      reader?.releaseLock();
+      cancellation.dispose();
     }
-
-    if (token.isCancellationRequested) {
-      return;
-    }
-    this.usage.record(model.id, lastUsage);
   }
 
   async provideTokenCount(
@@ -227,24 +234,30 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   }
 
   private async fetchModelIds(apiKey: string, token: vscode.CancellationToken): Promise<string[]> {
-    const response = await fetch(`${this.apiBaseUrl()}/models`, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        Accept: "application/json",
-        "User-Agent": this.userAgent(),
-      },
-      signal: cancellationSignal(token),
-    });
-
-    if (response.status === 401 || response.status === 403) {
-      throw new Error("NaN Builders rejected the API key. Update it with 'NaN Builders: Manage Provider'.");
+    const cancellation = cancellationSignal(token);
+    let response: Response;
+    let body: ModelListResponse;
+    try {
+      response = await fetch(`${this.apiBaseUrl()}/models`, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          Accept: "application/json",
+          "User-Agent": this.userAgent(),
+        },
+        signal: cancellation.signal,
+      });
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+          throw new Error("NaN Builders rejected the API key. Update it with 'NaN Builders: Manage Provider'.");
+        }
+        throw new Error(`Unable to discover NaN Builders models: HTTP ${response.status} ${response.statusText}`);
+      }
+      body = (await response.json()) as ModelListResponse;
+    } finally {
+      cancellation.dispose();
     }
-    if (!response.ok) {
-      throw new Error(`Unable to discover NaN Builders models: HTTP ${response.status} ${response.statusText}`);
-    }
 
-    const body = (await response.json()) as ModelListResponse;
     return (body.data ?? [])
       .map((model) => model.id?.trim())
       .filter((id): id is string => Boolean(id));
@@ -253,7 +266,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   private async sendChatRequest(
     apiKey: string,
     body: Record<string, unknown>,
-    token: vscode.CancellationToken,
+    signal: AbortSignal,
   ): Promise<Response> {
     const send = async (requestBody: Record<string, unknown>): Promise<Response> =>
       fetch(`${this.apiBaseUrl()}/chat/completions`, {
@@ -265,7 +278,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
           "User-Agent": this.userAgent(),
         },
         body: JSON.stringify(requestBody),
-        signal: cancellationSignal(token),
+        signal,
       });
 
     let response = await send(body);
@@ -332,14 +345,21 @@ function httpError(response: Response, body: string): Error {
   return new Error(`NaN Builders API error ${response.status} ${response.statusText}${suffix}`);
 }
 
-function cancellationSignal(token: vscode.CancellationToken): AbortSignal {
+function cancellationSignal(token: vscode.CancellationToken): { signal: AbortSignal; dispose: () => void } {
   const controller = new AbortController();
   if (token.isCancellationRequested) {
     controller.abort();
-    return controller.signal;
+    return { signal: controller.signal, dispose: () => {} };
   }
-  token.onCancellationRequested(() => controller.abort());
-  return controller.signal;
+  const listener = token.onCancellationRequested(() => controller.abort());
+  return { signal: controller.signal, dispose: () => listener.dispose() };
+}
+
+function reasoningEffort(options: { readonly [name: string]: unknown } | undefined): string {
+  const requested = options?.reasoning_effort;
+  return typeof requested === "string" && /^(none|minimal|low|medium|high|max)$/.test(requested)
+    ? requested
+    : "low";
 }
 
 function estimateTokens(text: string): number {

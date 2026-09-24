@@ -1,6 +1,6 @@
 # MVP validation checklist
 
-This is the manual validation pass for the first provider release. Automated tests cover the stream decoder, model catalog, and tool-name mapping. The VS Code host integration still needs one end-to-end pass with a real NaN API key before Marketplace publication.
+This is the validation pass for the first provider release. Unit tests cover the stream decoder, model catalog, and tool-name mapping. `npm run test:insiders` exercises discovery and streamed chat through the actual VS Code Insiders Language Model API using a local mock server; it does not use a real key. A separate live check against NaN is still required before Marketplace publication.
 
 ## Build
 
@@ -11,6 +11,14 @@ npm run package
 ```
 
 Expected: TypeScript compilation, unit tests, and VSIX packaging all complete successfully.
+
+## Automated VS Code integration
+
+```bash
+npm run test:insiders
+```
+
+Expected: the extension is loaded in an isolated Insiders profile, discovers the mock `glm5.3-flash` model, sends a streamed request through `vscode.lm.selectChatModels` / `sendRequest`, and receives `NAN_OK`. No real NaN credential or network request is used.
 
 ## Provider registration
 
