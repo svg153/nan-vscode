@@ -29,7 +29,7 @@ The body must contain:
 - Dependencies: API contracts, other issues, or approvals.
 - Definition of done: tests, docs, security, and linked PR.
 
-Apply exactly one type, one area, and one priority label when possible. Current labels are documented in AGENTS.md.
+Apply exactly one type, one area, and one priority label when possible. Current labels are documented in AGENTS.md. Use type:research for investigations and area:governance for repository/harness policy.
 
 ## Implementation loop
 

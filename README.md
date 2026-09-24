@@ -81,6 +81,10 @@ Commits and pull-request titles use [Conventional Commits](https://www.conventio
 
 Issue and PR work follows the repository's [GSD issue workflow](AGENTS.md). The full validation checklist is in [`docs/VALIDATION.md`](docs/VALIDATION.md), and implementation decisions are in [`docs/DECISIONS.md`](docs/DECISIONS.md).
 
+Repository merge policy, ruleset, topics, and labels are documented in [`docs/REPOSITORY.md`](docs/REPOSITORY.md).
+
+The provider/API comparison and future capability boundaries are documented in [`docs/PROVIDER-RESEARCH.md`](docs/PROVIDER-RESEARCH.md).
+
 ## Roadmap
 
 - Account-wide usage from a documented NaN API-key endpoint.
@@ -92,5 +96,3 @@ See the [open issues](https://github.com/svg153/nan-vscode/issues) for scoped ac
 ## License
 
 MIT. See [`LICENSE`](LICENSE).
-
-

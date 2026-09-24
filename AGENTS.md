@@ -33,7 +33,7 @@ Use these body headings:
 
 ## Labels
 
-Apply one type label (type:feature, type:bug, type:docs, or type:chore), one area label (area:provider, area:usage, area:completion, area:docs, or area:release), and a priority label (priority:p1, priority:p2, or priority:p3). Add good first issue only when the work is genuinely self-contained.
+Apply one type label (type:feature, type:bug, type:docs, type:chore, or type:research), one area label (area:provider, area:usage, area:completion, area:docs, area:release, or area:governance), and a priority label (priority:p1, priority:p2, or priority:p3). Add good first issue only when the work is genuinely self-contained.
 
 ## Commits and PRs
 
