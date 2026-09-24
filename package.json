@@ -36,6 +36,7 @@
     "ui"
   ],
   "activationEvents": [
+    "onStartupFinished",
     "onLanguageModelChatProvider:nan-builders",
     "onCommand:nanBuilders.manage",
     "onCommand:nanBuilders.refreshModels",
