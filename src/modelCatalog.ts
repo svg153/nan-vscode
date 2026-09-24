@@ -31,7 +31,8 @@ const CHAT_MODELS: readonly ModelMetadata[] = [
     contextWindow: 262_144,
     maxOutputTokens: 32_768,
     imageInput: true,
-    toolCalling: true,
+    // NaN documents XML tool calls; this provider currently only handles OpenAI tool_calls.
+    toolCalling: false,
   },
   {
     id: "mimo-v2.5",
@@ -47,7 +48,7 @@ const CHAT_MODELS: readonly ModelMetadata[] = [
     contextWindow: 262_144,
     maxOutputTokens: 65_536,
     imageInput: true,
-    toolCalling: true,
+    toolCalling: false,
   },
   {
     id: "qwen3.6",
@@ -55,7 +56,7 @@ const CHAT_MODELS: readonly ModelMetadata[] = [
     contextWindow: 262_144,
     maxOutputTokens: 65_536,
     imageInput: true,
-    toolCalling: true,
+    toolCalling: false,
   },
   {
     id: "glm5.3",

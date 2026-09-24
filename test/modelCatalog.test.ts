@@ -29,6 +29,13 @@ test("unknown model metadata is conservative for Agent mode", () => {
   assert.equal(model.contextWindow, 128_000);
 });
 
+test("does not advertise XML-only tool formats as VS Code tool calling", () => {
+  for (const id of ["qwen3.8-flash", "gemma4", "qwen3.6"]) {
+    assert.equal(toDisplayMetadata(id).toolCalling, false, id);
+  }
+  assert.equal(toDisplayMetadata("mimo-v2.5").toolCalling, true);
+});
+
 test("premium model metadata is available when the API key reports it", () => {
   assert.ok(knownChatModelIds().includes("glm5.3"));
   assert.equal(toDisplayMetadata("glm5.3").premium, true);
