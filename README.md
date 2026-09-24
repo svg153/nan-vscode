@@ -16,6 +16,7 @@ A native VS Code language model provider for [NaN Builders](https://nan.builders
 - Image inputs for catalogued vision-capable models.
 - Local status-bar usage when the API returns OpenAI-compatible streaming usage metadata.
 - Conservative handling of newly discovered model IDs that are not yet in the local metadata catalog.
+- Remote-workspace support: the provider prefers the workspace extension host and falls back to the local UI host.
 
 ## Install for development
 
@@ -43,9 +44,21 @@ You can also find provider extensions with the Marketplace filter:
 @tag:language-models
 ```
 
+## Remote workspaces
+
+The provider prefers the workspace extension host when using WSL, SSH, or a Dev Container. This keeps the model provider on the same host as the Chat/Agent session and avoids a known VS Code routing problem where Auto can replace an explicitly selected remote-provider model. In a remote workspace, install the extension and enter the API key in that remote host's SecretStorage.
+
+For a local workspace, it continues to run locally. To force a published installation to the remote host while testing, use:
+
+```json
+"remote.extensionKind": {
+  "svg153.nan-builders-vscode": ["workspace"]
+}
+```
+
 ## Agent mode
 
-Known NaN chat models are marked as supporting tool calling and appear in Agent model selection. The extension maps VS Code tools to OpenAI-compatible function tools, handles streamed tool calls, and maps the tool name back to the original VS Code tool name.
+NaN chat models with compatible function tool calling are marked as supporting tools and appear in Agent model selection. The extension maps VS Code tools to OpenAI-compatible function tools, handles streamed tool calls, and maps the tool name back to the original VS Code tool name.
 
 Only model IDs returned by `/v1/models` are exposed. Known non-chat endpoints are removed. Unknown IDs are hidden by default because a newly added embedding, image, audio, or other endpoint must not accidentally be advertised as a chat model. You can set `nanBuilders.includeUnknownModels` to `true` to expose unknown IDs conservatively, without tool calling or vision, while waiting for the extension metadata to catch up.
 
