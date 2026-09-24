@@ -1,5 +1,6 @@
 param(
-  [string]$Repository = "svg153/nan-vscode"
+  [string]$Repository = "svg153/nan-vscode",
+  [string]$OwnerLogin = "svg153"
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,7 +30,7 @@ $topics | gh api --method PUT "repos/$Repository/topics" --input - | Out-Null
 
 # Rulesets are the source of truth for main. This is idempotent by name.
 $rulesetName = "main-pull-request"
-$ownerId = [int](gh api user --jq .id)
+$ownerId = [int](gh api "users/$OwnerLogin" --jq .id)
 $ruleset = @{
   name = $rulesetName
   target = "branch"
