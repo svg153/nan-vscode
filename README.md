@@ -11,15 +11,17 @@ Use [NaN Builders](https://nan.builders/) models in VS Code Chat and Agent mode 
 
 ## What works
 
-- Native VS Code language-model provider integration for Chat and Agent mode.
-- API-key validation and model discovery through `GET /v1/models`.
-- The model picker is filtered by the models available to the configured API key.
-- Streaming text and OpenAI-compatible function-tool calls through `POST /v1/chat/completions`.
+- Native `languageModelChatProviders` integration for VS Code Chat and Agent mode.
+- API key stored in VS Code `SecretStorage`.
+- API-key validation and model discovery through `GET https://api.nan.builders/v1/models`.
+- The model picker follows the API-key-filtered list returned by NaN, so premium-only models appear only when the key can actually call them.
+- Streaming chat through `POST https://api.nan.builders/v1/chat/completions`.
+- VS Code tool definitions mapped to OpenAI-compatible function tools.
 - Streamed tool calls mapped back to VS Code so supported models can run in Agent mode.
-- Image inputs for models whose local metadata advertises vision support.
-- API keys stored in VS Code `SecretStorage`, never in workspace settings.
-- Remote and WSL workspace support because the provider runs in the local UI extension host.
-- Local VS Code session usage in the status bar when the API returns usage metadata.
+- Image inputs for catalogued vision-capable models.
+- Local status-bar usage when the API returns OpenAI-compatible streaming usage metadata.
+- Conservative handling of newly discovered model IDs that are not yet in the local metadata catalog.
+- Remote-workspace support: the provider prefers the workspace extension host and falls back to the local UI host.
 
 ## Install
 
@@ -62,9 +64,21 @@ Available settings:
 | `nanBuilders.showStatusBar` | `true` | Show local session usage in the status bar. |
 | `nanBuilders.includeUnknownModels` | `false` | Expose unknown IDs without tool or vision metadata. |
 
+## Remote workspaces
+
+The provider prefers the workspace extension host when using WSL, SSH, or a Dev Container. This keeps the model provider on the same host as the Chat/Agent session and avoids a known VS Code routing problem where Auto can replace an explicitly selected remote-provider model. In a remote workspace, install the extension and enter the API key in that remote host's SecretStorage.
+
+For a local workspace, it continues to run locally. To force a published installation to the remote host while testing, use:
+
+```json
+"remote.extensionKind": {
+  "svg153.nan-builders-vscode": ["workspace"]
+}
+```
+
 ## Agent mode and model metadata
 
-Known NaN chat models advertise tool-calling support and appear in Agent model selection. The extension maps VS Code tools to OpenAI-compatible function tools, handles streamed tool calls, and maps tool names back to the original VS Code tool names.
+NaN chat models with compatible function tool calling are marked as supporting tools and appear in Agent model selection. The extension maps VS Code tools to OpenAI-compatible function tools, handles streamed tool calls, and maps tool names back to the original VS Code tool names.
 
 Only model IDs returned by `/v1/models` are exposed. Known non-chat endpoints are removed. Unknown IDs are hidden by default so an embedding, image, or audio endpoint is not accidentally advertised as a chat model. Set `nanBuilders.includeUnknownModels` to `true` to expose unknown IDs conservatively while local metadata catches up.
 
@@ -99,7 +113,7 @@ No alternate chat webview is created; the provider uses the built-in VS Code Cha
 - **No models appear:** validate the key, then refresh models. Check that the key can call `/v1/models`.
 - **A model is missing:** the API key does not currently return that model, or it is a known non-chat endpoint.
 - **A request stops without text:** NaN may have hit a reasoning-only truncation; try a shorter prompt or a model with adjustable reasoning.
-- **Remote or WSL window:** install the extension in the local UI extension host; a second remote installation should not be required.
+- **Remote or WSL window:** the provider prefers the workspace extension host; install the extension and configure the key in that remote host's SecretStorage.
 - **Key safety:** use **Clear API key** from the management command to remove it from SecretStorage.
 
 ## Security

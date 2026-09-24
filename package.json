@@ -32,6 +32,7 @@
     "openai compatible"
   ],
   "extensionKind": [
+    "workspace",
     "ui"
   ],
   "activationEvents": [

@@ -76,6 +76,7 @@ export async function run(): Promise<void> {
       clearTestApiKey(): Promise<void>;
     }>("svg153.nan-builders-vscode");
     assert.ok(extension, "NaN Builders extension is not loaded in the development host.");
+    assert.deepEqual(extension.packageJSON.extensionKind, ["workspace", "ui"]);
     testApi = await extension.activate();
     assert.ok(testApi, `Test hook missing (extension path ${extension.extensionPath}).`);
 
