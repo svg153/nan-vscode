@@ -43,6 +43,9 @@ export interface OpenAIUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
+  estimated?: boolean;
+  billed?: boolean;
+  nan_truncation?: boolean;
 }
 
 export interface OpenAIChatChunk {

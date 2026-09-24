@@ -34,6 +34,15 @@ export async function run(): Promise<void> {
         return;
       }
       const messages = chatRequest.messages as Array<{ content?: string }>;
+      if (messages.some(({ content }) => content === "TRUNCATE_NOW")) {
+        response.writeHead(200, { "Content-Type": "text/event-stream" });
+        response.end([
+          'data: {"choices":[{"delta":{},"finish_reason":"length"}]}' + "\n",
+          'data: {"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":15,"total_tokens":17,"estimated":true,"billed":false,"nan_truncation":true}}' + "\n",
+          "data: [DONE]\n\n",
+        ].join(""));
+        return;
+      }
       if (messages.some(({ content }) => content === "CANCEL_NOW")) {
         cancelResponse = response;
         onCancelRequest?.();
@@ -97,6 +106,22 @@ export async function run(): Promise<void> {
     assert.equal(chatRequest?.model, "glm5.3-flash");
     assert.equal(chatRequest?.stream, true);
     assert.equal(chatRequest?.reasoning_effort, "low");
+
+    assert.ok(source);
+    const requestToken = source.token;
+    const truncatedResponse = await model.sendRequest(
+      [vscode.LanguageModelChatMessage.User("TRUNCATE_NOW")],
+      {},
+      requestToken,
+    );
+    await assert.rejects(
+      async () => {
+        for await (const _part of truncatedResponse.stream) {
+          // A reasoning-only truncation must not look like a successful empty reply.
+        }
+      },
+      /NaN ended the turn before producing a reply because it reached its reasoning-only limit/,
+    );
 
     const cancellation = new vscode.CancellationTokenSource();
     try {

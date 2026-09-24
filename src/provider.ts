@@ -149,6 +149,11 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       }
       if (!token.isCancellationRequested) {
         this.usage.record(model.id, lastUsage);
+        if (lastUsage?.nan_truncation) {
+          throw new Error(
+            "NaN ended the turn before producing a reply because it reached its reasoning-only limit. Try a shorter prompt or a model with adjustable reasoning.",
+          );
+        }
       }
     } catch (error) {
       if (!token.isCancellationRequested) {
