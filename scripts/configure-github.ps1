@@ -5,17 +5,16 @@ param(
 $ErrorActionPreference = "Stop"
 
 # Keep repository policy reproducible; run this with a token that can administer the repository.
-gh api --method PATCH "repos/$Repository" --input - @'
-{
-  "allow_squash_merge": true,
-  "allow_merge_commit": false,
-  "allow_rebase_merge": false,
-  "squash_merge_commit_title": "PR_TITLE",
-  "squash_merge_commit_message": "PR_BODY",
-  "delete_branch_on_merge": true,
-  "allow_auto_merge": true
-}
-'@
+$mergeSettings = @{
+  allow_squash_merge = $true
+  allow_merge_commit = $false
+  allow_rebase_merge = $false
+  squash_merge_commit_title = "PR_TITLE"
+  squash_merge_commit_message = "PR_BODY"
+  delete_branch_on_merge = $true
+  allow_auto_merge = $true
+} | ConvertTo-Json
+$mergeSettings | gh api --method PATCH "repos/$Repository" --input -
 
 $protection = @{
   required_status_checks = @{
