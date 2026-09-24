@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { NAN_DASHBOARD_URL, NAN_DOCS_URL, PROVIDER_VENDOR, SECRET_API_KEY } from "./constants";
+import { configureDiagnosticFile, diagnostic } from "./diagnostics";
 import { NanChatModelProvider } from "./provider";
 import { UsageTracker } from "./usageTracker";
 
@@ -7,8 +8,21 @@ export function activate(context: vscode.ExtensionContext): {
   setTestApiKey(key: string): Promise<void>;
   clearTestApiKey(): Promise<void>;
 } | undefined {
+  configureDiagnosticFile(context.logUri.fsPath);
+  diagnostic("activate.begin", {
+    version: String(context.extension.packageJSON.version ?? "unknown"),
+    vscodeVersion: vscode.version,
+    extensionMode: context.extensionMode,
+    remoteName: vscode.env.remoteName ?? "local",
+  });
+  const heartbeat = setInterval(() => diagnostic("heartbeat"), 5_000);
+  heartbeat.unref();
+  context.subscriptions.push({ dispose: () => clearInterval(heartbeat) });
+
   const usage = new UsageTracker();
+  diagnostic("activate.usageTracker.created");
   const provider = new NanChatModelProvider(context, usage);
+  diagnostic("activate.provider.created");
 
   context.subscriptions.push(
     usage,
@@ -29,6 +43,7 @@ export function activate(context: vscode.ExtensionContext): {
       }
     }),
   );
+  diagnostic("activate.complete", { subscriptionCount: context.subscriptions.length });
 
   // Expose only a narrow setup hook to the isolated VS Code integration test.
   return context.extensionMode === vscode.ExtensionMode.Test

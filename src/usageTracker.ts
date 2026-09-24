@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { diagnostic } from "./diagnostics";
 import type { OpenAIUsage } from "./openai/types";
 
 export class UsageTracker implements vscode.Disposable {
@@ -9,9 +10,11 @@ export class UsageTracker implements vscode.Disposable {
   private lastModel: string | undefined;
 
   constructor() {
+    diagnostic("statusBar.create.begin");
     this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 50);
     this.item.command = "nanBuilders.showUsage";
     this.refreshVisibility();
+    diagnostic("statusBar.create.complete");
   }
 
   record(modelId: string, usage: OpenAIUsage | undefined): void {
@@ -24,6 +27,7 @@ export class UsageTracker implements vscode.Disposable {
 
   refreshVisibility(): void {
     const enabled = vscode.workspace.getConfiguration("nanBuilders").get<boolean>("showStatusBar", true);
+    diagnostic("statusBar.visibility", { enabled });
     if (enabled) {
       this.item.show();
       this.render();
@@ -48,6 +52,7 @@ export class UsageTracker implements vscode.Disposable {
   }
 
   dispose(): void {
+    diagnostic("statusBar.dispose");
     this.item.dispose();
   }
 
