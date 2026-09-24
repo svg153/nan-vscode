@@ -160,7 +160,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
         }
       }
       if (!token.isCancellationRequested) {
-        this.usage.record(model.id, lastUsage);
+        await this.usage.record(model.id, lastUsage);
         diagnostic("chat.complete", {
           modelId: model.id,
           elapsedMs: Date.now() - startedAt,

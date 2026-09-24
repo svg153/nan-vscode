@@ -65,7 +65,7 @@
       {
         "command": "nanBuilders.showUsage",
         "category": "NaN Builders",
-        "title": "Show Session Usage"
+        "title": "Show Local Usage History"
       }
     ],
     "configuration": {
