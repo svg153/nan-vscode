@@ -29,6 +29,7 @@ $topics | gh api --method PUT "repos/$Repository/topics" --input - | Out-Null
 
 # Rulesets are the source of truth for main. This is idempotent by name.
 $rulesetName = "main-pull-request"
+$ownerId = [int](gh api user --jq .id)
 $ruleset = @{
   name = $rulesetName
   target = "branch"
@@ -45,7 +46,7 @@ $ruleset = @{
     @{type = "required_linear_history"},
     @{type = "pull_request"; parameters = @{
       dismiss_stale_reviews_on_push = $true
-      require_code_owner_review = $false
+      require_code_owner_review = $true
       require_last_push_approval = $false
       required_approving_review_count = 1
       required_review_thread_resolution = $true
@@ -61,7 +62,8 @@ $ruleset = @{
       )
     }}
   )
-  bypass_actors = @()
+  # The authenticated repository owner may merge their own PR without a second review.
+  bypass_actors = @(@{actor_id = $ownerId; actor_type = "User"; bypass_mode = "pull_request"})
 } | ConvertTo-Json -Depth 10
 
 $existingRuleset = (gh api "repos/$Repository/rulesets" | ConvertFrom-Json | Where-Object name -eq $rulesetName | Select-Object -First 1)

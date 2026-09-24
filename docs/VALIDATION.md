@@ -5,7 +5,7 @@ This is the validation pass for the first provider release. Unit tests cover the
 ## Build
 
 ```bash
-npm install
+npm ci
 npm run check
 npm run package
 ```

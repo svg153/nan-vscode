@@ -1,0 +1,3 @@
+# Repository owner reviews all contributions. The main ruleset requires this review
+# for contributors while its explicit owner bypass allows svg153 to self-merge PRs.
+* @svg153
