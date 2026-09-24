@@ -1,0 +1,40 @@
+name: Feature
+description: A user-visible improvement with testable acceptance criteria
+title: "feat(scope): "
+labels:
+  - type:feature
+body:
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What user need or problem motivates this?
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: State one user-visible outcome.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and non-goals
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      value: |
+        - [ ] Given ..., when ..., then ...
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation and dependencies
+    validations:
+      required: true
