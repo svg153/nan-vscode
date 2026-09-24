@@ -8,16 +8,21 @@ export function activate(context: vscode.ExtensionContext): {
   setTestApiKey(key: string): Promise<void>;
   clearTestApiKey(): Promise<void>;
 } | undefined {
-  configureDiagnosticFile(context.logUri.fsPath);
-  diagnostic("activate.begin", {
-    version: String(context.extension.packageJSON.version ?? "unknown"),
-    vscodeVersion: vscode.version,
-    extensionMode: context.extensionMode,
-    remoteName: vscode.env.remoteName ?? "local",
-  });
-  const heartbeat = setInterval(() => diagnostic("heartbeat"), 5_000);
-  heartbeat.unref();
-  context.subscriptions.push({ dispose: () => clearInterval(heartbeat) });
+  const diagnosticsEnabled = vscode.workspace
+    .getConfiguration("nanBuilders")
+    .get<boolean>("diagnostics.enabled", false);
+  configureDiagnosticFile(context.logUri.fsPath, diagnosticsEnabled);
+  if (diagnosticsEnabled) {
+    diagnostic("activate.begin", {
+      version: String(context.extension.packageJSON.version ?? "unknown"),
+      vscodeVersion: vscode.version,
+      extensionMode: context.extensionMode,
+      remoteName: vscode.env.remoteName ?? "local",
+    });
+    const heartbeat = setInterval(() => diagnostic("heartbeat"), 5_000);
+    heartbeat.unref();
+    context.subscriptions.push({ dispose: () => clearInterval(heartbeat) });
+  }
 
   const usage = new UsageTracker();
   diagnostic("activate.usageTracker.created");

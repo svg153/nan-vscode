@@ -3,8 +3,15 @@ import { join } from "node:path";
 
 /** Temporary local crash diagnostics. Remove after identifying the Insiders restart cause. */
 let logFile: string | undefined;
+let enabled = false;
 
-export function configureDiagnosticFile(directory: string): void {
+export function configureDiagnosticFile(directory: string, diagnosticsEnabled: boolean): void {
+  enabled = diagnosticsEnabled;
+  logFile = undefined;
+  if (!enabled) {
+    return;
+  }
+
   try {
     mkdirSync(directory, { recursive: true });
     logFile = join(directory, "nan-vscode-diagnostics.log");
@@ -15,6 +22,10 @@ export function configureDiagnosticFile(directory: string): void {
 }
 
 export function diagnostic(event: string, details: Record<string, string | number | boolean> = {}): void {
+  if (!enabled) {
+    return;
+  }
+
   const memory = process.memoryUsage();
   const line = JSON.stringify({
     at: new Date().toISOString(),
