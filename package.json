@@ -88,6 +88,11 @@
           "default": true,
           "description": "Show local NaN request usage in the VS Code status bar."
         },
+        "nanBuilders.diagnostics.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Write temporary NaN Builders extension diagnostics to the log. Enable only when troubleshooting and reload the VS Code window after changing."
+        },
         "nanBuilders.includeUnknownModels": {
           "type": "boolean",
           "default": false,
