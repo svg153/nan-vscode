@@ -1,0 +1,28 @@
+name: Bug
+description: A reproducible defect or regression
+title: "fix(scope): "
+labels:
+  - type:bug
+body:
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What happened and what should have happened?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Minimal steps, environment, and logs without secrets.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      value: |
+        - [ ] Given ..., when ..., then ...
+    validations:
+      required: true

@@ -1,4 +1,11 @@
 .github/**
+.codex/**
+.commitlintrc.json
+.husky/**
+.releaserc.json
+AGENTS.md
+CHANGELOG.md
+CONTRIBUTING.md
 .gitignore
 docs/**
 src/**
