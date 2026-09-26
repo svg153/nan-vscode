@@ -22,3 +22,19 @@ jobs:
       - run: npm run release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish to the VS Code Marketplace
+        run: |
+          shopt -s nullglob
+          vsix=(nan-builders-vscode-*.vsix)
+          if [ ${#vsix[@]} -eq 0 ]; then
+            echo "No release VSIX was produced in this run; skipping Marketplace publish."
+            exit 0
+          fi
+          if [ -z "$VSCE_PAT" ]; then
+            echo "::error::The VSCE_PAT secret is not configured. The GitHub Release already contains the VSIX for recovery, but Marketplace publishing failed."
+            exit 1
+          fi
+          npx vsce verify-pat svg153
+          npx vsce publish --packagePath "${vsix[0]}" --no-dependencies
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}

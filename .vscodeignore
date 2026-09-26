@@ -13,4 +13,5 @@ test/**
 scripts/**
 out/test/**
 tsconfig.json
+renovate.json
 **/*.map
