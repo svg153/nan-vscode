@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { NAN_DASHBOARD_URL, NAN_DOCS_URL, PROVIDER_VENDOR, SECRET_API_KEY, DEFAULT_API_BASE_URL } from "./constants";
 import { configureDiagnosticFile, diagnostic } from "./diagnostics";
+import { NanInlineCompletionProvider } from "./inlineCompletionProvider";
 import { NanChatModelProvider } from "./provider";
 import { AccountUsageService, accountModelRows } from "./accountUsage";
 import { compactTokens } from "./quotaCatalog";
@@ -12,6 +13,13 @@ export function activate(context: vscode.ExtensionContext): {
   clearTestApiKey(): Promise<void>;
   readTestUsageHistory(): unknown;
   clearTestUsageHistory(): Promise<boolean>;
+  provideInlineTest(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+    options?: { cancelDuringStartup?: boolean },
+  ): Promise<vscode.InlineCompletionItem[] | undefined>;
+  cancelInlineTest(): void;
+  getInlineRegistrationTest(): vscode.DocumentSelector | undefined;
 } | undefined {
   const diagnosticsEnabled = vscode.workspace
     .getConfiguration("nanBuilders")
@@ -45,6 +53,27 @@ export function activate(context: vscode.ExtensionContext): {
   const usage = new UsageTracker(context.globalState, account);
   diagnostic("activate.usageTracker.created");
   const provider = new NanChatModelProvider(context, usage);
+  let inlineStartupGate: (() => Promise<void>) | undefined;
+  let inlineTestSource: vscode.CancellationTokenSource | undefined;
+  let inlineRegistrationSelector: vscode.DocumentSelector | undefined;
+  const inlineSecrets: vscode.SecretStorage =
+    context.extensionMode === vscode.ExtensionMode.Test
+      ? {
+          keys: () => context.secrets.keys(),
+          get: async (key) => {
+            await inlineStartupGate?.();
+            return context.secrets.get(key);
+          },
+          store: (key, value) => context.secrets.store(key, value),
+          delete: (key) => context.secrets.delete(key),
+          onDidChange: (listener) => context.secrets.onDidChange(listener),
+        }
+      : context.secrets;
+  const inlineCompletions = new NanInlineCompletionProvider(inlineSecrets);
+  const registerInlineCompletions = (selector: vscode.DocumentSelector): vscode.Disposable => {
+    inlineRegistrationSelector = selector;
+    return vscode.languages.registerInlineCompletionItemProvider(selector, inlineCompletions);
+  };
   diagnostic("activate.provider.created");
 
   const refreshAccountUsage = async (options: { force?: boolean; manual?: boolean } = {}): Promise<void> => {
@@ -64,6 +93,7 @@ export function activate(context: vscode.ExtensionContext): {
   context.subscriptions.push(
     usage,
     provider,
+    registerInlineCompletions([{ scheme: "file" }]),
     vscode.lm.registerLanguageModelChatProvider(PROVIDER_VENDOR, provider),
     vscode.commands.registerCommand("nanBuilders.manage", () => manageProvider(context, provider, refreshAccountUsage)),
     vscode.commands.registerCommand("nanBuilders.refreshModels", async () => {
@@ -147,6 +177,29 @@ export function activate(context: vscode.ExtensionContext): {
         clearTestApiKey: () => provider.clearApiKey(),
         readTestUsageHistory: () => context.globalState.get("nanBuilders.localUsageHistory"),
         clearTestUsageHistory: () => usage.clearHistory(),
+        provideInlineTest: async (document, position, options) => {
+          const source = new vscode.CancellationTokenSource();
+          inlineTestSource = source;
+          if (options?.cancelDuringStartup) {
+            // Cancel exactly at the secrets.get boundary: after the provider's
+            // entry check, before any request can be built or sent.
+            inlineStartupGate = async () => source.cancel();
+          }
+          try {
+            return await inlineCompletions.provideInlineCompletionItems(
+              document,
+              position,
+              { triggerKind: vscode.InlineCompletionTriggerKind.Invoke, selectedCompletionInfo: undefined },
+              source.token,
+            );
+          } finally {
+            inlineStartupGate = undefined;
+            inlineTestSource = undefined;
+            source.dispose();
+          }
+        },
+        cancelInlineTest: () => inlineTestSource?.cancel(),
+        getInlineRegistrationTest: () => inlineRegistrationSelector,
       }
     : undefined;
 }
