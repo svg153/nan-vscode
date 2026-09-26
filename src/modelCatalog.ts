@@ -6,6 +6,8 @@ export interface ModelMetadata {
   readonly imageInput: boolean;
   readonly toolCalling: boolean;
   readonly premium?: boolean;
+  /** Empty means the model accepts the parameter but manages reasoning depth itself. */
+  readonly reasoningEffortValues?: readonly string[];
 }
 
 const CHAT_MODELS: readonly ModelMetadata[] = [
@@ -16,6 +18,7 @@ const CHAT_MODELS: readonly ModelMetadata[] = [
     maxOutputTokens: 32_768,
     imageInput: true,
     toolCalling: true,
+    reasoningEffortValues: [],
   },
   {
     id: "glm5.3-flash",
@@ -24,6 +27,7 @@ const CHAT_MODELS: readonly ModelMetadata[] = [
     maxOutputTokens: 32_768,
     imageInput: true,
     toolCalling: true,
+    reasoningEffortValues: ["low", "medium", "high", "max"],
   },
   {
     id: "qwen3.8-flash",
@@ -33,6 +37,7 @@ const CHAT_MODELS: readonly ModelMetadata[] = [
     imageInput: true,
     // NaN documents XML tool calls; this provider currently only handles OpenAI tool_calls.
     toolCalling: false,
+    reasoningEffortValues: [],
   },
   {
     id: "mimo-v2.5",
@@ -41,6 +46,7 @@ const CHAT_MODELS: readonly ModelMetadata[] = [
     maxOutputTokens: 32_768,
     imageInput: true,
     toolCalling: true,
+    reasoningEffortValues: [],
   },
   {
     id: "gemma4",
@@ -49,6 +55,7 @@ const CHAT_MODELS: readonly ModelMetadata[] = [
     maxOutputTokens: 65_536,
     imageInput: true,
     toolCalling: false,
+    reasoningEffortValues: ["none", "minimal", "low", "medium", "high", "max"],
   },
   {
     id: "qwen3.6",
@@ -57,6 +64,7 @@ const CHAT_MODELS: readonly ModelMetadata[] = [
     maxOutputTokens: 65_536,
     imageInput: true,
     toolCalling: false,
+    reasoningEffortValues: ["none", "minimal", "low", "medium", "high", "max"],
   },
   {
     id: "glm5.3",
@@ -66,6 +74,7 @@ const CHAT_MODELS: readonly ModelMetadata[] = [
     imageInput: false,
     toolCalling: true,
     premium: true,
+    reasoningEffortValues: ["low", "medium", "high", "max"],
   },
 ] as const;
 
@@ -85,6 +94,17 @@ export function knownChatModelIds(): string[] {
 
 export function getKnownModel(id: string): ModelMetadata | undefined {
   return BY_ID.get(id);
+}
+
+export function reasoningDescription(model: ModelMetadata): string {
+  const values = model.reasoningEffortValues;
+  if (values === undefined) {
+    return "Reasoning support is unknown.";
+  }
+  if (values.length === 0) {
+    return "Reasoning depth is model-managed; effort levels are not user-adjustable.";
+  }
+  return `Documented reasoning effort levels: ${values.join(", ")}. Informational only; VS Code does not let this provider configure them yet.`;
 }
 
 export function isKnownNonChatModel(id: string): boolean {

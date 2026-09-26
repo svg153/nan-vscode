@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { filterDiscoveredModelIds, knownChatModelIds, toDisplayMetadata } from "../src/modelCatalog";
+import { filterDiscoveredModelIds, knownChatModelIds, reasoningDescription, toDisplayMetadata } from "../src/modelCatalog";
 
 test("filters known non-chat endpoints and deduplicates discovered models", () => {
   assert.deepEqual(
@@ -39,4 +39,11 @@ test("does not advertise XML-only tool formats as VS Code tool calling", () => {
 test("premium model metadata is available when the API key reports it", () => {
   assert.ok(knownChatModelIds().includes("glm5.3"));
   assert.equal(toDisplayMetadata("glm5.3").premium, true);
+});
+
+test("reasoning metadata distinguishes adjustable, model-managed, and unknown models", () => {
+  assert.match(reasoningDescription(toDisplayMetadata("glm5.3-flash")), /low, medium, high, max/);
+  assert.match(reasoningDescription(toDisplayMetadata("qwen3.6")), /none, minimal, low, medium, high, max/);
+  assert.match(reasoningDescription(toDisplayMetadata("deepseek-v4-flash")), /model-managed/);
+  assert.match(reasoningDescription(toDisplayMetadata("future-model")), /unknown/);
 });
