@@ -29,9 +29,10 @@ export type CompletionParseResult = { ok: true; text: string } | { ok: false; re
 
 /**
  * Build the request body for one completion, or `undefined` when the feature
- * cannot run (no model configured, cursor out of range, or nothing typed yet).
- * The prompt is clamped to the last {@link MAX_PROMPT_CHARS} characters before
- * the cursor and only documented API fields are produced.
+ * cannot run (no model configured, or nothing typed yet before the cursor).
+ * The cursor offset is clamped to the document bounds, and the prompt is
+ * clamped to the last {@link MAX_PROMPT_CHARS} characters before the cursor;
+ * only documented API fields are produced.
  */
 export function buildCompletionRequest(options: {
   model: string;
