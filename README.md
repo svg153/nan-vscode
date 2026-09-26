@@ -20,6 +20,7 @@ Use [NaN Builders](https://nan.builders/) models in VS Code Chat and Agent mode 
 - VS Code tool definitions mapped to OpenAI-compatible function tools.
 - Streamed tool calls mapped back to VS Code so supported models can run in Agent mode.
 - Image inputs for catalogued vision-capable models.
+- Opt-in inline ghost-text completions through the legacy `POST /v1/completions` endpoint when `nanBuilders.completionModel` is set ([issue #8](https://github.com/svg153/nan-vscode/issues/8)).
 - Local status-bar usage when the API returns OpenAI-compatible streaming usage metadata.
 - Account-wide monthly quota in the status bar via `GET /v1/usage` when an API key is configured, with local-session usage as fallback.
 - Conservative handling of newly discovered model IDs that are not yet in the local metadata catalog.
@@ -75,6 +76,7 @@ Available settings:
 | `nanBuilders.modelCacheSeconds` | `300` | Model discovery cache duration. |
 | `nanBuilders.showStatusBar` | `true` | Show usage in the status bar: account-wide monthly quota % when an API key is configured, otherwise local session usage. |
 | `nanBuilders.includeUnknownModels` | `false` | Expose unknown IDs without tool or vision metadata. |
+| `nanBuilders.completionModel` | `""` | Model ID for opt-in inline ghost-text completions; empty disables the feature and no completion request is sent. |
 
 ## Remote workspaces
 
@@ -114,7 +116,7 @@ Local usage remains available regardless of the API: **NaN Builders: Show Usage*
 
 VS Code does not expose a documented usage-reporting callback for third-party chat providers, so local counts only cover turns where the API returned OpenAI-compatible streaming usage metadata; see [issue #7](https://github.com/svg153/nan-vscode/issues/7).
 
-Inline ghost-text completions are not included yet. VS Code exposes those through the separate `InlineCompletionItemProvider` API; registering a chat provider does not make its models available for inline suggestions. See the roadmap and [issue #8](https://github.com/svg153/nan-vscode/issues/8).
+Inline ghost-text completions are opt-in and off by default. Set `nanBuilders.completionModel` to a model ID returned by `/v1/models` and the extension registers an `InlineCompletionItemProvider` for file-scheme documents. Each suggestion is one `POST {apiBaseUrl}/completions` request carrying only the last 4,000 characters before the cursor, capped at 64 completion tokens and 1,000 suggestion characters, and aborted as soon as you keep typing; HTTP errors, network failures, and empty or malformed responses never surface stale text. Quality depends on the chosen model, and while enabled each pause while typing can send an extra billed request that local usage history does not count yet (see [issue #7](https://github.com/svg153/nan-vscode/issues/7)).
 
 ## Architecture
 
@@ -180,10 +182,9 @@ The provider architecture was checked against existing open-source integrations 
 
 ## Roadmap
 
-1. Add an opt-in, cancellable inline completion provider for low-latency models ([issue #8](https://github.com/svg153/nan-vscode/issues/8)).
-2. Evaluate native NaN MCP registration after the core provider is stable.
-3. Move capability metadata to server-provided metadata when NaN exposes it.
-4. Publish to the VS Code Marketplace only after naming, branding, publisher ownership, and support expectations are agreed with NaN Builders.
+1. Evaluate native NaN MCP registration after the core provider is stable.
+2. Move capability metadata to server-provided metadata when NaN exposes it.
+3. Publish to the VS Code Marketplace only after naming, branding, publisher ownership, and support expectations are agreed with NaN Builders.
 
 ## License
 

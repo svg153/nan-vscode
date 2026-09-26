@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { NAN_DASHBOARD_URL, NAN_DOCS_URL, PROVIDER_VENDOR, SECRET_API_KEY, DEFAULT_API_BASE_URL } from "./constants";
 import { configureDiagnosticFile, diagnostic } from "./diagnostics";
+import { NanInlineCompletionProvider } from "./inlineCompletionProvider";
 import { NanChatModelProvider } from "./provider";
 import { AccountUsageService, accountModelRows } from "./accountUsage";
 import { compactTokens } from "./quotaCatalog";
@@ -12,6 +13,10 @@ export function activate(context: vscode.ExtensionContext): {
   clearTestApiKey(): Promise<void>;
   readTestUsageHistory(): unknown;
   clearTestUsageHistory(): Promise<boolean>;
+  provideInlineTest(
+    document: vscode.TextDocument,
+    position: vscode.Position,
+  ): Promise<vscode.InlineCompletionItem[] | undefined>;
 } | undefined {
   const diagnosticsEnabled = vscode.workspace
     .getConfiguration("nanBuilders")
@@ -45,6 +50,7 @@ export function activate(context: vscode.ExtensionContext): {
   const usage = new UsageTracker(context.globalState, account);
   diagnostic("activate.usageTracker.created");
   const provider = new NanChatModelProvider(context, usage);
+  const inlineCompletions = new NanInlineCompletionProvider(context.secrets);
   diagnostic("activate.provider.created");
 
   const refreshAccountUsage = async (options: { force?: boolean; manual?: boolean } = {}): Promise<void> => {
@@ -64,6 +70,7 @@ export function activate(context: vscode.ExtensionContext): {
   context.subscriptions.push(
     usage,
     provider,
+    vscode.languages.registerInlineCompletionItemProvider({ scheme: "file" }, inlineCompletions),
     vscode.lm.registerLanguageModelChatProvider(PROVIDER_VENDOR, provider),
     vscode.commands.registerCommand("nanBuilders.manage", () => manageProvider(context, provider, refreshAccountUsage)),
     vscode.commands.registerCommand("nanBuilders.refreshModels", async () => {
@@ -147,6 +154,19 @@ export function activate(context: vscode.ExtensionContext): {
         clearTestApiKey: () => provider.clearApiKey(),
         readTestUsageHistory: () => context.globalState.get("nanBuilders.localUsageHistory"),
         clearTestUsageHistory: () => usage.clearHistory(),
+        provideInlineTest: async (document, position) => {
+          const source = new vscode.CancellationTokenSource();
+          try {
+            return await inlineCompletions.provideInlineCompletionItems(
+              document,
+              position,
+              { triggerKind: vscode.InlineCompletionTriggerKind.Invoke, selectedCompletionInfo: undefined },
+              source.token,
+            );
+          } finally {
+            source.dispose();
+          }
+        },
       }
     : undefined;
 }

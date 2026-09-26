@@ -96,6 +96,11 @@
           "type": "boolean",
           "default": false,
           "description": "Also show model IDs returned by NaN that are not yet in this extension's metadata catalog. Disabled by default because an unknown ID may be a non-chat endpoint; when enabled, unknown models are exposed without Agent tool-calling or vision capability."
+        },
+        "nanBuilders.completionModel": {
+          "type": "string",
+          "default": "",
+          "description": "Model ID for opt-in inline (ghost-text) completions. Empty disables the feature and no completion request is sent. Requests use POST /completions with the last 4,000 characters before the cursor, are aborted when you keep typing, and never show stale text."
         }
       }
     }
