@@ -38,8 +38,14 @@ export class NanInlineCompletionProvider implements vscode.InlineCompletionItemP
         return undefined;
       }
 
+      // Register the listener before any further check so a cancellation in the
+      // gap cannot be missed (the token returns no-op events once cancelled);
+      // re-check and abort for cancellations that already happened.
       const controller = new AbortController();
       const cancellation = token.onCancellationRequested(() => controller.abort());
+      if (token.isCancellationRequested) {
+        controller.abort();
+      }
       try {
         const outcome = await requestInlineCompletion({
           baseUrl: vscode.workspace
@@ -60,7 +66,7 @@ export class NanInlineCompletionProvider implements vscode.InlineCompletionItemP
                 ...(outcome.status !== undefined ? { status: outcome.status } : {}),
               },
         );
-        if (!outcome.ok || token.isCancellationRequested) {
+        if (!outcome.ok || controller.signal.aborted || token.isCancellationRequested) {
           return undefined;
         }
         return [{ insertText: outcome.text, range: new vscode.Range(position, position) }];
