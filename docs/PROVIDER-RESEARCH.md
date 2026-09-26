@@ -14,10 +14,10 @@ VS Code does not currently expose a documented usage-reporting callback for thir
 
 ## Inline completions
 
-Chat providers do not automatically provide ghost text. Inline suggestions use the separate InlineCompletionItemProvider API. The opt-in research/PoC is tracked in issue [#8](https://github.com/svg153/nan-vscode/issues/8), with cancellation, bounded context, latency, and model selection as acceptance criteria.
+Chat providers do not automatically provide ghost text. Inline suggestions use the separate InlineCompletionItemProvider API. The extension now ships opt-in ghost-text completions through the legacy `POST /v1/completions` endpoint: they stay disabled unless `nanBuilders.completionModel` is set, bound prompt and suggestion context, honor request cancellation, and show no text on any failure. This implements the research/PoC tracked in issue [#8](https://github.com/svg153/nan-vscode/issues/8).
 
 ## Product boundary
 
 - The current extension supports native Chat and Agent mode, model discovery, streaming, tool calls, vision metadata, SecretStorage, and remote/WSL UI-host behavior.
-- It does not claim account quota, browser-session reuse, or inline completions.
+- It does not claim account quota or browser-session reuse; inline ghost-text completions exist but are opt-in and off by default.
 - The extension remains community-maintained until NaN Builders approves official branding and publisher ownership.
