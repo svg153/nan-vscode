@@ -51,7 +51,9 @@ export async function run(): Promise<void> {
           );
         };
         if (String(completionRequest.prompt ?? "").includes("CANCEL_LATE")) {
-          // Respuesta lenta para que el test cancele mientras la solicitud está en vuelo.
+          // Cancel exactly when the server receives the request (in-flight, deterministic)
+          // and answer late for anyone still listening.
+          testApi?.cancelInlineTest();
           setTimeout(sendCompletion, 3_000);
         } else {
           sendCompletion();
@@ -112,8 +114,10 @@ export async function run(): Promise<void> {
     provideInlineTest(
       document: vscode.TextDocument,
       position: vscode.Position,
-      cancelAfterMs?: number,
+      options?: { cancelDuringStartup?: boolean },
     ): Promise<vscode.InlineCompletionItem[] | undefined>;
+    cancelInlineTest(): void;
+    getInlineRegistrationTest(): vscode.DocumentSelector | undefined;
   } | undefined;
   let previousBaseUrl: string | undefined;
   let previousCompletionModel: string | undefined;
@@ -130,8 +134,10 @@ export async function run(): Promise<void> {
       provideInlineTest(
         document: vscode.TextDocument,
         position: vscode.Position,
-        cancelAfterMs?: number,
+        options?: { cancelDuringStartup?: boolean },
       ): Promise<vscode.InlineCompletionItem[] | undefined>;
+      cancelInlineTest(): void;
+      getInlineRegistrationTest(): vscode.DocumentSelector | undefined;
     }>("svg153.nan-builders-vscode");
     assert.ok(extension, "NaN Builders extension is not loaded in the development host.");
     assert.deepEqual(extension.packageJSON.extensionKind, ["workspace", "ui"]);
@@ -232,6 +238,11 @@ export async function run(): Promise<void> {
     fs.writeFileSync(inlinePath, "const answer = ", "utf8");
     const inlineDoc = await vscode.workspace.openTextDocument(inlinePath);
     assert.equal(inlineDoc.uri.scheme, "file");
+    assert.deepEqual(
+      testApi.getInlineRegistrationTest(),
+      [{ scheme: "file" }],
+      "Inline provider must be registered with a file-scheme selector.",
+    );
     const cursor = inlineDoc.positionAt(inlineDoc.getText().length);
     const items = await testApi.provideInlineTest(inlineDoc, cursor);
     assert.equal(completionRequests, 1, "Expected exactly one POST /completions request.");
@@ -249,22 +260,22 @@ export async function run(): Promise<void> {
     assert.equal(inlineRange.end.line, cursor.line);
     assert.equal(inlineRange.end.character, cursor.character);
 
-    // Cancelación a nivel de proveedor: el token se cancela mientras la solicitud
-    // está en vuelo y el proveedor devuelve undefined (sin insertar texto).
+    // Cancelación a nivel de proveedor: el token se cancela en cuanto el mock
+    // recibe la solicitud (en vuelo) y el proveedor devuelve undefined sin texto.
     const cancelPath = path.join(tempDir, "cancel.js");
     fs.writeFileSync(cancelPath, "// CANCEL_LATE", "utf8");
     const cancelDoc = await vscode.workspace.openTextDocument(cancelPath);
     const cancelItems = await testApi.provideInlineTest(
       cancelDoc,
       cancelDoc.positionAt(cancelDoc.getText().length),
-      50,
     );
     assert.equal(cancelItems, undefined, "Cancelled request must not yield items.");
     assert.equal(completionRequests, 2, "Cancellation must not skip the request itself.");
 
-    // Cancelación durante el arranque (antes de registrar el puente de cancelación):
-    // el token cancelado nunca debe llegar a emitir una solicitud.
-    const earlyCancelItems = await testApi.provideInlineTest(inlineDoc, cursor, 0);
+    // Cancelación durante el arranque: el token se cancela exactamente en el
+    // límite de secrets.get, tras la comprobación de entrada y antes de la
+    // solicitud, sin depender de temporizadores.
+    const earlyCancelItems = await testApi.provideInlineTest(inlineDoc, cursor, { cancelDuringStartup: true });
     assert.equal(earlyCancelItems, undefined, "Token cancelled during startup must not yield items.");
     assert.equal(completionRequests, 2, "Token cancelled during startup must not send requests.");
 
