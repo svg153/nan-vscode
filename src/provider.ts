@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { DEFAULT_API_BASE_URL, SECRET_API_KEY } from "./constants";
 import { diagnostic } from "./diagnostics";
-import { filterDiscoveredModelIds, getKnownModel, toDisplayMetadata } from "./modelCatalog";
+import { filterDiscoveredModelIds, getKnownModel, reasoningDescription, toDisplayMetadata } from "./modelCatalog";
 import { OpenAIStreamDecoder } from "./openai/stream";
 import { buildToolNameMappings, sanitizeSchema, sanitizeToolName } from "./openai/tooling";
 import type { OpenAIContentPart, OpenAIMessage, OpenAIToolDefinition, OpenAIUsage } from "./openai/types";
@@ -370,9 +370,12 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       maxInputTokens: Math.max(1, metadata.contextWindow - metadata.maxOutputTokens),
       maxOutputTokens: metadata.maxOutputTokens,
       detail: known ? "NaN Builders" : "NaN Builders - metadata unknown",
-      tooltip: known
-        ? `NaN Builders hosted ${metadata.name}`
-        : "Discovered from NaN Builders. Tool calling is disabled until metadata is known.",
+      tooltip: [
+        known
+          ? `NaN Builders hosted ${metadata.name}`
+          : "Discovered from NaN Builders. Tool calling is disabled until metadata is known.",
+        reasoningDescription(metadata),
+      ].join("\n"),
       capabilities: {
         imageInput: metadata.imageInput,
         toolCalling: metadata.toolCalling,
