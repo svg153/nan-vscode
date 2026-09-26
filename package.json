@@ -64,7 +64,7 @@
       {
         "command": "nanBuilders.showUsage",
         "category": "NaN Builders",
-        "title": "Show Local Usage History"
+        "title": "Show Usage"
       }
     ],
     "configuration": {
@@ -85,7 +85,7 @@
         "nanBuilders.showStatusBar": {
           "type": "boolean",
           "default": true,
-          "description": "Show local NaN request usage in the VS Code status bar."
+          "description": "Show NaN usage in the VS Code status bar: account-wide monthly quota % when an API key is configured, otherwise local session usage."
         },
         "nanBuilders.diagnostics.enabled": {
           "type": "boolean",
