@@ -20,6 +20,7 @@ Use [NaN Builders](https://nan.builders/) models in VS Code Chat and Agent mode 
 - Streamed tool calls mapped back to VS Code so supported models can run in Agent mode.
 - Image inputs for catalogued vision-capable models.
 - Local status-bar usage when the API returns OpenAI-compatible streaming usage metadata.
+- Account-wide monthly quota in the status bar via `GET /v1/usage` when an API key is configured, with local-session usage as fallback.
 - Conservative handling of newly discovered model IDs that are not yet in the local metadata catalog.
 - Remote-workspace support: the provider prefers the workspace extension host and falls back to the local UI host.
 
@@ -61,7 +62,7 @@ Available settings:
 | --- | --- | --- |
 | `nanBuilders.apiBaseUrl` | `https://api.nan.builders/v1` | OpenAI-compatible API base URL. Change only for development or trusted compatible servers. |
 | `nanBuilders.modelCacheSeconds` | `300` | Model discovery cache duration. |
-| `nanBuilders.showStatusBar` | `true` | Show local session usage in the status bar. |
+| `nanBuilders.showStatusBar` | `true` | Show usage in the status bar: account-wide monthly quota % when an API key is configured, otherwise local session usage. |
 | `nanBuilders.includeUnknownModels` | `false` | Expose unknown IDs without tool or vision metadata. |
 
 ## Remote workspaces
@@ -86,9 +87,21 @@ VS Code needs context-window, output-budget, image, and tool-calling metadata, w
 
 ## Usage and limitations
 
-The status bar shows token usage for the current VS Code session. **NaN Builders: Show Local Usage History** also shows per-model daily aggregates (UTC days) retained locally for 30 days (up to 1,000 model/day records); use **Clear local history** in that dialog to remove them. Only counts and model IDs are stored in VS Code extension storage—never prompts, completions, API keys, or request payloads.
+With an API key configured, the status bar shows the account-wide monthly quota for the most restricted model you have actually used this month (`$(graph) NaN NN%`), read from `GET /v1/usage`. **NaN Builders: Show Usage** shows per-model monthly usage for the current month with a refresh button, the local session history, provider management, and the NaN dashboard. Without an API key, the status bar and command fall back to local session usage.
 
-This is local observed usage, not account-wide quota. VS Code does not expose a documented usage-reporting callback for third-party chat providers, and NaN's published inference API reference currently has no account usage endpoint. This extension will not read browser cookies or reuse `nan-cli` sessions; see [issue #7](https://github.com/svg153/nan-vscode/issues/7).
+Account-wide usage details:
+
+- Requests are authenticated with the stored API key, never browser cookies or `nan-cli` sessions.
+- The window is the current calendar month (UTC), clamped client-side to the API's maximum of 90 days, with at most 500 rows per page and up to 3 pages merged.
+- Percentage labels come only from published monthly token caps (for example deepseek-v4-flash 3B, mimo 1B, glm5.3-flash 2B, qwen3.8-flash 500M). Models without a published monthly counter (qwen3.6, gemma4) show **No token counter**; glm5.3 shows its published caps but never a fabricated percentage.
+- The headline percentage is the most restricted monthly quota in use, never a sum across models.
+- `api_requests` counts are only meaningful from 2026-09-02, the API's data cutoff.
+- Usage refreshes are throttled client-side (60s between automatic refreshes, plus a 30 requests/minute limiter). A 429 response surfaces its `Retry-After` hint.
+- Errors never clear the last good snapshot; they are reported in the tooltip and command output.
+
+Local usage remains available regardless of the API: **NaN Builders: Show Usage** also shows per-model daily aggregates (UTC days) retained locally for 30 days (up to 1,000 model/day records); use **Clear local history** in that dialog to remove them. Only counts and model IDs are stored in VS Code extension storage—never prompts, completions, API keys, or request payloads.
+
+VS Code does not expose a documented usage-reporting callback for third-party chat providers, so local counts only cover turns where the API returned OpenAI-compatible streaming usage metadata; see [issue #7](https://github.com/svg153/nan-vscode/issues/7).
 
 Inline ghost-text completions are not included yet. VS Code exposes those through the separate `InlineCompletionItemProvider` API; registering a chat provider does not make its models available for inline suggestions. See the roadmap and [issue #8](https://github.com/svg153/nan-vscode/issues/8).
 
@@ -101,6 +114,8 @@ VS Code Chat / Agent
 LanguageModelChatProvider
         |
         +--> GET  /v1/models
+        |
+        +--> GET  /v1/usage
         |
         +--> POST /v1/chat/completions
                  |  SSE text
@@ -154,11 +169,10 @@ The provider architecture was checked against existing open-source integrations 
 
 ## Roadmap
 
-1. Add account-wide quota and rolling-window usage when NaN exposes a key-authenticated usage endpoint ([issue #7](https://github.com/svg153/nan-vscode/issues/7)).
-2. Add an opt-in, cancellable inline completion provider for low-latency models ([issue #8](https://github.com/svg153/nan-vscode/issues/8)).
-3. Evaluate native NaN MCP registration after the core provider is stable.
-4. Move capability metadata to server-provided metadata when NaN exposes it.
-5. Publish to the VS Code Marketplace only after naming, branding, publisher ownership, and support expectations are agreed with NaN Builders.
+1. Add an opt-in, cancellable inline completion provider for low-latency models ([issue #8](https://github.com/svg153/nan-vscode/issues/8)).
+2. Evaluate native NaN MCP registration after the core provider is stable.
+3. Move capability metadata to server-provided metadata when NaN exposes it.
+4. Publish to the VS Code Marketplace only after naming, branding, publisher ownership, and support expectations are agreed with NaN Builders.
 
 ## License
 
