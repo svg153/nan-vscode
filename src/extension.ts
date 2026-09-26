@@ -16,6 +16,7 @@ export function activate(context: vscode.ExtensionContext): {
   provideInlineTest(
     document: vscode.TextDocument,
     position: vscode.Position,
+    cancelAfterMs?: number,
   ): Promise<vscode.InlineCompletionItem[] | undefined>;
 } | undefined {
   const diagnosticsEnabled = vscode.workspace
@@ -154,8 +155,10 @@ export function activate(context: vscode.ExtensionContext): {
         clearTestApiKey: () => provider.clearApiKey(),
         readTestUsageHistory: () => context.globalState.get("nanBuilders.localUsageHistory"),
         clearTestUsageHistory: () => usage.clearHistory(),
-        provideInlineTest: async (document, position) => {
+        provideInlineTest: async (document, position, cancelAfterMs) => {
           const source = new vscode.CancellationTokenSource();
+          const cancelTimer =
+            typeof cancelAfterMs === "number" ? setTimeout(() => source.cancel(), cancelAfterMs) : undefined;
           try {
             return await inlineCompletions.provideInlineCompletionItems(
               document,
@@ -164,6 +167,9 @@ export function activate(context: vscode.ExtensionContext): {
               source.token,
             );
           } finally {
+            if (cancelTimer) {
+              clearTimeout(cancelTimer);
+            }
             source.dispose();
           }
         },

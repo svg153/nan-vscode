@@ -1,5 +1,8 @@
 import * as assert from "node:assert/strict";
+import * as fs from "node:fs";
 import * as http from "node:http";
+import * as os from "node:os";
+import * as path from "node:path";
 import * as vscode from "vscode";
 
 export async function run(): Promise<void> {
@@ -32,16 +35,27 @@ export async function run(): Promise<void> {
           return;
         }
         completionRequests += 1;
-        response.writeHead(200, { "Content-Type": "application/json" });
-        response.end(
-          JSON.stringify({
-            id: "cmpl-integration",
-            object: "text_completion",
-            created: 0,
-            model: completionRequest.model,
-            choices: [{ text: "INLINE_OK", index: 0, finish_reason: "stop" }],
-          }),
-        );
+        const sendCompletion = () => {
+          if (response.destroyed) {
+            return;
+          }
+          response.writeHead(200, { "Content-Type": "application/json" });
+          response.end(
+            JSON.stringify({
+              id: "cmpl-integration",
+              object: "text_completion",
+              created: 0,
+              model: completionRequest?.model,
+              choices: [{ text: "INLINE_OK", index: 0, finish_reason: "stop" }],
+            }),
+          );
+        };
+        if (String(completionRequest.prompt ?? "").includes("CANCEL_LATE")) {
+          // Respuesta lenta para que el test cancele mientras la solicitud está en vuelo.
+          setTimeout(sendCompletion, 3_000);
+        } else {
+          sendCompletion();
+        }
       });
       return;
     }
@@ -98,6 +112,7 @@ export async function run(): Promise<void> {
     provideInlineTest(
       document: vscode.TextDocument,
       position: vscode.Position,
+      cancelAfterMs?: number,
     ): Promise<vscode.InlineCompletionItem[] | undefined>;
   } | undefined;
   let previousBaseUrl: string | undefined;
@@ -105,6 +120,7 @@ export async function run(): Promise<void> {
   let config: vscode.WorkspaceConfiguration | undefined;
   let source: vscode.CancellationTokenSource | undefined;
   let timeout: NodeJS.Timeout | undefined;
+  let tempDir: string | undefined;
   try {
     const extension = vscode.extensions.getExtension<{
       setTestApiKey(key: string): Promise<void>;
@@ -114,6 +130,7 @@ export async function run(): Promise<void> {
       provideInlineTest(
         document: vscode.TextDocument,
         position: vscode.Position,
+        cancelAfterMs?: number,
       ): Promise<vscode.InlineCompletionItem[] | undefined>;
     }>("svg153.nan-builders-vscode");
     assert.ok(extension, "NaN Builders extension is not loaded in the development host.");
@@ -207,11 +224,14 @@ export async function run(): Promise<void> {
     }
 
     // Inline ghost-text: opt-in via nanBuilders.completionModel, bounded payload.
+    // Documentos con scheme "file" para cubrir el path registrado por el proveedor
+    // (registerInlineCompletionItemProvider({ scheme: "file" }, ...)).
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "nan-inline-"));
     await config.update("completionModel", "glm5.3-flash", vscode.ConfigurationTarget.Global);
-    const inlineDoc = await vscode.workspace.openTextDocument({
-      content: "const answer = ",
-      language: "javascript",
-    });
+    const inlinePath = path.join(tempDir, "inline.js");
+    fs.writeFileSync(inlinePath, "const answer = ", "utf8");
+    const inlineDoc = await vscode.workspace.openTextDocument(inlinePath);
+    assert.equal(inlineDoc.uri.scheme, "file");
     const cursor = inlineDoc.positionAt(inlineDoc.getText().length);
     const items = await testApi.provideInlineTest(inlineDoc, cursor);
     assert.equal(completionRequests, 1, "Expected exactly one POST /completions request.");
@@ -228,10 +248,24 @@ export async function run(): Promise<void> {
     assert.equal(inlineRange.start.character, cursor.character);
     assert.equal(inlineRange.end.line, cursor.line);
     assert.equal(inlineRange.end.character, cursor.character);
+
+    // Cancelación a nivel de proveedor: el token se cancela mientras la solicitud
+    // está en vuelo y el proveedor devuelve undefined (sin insertar texto).
+    const cancelPath = path.join(tempDir, "cancel.js");
+    fs.writeFileSync(cancelPath, "// CANCEL_LATE", "utf8");
+    const cancelDoc = await vscode.workspace.openTextDocument(cancelPath);
+    const cancelItems = await testApi.provideInlineTest(
+      cancelDoc,
+      cancelDoc.positionAt(cancelDoc.getText().length),
+      50,
+    );
+    assert.equal(cancelItems, undefined, "Cancelled request must not yield items.");
+    assert.equal(completionRequests, 2, "Cancellation must not skip the request itself.");
+
     // Disabled when the setting is empty: no request, no stale text.
     await config.update("completionModel", "", vscode.ConfigurationTarget.Global);
     assert.equal(await testApi.provideInlineTest(inlineDoc, cursor), undefined);
-    assert.equal(completionRequests, 1, "Disabled feature must not send requests.");
+    assert.equal(completionRequests, 2, "Disabled feature must not send requests.");
     assert.ifError(serverError);
 
     console.log("NaN Builders VS Code integration test passed (mock API; no real key used).");
@@ -244,6 +278,9 @@ export async function run(): Promise<void> {
     if (config) {
       await config.update("apiBaseUrl", previousBaseUrl, vscode.ConfigurationTarget.Global);
       await config.update("completionModel", previousCompletionModel, vscode.ConfigurationTarget.Global);
+    }
+    if (tempDir) {
+      fs.rmSync(tempDir, { recursive: true, force: true });
     }
     await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }
