@@ -7,6 +7,8 @@ import { UsageTracker } from "./usageTracker";
 export function activate(context: vscode.ExtensionContext): {
   setTestApiKey(key: string): Promise<void>;
   clearTestApiKey(): Promise<void>;
+  readTestUsageHistory(): unknown;
+  clearTestUsageHistory(): Promise<boolean>;
 } | undefined {
   const diagnosticsEnabled = vscode.workspace
     .getConfiguration("nanBuilders")
@@ -24,7 +26,7 @@ export function activate(context: vscode.ExtensionContext): {
     context.subscriptions.push({ dispose: () => clearInterval(heartbeat) });
   }
 
-  const usage = new UsageTracker();
+  const usage = new UsageTracker(context.globalState);
   diagnostic("activate.usageTracker.created");
   const provider = new NanChatModelProvider(context, usage);
   diagnostic("activate.provider.created");
@@ -41,9 +43,26 @@ export function activate(context: vscode.ExtensionContext): {
     vscode.commands.registerCommand("nanBuilders.showUsage", () => {
       const picker = vscode.window.createQuickPick<vscode.QuickPickItem>();
       picker.title = "NaN Builders usage and documented quotas";
-      picker.placeholder = "Published limits; local counters are not account-wide remaining quota.";
-      picker.items = usage.quotaItems();
+      picker.placeholder = "Published limits and this extension's local usage; not account-wide remaining quota.";
+      picker.items = [
+        ...usage.quotaItems(),
+        { kind: vscode.QuickPickItemKind.Separator, label: "Recent local daily history" },
+        ...usage.historyItems(),
+      ];
       picker.matchOnDescription = true;
+      picker.buttons = [{ iconPath: new vscode.ThemeIcon("trash"), tooltip: "Clear local usage history" }];
+      picker.onDidTriggerButton(async () => {
+        if (await usage.clearHistory()) {
+          picker.items = [
+            ...usage.quotaItems(),
+            { kind: vscode.QuickPickItemKind.Separator, label: "Recent local daily history" },
+            ...usage.historyItems(),
+          ];
+          vscode.window.showInformationMessage("NaN Builders local usage history cleared.");
+        } else {
+          vscode.window.showErrorMessage("Could not clear NaN Builders local usage history from VS Code storage.");
+        }
+      });
       picker.onDidHide(() => picker.dispose());
       picker.show();
     }),
@@ -61,6 +80,8 @@ export function activate(context: vscode.ExtensionContext): {
     ? {
         setTestApiKey: (key) => provider.setApiKey(key),
         clearTestApiKey: () => provider.clearApiKey(),
+        readTestUsageHistory: () => context.globalState.get("nanBuilders.localUsageHistory"),
+        clearTestUsageHistory: () => usage.clearHistory(),
       }
     : undefined;
 }

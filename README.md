@@ -86,7 +86,9 @@ VS Code needs context-window, output-budget, image, and tool-calling metadata, w
 
 ## Usage and limitations
 
-The status bar is an extension-local counter for the current VS Code session. VS Code does not currently expose a documented usage-reporting callback for third-party chat providers, so account-wide quota is not available here. A future remote-usage feature must use a stable NaN API-key-authenticated endpoint; this extension will not read browser cookies or reuse `nan-cli` sessions.
+The status bar shows token usage for the current VS Code session. **NaN Builders: Show Local Usage History** also shows per-model daily aggregates (UTC days) retained locally for 30 days (up to 1,000 model/day records); use **Clear local history** in that dialog to remove them. Only counts and model IDs are stored in VS Code extension storage—never prompts, completions, API keys, or request payloads.
+
+This is local observed usage, not account-wide quota. VS Code does not expose a documented usage-reporting callback for third-party chat providers, and NaN's published inference API reference currently has no account usage endpoint. This extension will not read browser cookies or reuse `nan-cli` sessions; see [issue #7](https://github.com/svg153/nan-vscode/issues/7).
 
 Inline ghost-text completions are not included yet. VS Code exposes those through the separate `InlineCompletionItemProvider` API; registering a chat provider does not make its models available for inline suggestions. See the roadmap and [issue #8](https://github.com/svg153/nan-vscode/issues/8).
 

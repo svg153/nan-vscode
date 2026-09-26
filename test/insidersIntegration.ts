@@ -65,6 +65,8 @@ export async function run(): Promise<void> {
   let testApi: {
     setTestApiKey(key: string): Promise<void>;
     clearTestApiKey(): Promise<void>;
+    readTestUsageHistory(): unknown;
+    clearTestUsageHistory(): Promise<boolean>;
   } | undefined;
   let previousBaseUrl: string | undefined;
   let config: vscode.WorkspaceConfiguration | undefined;
@@ -74,6 +76,8 @@ export async function run(): Promise<void> {
     const extension = vscode.extensions.getExtension<{
       setTestApiKey(key: string): Promise<void>;
       clearTestApiKey(): Promise<void>;
+      readTestUsageHistory(): unknown;
+      clearTestUsageHistory(): Promise<boolean>;
     }>("svg153.nan-builders-vscode");
     assert.ok(extension, "NaN Builders extension is not loaded in the development host.");
     assert.deepEqual(extension.packageJSON.extensionKind, ["workspace", "ui"]);
@@ -84,6 +88,7 @@ export async function run(): Promise<void> {
     previousBaseUrl = config.get<string>("apiBaseUrl");
     await config.update("apiBaseUrl", `http://127.0.0.1:${address.port}/v1`, vscode.ConfigurationTarget.Global);
     await testApi.setTestApiKey("integration-test-key");
+    assert.equal(await testApi.clearTestUsageHistory(), true);
 
     source = new vscode.CancellationTokenSource();
     timeout = setTimeout(() => source?.cancel(), 10_000);
@@ -107,6 +112,16 @@ export async function run(): Promise<void> {
     assert.equal(chatRequest?.model, "glm5.3-flash");
     assert.equal(chatRequest?.stream, true);
     assert.equal(chatRequest?.reasoning_effort, "low");
+    assert.deepEqual(testApi.readTestUsageHistory(), [{
+      date: new Date().toISOString().slice(0, 10),
+      modelId: "glm5.3-flash",
+      requests: 1,
+      promptTokens: 2,
+      completionTokens: 1,
+    }]);
+
+    assert.equal(await testApi.clearTestUsageHistory(), true);
+    assert.deepEqual(testApi.readTestUsageHistory(), []);
 
     assert.ok(source);
     const requestToken = source.token;
