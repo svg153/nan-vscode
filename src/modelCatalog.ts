@@ -49,6 +49,15 @@ const CHAT_MODELS: readonly ModelMetadata[] = [
     reasoningEffortValues: [],
   },
   {
+    id: "mimo-v2.6-flash",
+    name: "Xiaomi MiMo V2.6 Flash",
+    contextWindow: 1_048_576,
+    maxOutputTokens: 32_768,
+    imageInput: true,
+    toolCalling: true,
+    reasoningEffortValues: [],
+  },
+  {
     id: "gemma4",
     name: "Gemma 4",
     contextWindow: 262_144,
