@@ -12,6 +12,14 @@ test("shows documented limits beside this extension's local-only usage", () => {
   assert.match(glm.detail, /not account-wide usage or remaining quota/);
 });
 
+test("shows Mimo V2.6 Flash's published monthly quota", () => {
+  const items = quotaSummaryItems(new Map());
+  const mimo = items.find((item) => item.label === "Xiaomi MiMo V2.6 Flash");
+  assert.ok(mimo);
+  assert.match(mimo.description, /1\.0B tokens per month/);
+  assert.doesNotMatch(mimo.description, /billing period/);
+});
+
 test("does not invent an uncapped quota when NaN has not published one", () => {
   const items = quotaSummaryItems(new Map());
   const gemma = items.find((item) => item.label === "Gemma 4");

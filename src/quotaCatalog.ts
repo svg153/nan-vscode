@@ -1,17 +1,19 @@
 import { knownChatModelIds, toDisplayMetadata } from "./modelCatalog";
 
 export interface ModelQuotaLimit {
-  readonly billingPeriodTokens?: number;
+  readonly tokens: number;
+  readonly period: "month" | "billing period";
   readonly rollingTokens?: number;
   readonly rollingHours?: number;
 }
 
 const MODEL_QUOTA_LIMITS: Readonly<Record<string, ModelQuotaLimit>> = {
-  "deepseek-v4-flash": { billingPeriodTokens: 3_000_000_000 },
-  "glm5.3-flash": { billingPeriodTokens: 2_000_000_000 },
-  "qwen3.8-flash": { billingPeriodTokens: 500_000_000 },
-  "mimo-v2.5": { billingPeriodTokens: 1_000_000_000 },
-  "glm5.3": { billingPeriodTokens: 3_000_000_000, rollingTokens: 400_000_000, rollingHours: 4 },
+  "deepseek-v4-flash": { tokens: 3_000_000_000, period: "month" },
+  "glm5.3-flash": { tokens: 2_000_000_000, period: "month" },
+  "qwen3.8-flash": { tokens: 500_000_000, period: "month" },
+  "mimo-v2.5": { tokens: 1_000_000_000, period: "month" },
+  "mimo-v2.6-flash": { tokens: 1_000_000_000, period: "month" },
+  "glm5.3": { tokens: 3_000_000_000, period: "billing period", rollingTokens: 400_000_000, rollingHours: 4 },
 };
 
 export interface QuotaSummaryItem {
@@ -26,7 +28,7 @@ export function quotaSummaryItems(localUsage: ReadonlyMap<string, { requests: nu
     const limit = MODEL_QUOTA_LIMITS[modelId];
     const local = localUsage.get(modelId) ?? { requests: 0, tokens: 0 };
     const cap = limit
-      ? `${limit.billingPeriodTokens ? `${compactTokens(limit.billingPeriodTokens)} per billing period` : ""}` +
+      ? `${compactTokens(limit.tokens)} per ${limit.period}` +
         `${limit.rollingTokens ? ` · ${compactTokens(limit.rollingTokens)} per rolling ${limit.rollingHours}h` : ""}`
       : "No published quota limit";
 

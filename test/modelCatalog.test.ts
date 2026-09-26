@@ -8,10 +8,11 @@ test("filters known non-chat endpoints and deduplicates discovered models", () =
       "glm5.3-flash",
       "qwen3-embedding",
       "glm5.3-flash",
+      "mimo-v2.6-flash",
       "new-chat-model",
       "flux-2-klein",
     ], true),
-    ["glm5.3-flash", "new-chat-model"],
+    ["glm5.3-flash", "mimo-v2.6-flash", "new-chat-model"],
   );
 });
 
@@ -39,6 +40,18 @@ test("does not advertise XML-only tool formats as VS Code tool calling", () => {
 test("premium model metadata is available when the API key reports it", () => {
   assert.ok(knownChatModelIds().includes("glm5.3"));
   assert.equal(toDisplayMetadata("glm5.3").premium, true);
+});
+
+test("Mimo V2.6 Flash uses documented limits and supported chat capabilities", () => {
+  const model = toDisplayMetadata("mimo-v2.6-flash");
+  assert.ok(knownChatModelIds().includes(model.id));
+  assert.equal(model.name, "Xiaomi MiMo V2.6 Flash");
+  assert.equal(model.contextWindow, 1_048_576);
+  assert.equal(model.maxOutputTokens, 32_768);
+  assert.equal(model.imageInput, true);
+  assert.equal(model.toolCalling, true);
+  assert.deepEqual(model.reasoningEffortValues, []);
+  assert.match(reasoningDescription(model), /model-managed/);
 });
 
 test("reasoning metadata distinguishes adjustable, model-managed, and unknown models", () => {
