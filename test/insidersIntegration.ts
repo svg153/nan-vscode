@@ -243,7 +243,7 @@ export async function run(): Promise<void> {
     await testApi?.clearTestApiKey();
     if (config) {
       await config.update("apiBaseUrl", previousBaseUrl, vscode.ConfigurationTarget.Global);
-      await config.update("completionModel", previousCompletionModel ?? "", vscode.ConfigurationTarget.Global);
+      await config.update("completionModel", previousCompletionModel, vscode.ConfigurationTarget.Global);
     }
     await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }

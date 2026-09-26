@@ -74,13 +74,11 @@ export function parseCompletionResponse(payload: unknown): CompletionParseResult
     return { ok: false, reason: "malformed" };
   }
   const normalized = rawText.replace(/\r\n?/g, "\n").replace(/^\n+/, "");
-  if (!normalized.trim()) {
+  const truncated = normalized.length > MAX_SUGGESTION_CHARS ? normalized.slice(0, MAX_SUGGESTION_CHARS) : normalized;
+  if (!truncated.trim()) {
     return { ok: false, reason: "empty" };
   }
-  return {
-    ok: true,
-    text: normalized.length > MAX_SUGGESTION_CHARS ? normalized.slice(0, MAX_SUGGESTION_CHARS) : normalized,
-  };
+  return { ok: true, text: truncated };
 }
 
 /**

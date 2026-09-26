@@ -117,6 +117,14 @@ test("parseCompletionResponse truncates oversized suggestions", () => {
   }
 });
 
+test("parseCompletionResponse rejects suggestions that are whitespace-only after truncation", () => {
+  const text = " ".repeat(MAX_SUGGESTION_CHARS + 100) + "code();";
+  assert.deepEqual(parseCompletionResponse({ choices: [{ text }] }), {
+    ok: false,
+    reason: "empty",
+  });
+});
+
 test("requestInlineCompletion posts a bounded payload to {base}/completions", async () => {
   let capturedUrl = "";
   let capturedInit: RequestInit | undefined;
