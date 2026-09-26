@@ -262,6 +262,12 @@ export async function run(): Promise<void> {
     assert.equal(cancelItems, undefined, "Cancelled request must not yield items.");
     assert.equal(completionRequests, 2, "Cancellation must not skip the request itself.");
 
+    // Cancelación durante el arranque (antes de registrar el puente de cancelación):
+    // el token cancelado nunca debe llegar a emitir una solicitud.
+    const earlyCancelItems = await testApi.provideInlineTest(inlineDoc, cursor, 0);
+    assert.equal(earlyCancelItems, undefined, "Token cancelled during startup must not yield items.");
+    assert.equal(completionRequests, 2, "Token cancelled during startup must not send requests.");
+
     // Disabled when the setting is empty: no request, no stale text.
     await config.update("completionModel", "", vscode.ConfigurationTarget.Global);
     assert.equal(await testApi.provideInlineTest(inlineDoc, cursor), undefined);
