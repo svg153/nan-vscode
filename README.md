@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/svg153/nan-vscode/actions/workflows/ci.yml/badge.svg)](https://github.com/svg153/nan-vscode/actions/workflows/ci.yml)
 [![Release](https://github.com/svg153/nan-vscode/actions/workflows/release.yml/badge.svg)](https://github.com/svg153/nan-vscode/actions/workflows/release.yml)
+[![Marketplace](https://img.shields.io/badge/VS%20Code-Marketplace-blue?logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=svg153.nan-builders-vscode)
 
 Use [NaN Builders](https://nan.builders/) models in VS Code Chat and Agent mode through the native `LanguageModelChatProvider` API.
 
@@ -25,6 +26,16 @@ Use [NaN Builders](https://nan.builders/) models in VS Code Chat and Agent mode 
 - Remote-workspace support: the provider prefers the workspace extension host and falls back to the local UI host.
 
 ## Install
+
+### From the Marketplace
+
+Search for **NaN Builders for VS Code** in the Extensions view, or run:
+
+```bash
+code --install-extension svg153.nan-builders-vscode
+```
+
+The listing is community-maintained under the `svg153` publisher and is not an official NaN Builders product.
 
 ### From a release VSIX
 

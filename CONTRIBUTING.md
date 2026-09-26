@@ -34,7 +34,46 @@ All files are covered by `.github/CODEOWNERS`. The repository owner reviews exte
 
 ## Releases and documentation
 
-Releases are automated by Semantic Release from `main`. The generated [`CHANGELOG.md`](CHANGELOG.md) records release notes from Conventional Commits; do not edit generated release entries by hand.
+Releases are automated by Semantic Release from `main`. The generated [`CHANGELOG.md`](CHANGELOG.md) records release notes from Conventional Commits; do not edit generated release entries by hand. The version is always read from the package being built; never hard-code a release number.
+
+### Marketplace publishing
+
+The release workflow attaches the versioned VSIX to the GitHub Release first, then publishes the same VSIX to the VS Code Marketplace as `svg153.nan-builders-vscode`:
+
+- The repository secret `VSCE_PAT` must hold an Azure DevOps personal access token with the **Marketplace: Manage** scope for the `svg153` publisher (`vsce verify-pat svg153` runs first). The value is read from the `VSCE_PAT` environment variable, is masked in logs, and must never be committed or printed.
+- If `VSCE_PAT` is missing or rejected, the Marketplace step fails with an explicit error and the GitHub Release VSIX remains available for recovery.
+- Microsoft Entra ID workload identity federation (`vsce publish --azure-credential`) is the preferred long-term credential once the publisher is linked to Entra ID; global Azure DevOps PATs are scheduled for retirement on 2026-12-01.
+- The listing is a community publication under `svg153`; keep README and Marketplace wording accurate about ownership and support.
+
+### Rollback
+
+To withdraw a bad Marketplace release, unpublish that exact version and ship a fix through the normal flow:
+
+```bash
+npx vsce unpublish svg153.nan-builders-vscode@<version>
+```
+
+Keep the GitHub Release in place as the artifact and audit trail. Never rewrite or delete published Marketplace versions by re-tagging old commits.
+
+### Manual VSIX validation
+
+```bash
+npm run check
+npm run package
+npx vsce ls --no-dependencies
+```
+
+Confirm the file list contains only runtime output, branding, README, LICENSE, and `package.json`—no source, tests, CI files, or editor config.
+
+### Disposable-profile smoke test
+
+Install the candidate VSIX into a throwaway profile instead of your daily one:
+
+```bash
+code --user-data-dir "$TEMP/nan-vscode-profile" --extensions-dir "$TEMP/nan-vscode-exts" --install-extension nan-builders-vscode-<version>.vsix
+```
+
+In that window verify activation, **NaN Builders: Manage Provider**, Chat/Agent model selection, remote-host fallback, and uninstall/reinstall. Delete both temp directories afterwards.
 
 Project policy and research live in [`docs/`](docs/):
 
