@@ -168,6 +168,45 @@ test("requestInlineCompletion maps HTTP failures without throwing", async () => 
   }
 });
 
+test("requestInlineCompletion cancels the response body on HTTP failures", async () => {
+  let cancelled = false;
+  const cancelling = {
+    ok: false,
+    status: 503,
+    body: {
+      cancel: () => {
+        cancelled = true;
+        return Promise.resolve();
+      },
+    },
+  } as unknown as Response;
+  const fetchImpl = (() => Promise.resolve(cancelling)) as unknown as typeof fetch;
+  const outcome = await requestInlineCompletion({
+    baseUrl: "https://api.example.com/v1",
+    apiKey: "sk-test",
+    userAgent: "test",
+    request: { model: "m", prompt: "p", max_tokens: 64, temperature: 0 },
+    fetchImpl,
+  });
+  assert.deepEqual(outcome, { ok: false, reason: "http", status: 503 });
+  assert.equal(cancelled, true);
+
+  const locked = {
+    ok: false,
+    status: 400,
+    body: { cancel: () => Promise.reject(new Error("locked")) },
+  } as unknown as Response;
+  const lockedFetch = (() => Promise.resolve(locked)) as unknown as typeof fetch;
+  const lockedOutcome = await requestInlineCompletion({
+    baseUrl: "https://api.example.com/v1",
+    apiKey: "sk-test",
+    userAgent: "test",
+    request: { model: "m", prompt: "p", max_tokens: 64, temperature: 0 },
+    fetchImpl: lockedFetch,
+  });
+  assert.deepEqual(lockedOutcome, { ok: false, reason: "http", status: 400 });
+});
+
 test("requestInlineCompletion reports cancelled when already aborted without fetching", async () => {
   let called = false;
   const fetchImpl = (() => {

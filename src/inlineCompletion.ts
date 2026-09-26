@@ -116,6 +116,11 @@ export async function requestInlineCompletion(options: {
     return options.signal?.aborted ? { ok: false, reason: "cancelled" } : { ok: false, reason: "network" };
   }
   if (!response.ok) {
+    try {
+      await response.body?.cancel();
+    } catch {
+      // The body may already be consumed or locked; nothing to release.
+    }
     return { ok: false, reason: "http", status: response.status };
   }
   try {
