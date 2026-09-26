@@ -38,8 +38,14 @@ export function activate(context: vscode.ExtensionContext): {
       provider.refresh();
       vscode.window.showInformationMessage("NaN Builders model list refreshed.");
     }),
-    vscode.commands.registerCommand("nanBuilders.showUsage", async () => {
-      await vscode.window.showInformationMessage(usage.summary(), { modal: true });
+    vscode.commands.registerCommand("nanBuilders.showUsage", () => {
+      const picker = vscode.window.createQuickPick<vscode.QuickPickItem>();
+      picker.title = "NaN Builders usage and documented quotas";
+      picker.placeholder = "Published limits; local counters are not account-wide remaining quota.";
+      picker.items = usage.quotaItems();
+      picker.matchOnDescription = true;
+      picker.onDidHide(() => picker.dispose());
+      picker.show();
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("nanBuilders")) {

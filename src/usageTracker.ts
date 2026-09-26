@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { diagnostic } from "./diagnostics";
 import type { OpenAIUsage } from "./openai/types";
+import { quotaSummaryItems } from "./quotaCatalog";
 
 export class UsageTracker implements vscode.Disposable {
   private readonly item: vscode.StatusBarItem;
@@ -8,6 +9,7 @@ export class UsageTracker implements vscode.Disposable {
   private completionTokens = 0;
   private requests = 0;
   private lastModel: string | undefined;
+  private readonly modelUsage = new Map<string, { requests: number; tokens: number }>();
 
   constructor() {
     diagnostic("statusBar.create.begin");
@@ -22,7 +24,15 @@ export class UsageTracker implements vscode.Disposable {
     this.lastModel = modelId;
     this.promptTokens += usage?.prompt_tokens ?? 0;
     this.completionTokens += usage?.completion_tokens ?? 0;
+    const model = this.modelUsage.get(modelId) ?? { requests: 0, tokens: 0 };
+    model.requests += 1;
+    model.tokens += (usage?.prompt_tokens ?? 0) + (usage?.completion_tokens ?? 0);
+    this.modelUsage.set(modelId, model);
     this.render();
+  }
+
+  quotaItems(): vscode.QuickPickItem[] {
+    return quotaSummaryItems(this.modelUsage);
   }
 
   refreshVisibility(): void {
@@ -47,7 +57,9 @@ export class UsageTracker implements vscode.Disposable {
       `Total tokens: ${total.toLocaleString()}`,
       model,
       "",
-      "This is local session usage only, not your account-wide NaN quota.",
+      ...this.quotaItems().map((item) => `${item.label}: ${item.description}`),
+      "",
+      "Local usage is only what this VS Code extension observed this session; it is not account-wide usage or remaining quota.",
     ].join("\n");
   }
 
