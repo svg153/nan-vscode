@@ -32,20 +32,11 @@ const CHAT_MODELS: readonly ModelMetadata[] = [
   {
     id: "qwen3.8-flash",
     name: "Qwen 3.8 Flash",
-    contextWindow: 262_144,
+    contextWindow: 1_048_576,
     maxOutputTokens: 32_768,
     imageInput: true,
     // NaN documents XML tool calls; this provider currently only handles OpenAI tool_calls.
     toolCalling: false,
-    reasoningEffortValues: [],
-  },
-  {
-    id: "mimo-v2.5",
-    name: "Xiaomi MiMo V2.5",
-    contextWindow: 1_048_576,
-    maxOutputTokens: 32_768,
-    imageInput: true,
-    toolCalling: true,
     reasoningEffortValues: [],
   },
   {
@@ -93,6 +84,7 @@ const KNOWN_NON_CHAT_IDS = new Set([
   "kokoro",
   "whisper",
   "flux-2-klein",
+  "qwen-image-2.1",
 ]);
 
 const BY_ID = new Map(CHAT_MODELS.map((model) => [model.id, model]));

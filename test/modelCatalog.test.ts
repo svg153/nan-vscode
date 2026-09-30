@@ -34,7 +34,13 @@ test("does not advertise XML-only tool formats as VS Code tool calling", () => {
   for (const id of ["qwen3.8-flash", "gemma4", "qwen3.6"]) {
     assert.equal(toDisplayMetadata(id).toolCalling, false, id);
   }
-  assert.equal(toDisplayMetadata("mimo-v2.5").toolCalling, true);
+  assert.equal(toDisplayMetadata("mimo-v2.6-flash").toolCalling, true);
+});
+
+test("catalog follows NaN cluster changes: MiMo V2.5 removed, Qwen 3.8 Flash at 1M context", () => {
+  assert.ok(!knownChatModelIds().includes("mimo-v2.5"));
+  assert.equal(toDisplayMetadata("qwen3.8-flash").contextWindow, 1_048_576);
+  assert.deepEqual(filterDiscoveredModelIds(["qwen-image-2.1"], true), []);
 });
 
 test("premium model metadata is available when the API key reports it", () => {
