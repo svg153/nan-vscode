@@ -2,7 +2,7 @@
   "name": "nan-builders-vscode",
   "displayName": "NaN Builders for VS Code",
   "description": "Use NaN Builders models natively in VS Code Chat and Agent mode.",
-  "version": "0.1.0",
+  "version": "1.5.1",
   "publisher": "svg153",
   "license": "MIT",
   "repository": {
