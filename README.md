@@ -106,7 +106,7 @@ Account-wide usage details:
 
 - Requests are authenticated with the stored API key, never browser cookies or `nan-cli` sessions.
 - The window is the current calendar month (UTC), clamped client-side to the API's maximum of 90 days, with at most 500 rows per page and up to 3 pages merged.
-- Percentage labels come only from published monthly token caps (for example deepseek-v4-flash 3B, mimo 1B, glm5.3-flash 2B, qwen3.8-flash 500M). Models without a published monthly counter (qwen3.6, gemma4) show **No token counter**; glm5.3 shows its published caps but never a fabricated percentage.
+- Percentage labels come only from published monthly token caps (for example deepseek-v4-flash 3B, mimo-v2.6-flash 1B, glm5.3-flash 2B, qwen3.8-flash 500M). Models without a published monthly counter (qwen3.6, gemma4) show **No token counter**; glm5.3 shows its published caps but never a fabricated percentage.
 - The headline percentage is the most restricted monthly quota in use, never a sum across models.
 - `api_requests` counts are only meaningful from 2026-09-02, the API's data cutoff.
 - Usage refreshes are throttled client-side (60s between automatic refreshes, plus a 30 requests/minute limiter). A 429 response surfaces its `Retry-After` hint.

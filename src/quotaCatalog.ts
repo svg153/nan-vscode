@@ -11,7 +11,6 @@ const MODEL_QUOTA_LIMITS: Readonly<Record<string, ModelQuotaLimit>> = {
   "deepseek-v4-flash": { tokens: 3_000_000_000, period: "month" },
   "glm5.3-flash": { tokens: 2_000_000_000, period: "month" },
   "qwen3.8-flash": { tokens: 500_000_000, period: "month" },
-  "mimo-v2.5": { tokens: 1_000_000_000, period: "month" },
   "mimo-v2.6-flash": { tokens: 1_000_000_000, period: "month" },
   "glm5.3": { tokens: 3_000_000_000, period: "billing period", rollingTokens: 400_000_000, rollingHours: 4 },
 };
@@ -73,7 +72,7 @@ export interface QuotaUsageProgress {
 
 /**
  * Compute usage percentages ONLY for models with a documented fixed monthly token
- * counter (deepseek-v4-flash, glm5.3-flash, qwen3.8-flash, mimo-v2.5, mimo-v2.6-flash).
+ * counter (deepseek-v4-flash, glm5.3-flash, qwen3.8-flash, mimo-v2.6-flash).
  * glm5.3 (billing period / rolling 4h) and models without a published allowance are
  * excluded so the UI never fabricates a percentage the API does not define.
  * Sorted descending: the first entry is the most-restricted quota (status-bar headline).
