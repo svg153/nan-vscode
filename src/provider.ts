@@ -5,6 +5,7 @@ import { filterDiscoveredModelIds, getKnownModel, reasoningDescription, toDispla
 import { convertMessages, convertTools, estimateTokens, httpError, isImagePart, reasoningEffort } from "./openai/request";
 import { OpenAIStreamDecoder } from "./openai/stream";
 import type { OpenAIUsage } from "./openai/types";
+import { sanitizeUpstreamText } from "./text";
 import { UsageTracker } from "./usageTracker";
 
 interface ModelListResponse {
@@ -284,7 +285,9 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
         if (response.status === 401 || response.status === 403) {
           throw new Error("NaN Builders rejected the API key. Update it with 'NaN Builders: Manage Provider'.");
         }
-        throw new Error(`Unable to discover NaN Builders models: HTTP ${response.status} ${response.statusText}`);
+        throw new Error(
+          `Unable to discover NaN Builders models: HTTP ${response.status} ${sanitizeUpstreamText(response.statusText, 200)}`,
+        );
       }
       body = (await response.json()) as ModelListResponse;
       diagnostic("models.fetch.json", { rawModelCount: body.data?.length ?? 0, elapsedMs: Date.now() - startedAt });
@@ -392,4 +395,3 @@ function cancellationSignal(token: vscode.CancellationToken): { signal: AbortSig
   const listener = token.onCancellationRequested(() => controller.abort());
   return { signal: controller.signal, dispose: () => listener.dispose() };
 }
-

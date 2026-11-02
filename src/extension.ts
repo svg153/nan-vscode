@@ -11,6 +11,7 @@ import { UsageTracker } from "./usageTracker";
 export function activate(context: vscode.ExtensionContext): {
   setTestApiKey(key: string): Promise<void>;
   clearTestApiKey(): Promise<void>;
+  validateModelsTest(): Promise<number>;
   readTestUsageHistory(): unknown;
   clearTestUsageHistory(): Promise<boolean>;
   provideInlineTest(
@@ -203,6 +204,7 @@ export function activate(context: vscode.ExtensionContext): {
     ? {
         setTestApiKey: (key) => provider.setApiKey(key),
         clearTestApiKey: () => provider.clearApiKey(),
+        validateModelsTest: () => provider.validateConfiguredKey(),
         readTestUsageHistory: () => context.globalState.get("nanBuilders.localUsageHistory"),
         clearTestUsageHistory: () => usage.clearHistory(),
         provideInlineTest: async (document, position, options) => {

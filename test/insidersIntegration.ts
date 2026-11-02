@@ -109,6 +109,7 @@ export async function run(): Promise<void> {
   let testApi: {
     setTestApiKey(key: string): Promise<void>;
     clearTestApiKey(): Promise<void>;
+    validateModelsTest(): Promise<number>;
     readTestUsageHistory(): unknown;
     clearTestUsageHistory(): Promise<boolean>;
     provideInlineTest(
@@ -129,6 +130,7 @@ export async function run(): Promise<void> {
     const extension = vscode.extensions.getExtension<{
       setTestApiKey(key: string): Promise<void>;
       clearTestApiKey(): Promise<void>;
+      validateModelsTest(): Promise<number>;
       readTestUsageHistory(): unknown;
       clearTestUsageHistory(): Promise<boolean>;
       provideInlineTest(
@@ -147,6 +149,7 @@ export async function run(): Promise<void> {
     await config.update("completionModel", "", vscode.ConfigurationTarget.Global);
     testApi = await extension.activate();
     assert.ok(testApi, `Test hook missing (extension path ${extension.extensionPath}).`);
+    const activeTestApi = testApi;
     assert.equal(
       testApi.getInlineRegistrationTest(),
       undefined,
@@ -155,6 +158,38 @@ export async function run(): Promise<void> {
     await config.update("apiBaseUrl", `http://127.0.0.1:${address.port}/v1`, vscode.ConfigurationTarget.Global);
     await testApi.setTestApiKey("integration-test-key");
     assert.equal(await testApi.clearTestUsageHistory(), true);
+
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = async () =>
+        responseWithStatusText(503, `Bearer secret_token_123\x01${"X".repeat(300)}`);
+      await assert.rejects(testApi.validateModelsTest(), (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /^Unable to discover NaN Builders models: HTTP 503 /);
+        assert.doesNotMatch(error.message, /secret_token_123/);
+        assert.equal(
+          Array.from(error.message).some((character) => {
+            const code = character.charCodeAt(0);
+            return code < 0x20 || code === 0x7f;
+          }),
+          false,
+        );
+        assert.ok(error.message.length <= "Unable to discover NaN Builders models: HTTP 503 ".length + 200);
+        return true;
+      });
+
+      const assertAuthStatus = async (status: number): Promise<void> => {
+        globalThis.fetch = async () => new Response(null, { status, statusText: "Rejected" });
+        await assert.rejects(
+          activeTestApi.validateModelsTest(),
+          /NaN Builders rejected the API key\. Update it with 'NaN Builders: Manage Provider'\./,
+        );
+      };
+      await assertAuthStatus(401);
+      await assertAuthStatus(403);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
 
     source = new vscode.CancellationTokenSource();
     timeout = setTimeout(() => source?.cancel(), 10_000);
@@ -173,6 +208,7 @@ export async function run(): Promise<void> {
         text += part.value;
       }
     }
+
     assert.equal(text, "NAN_OK");
     assert.ifError(serverError);
     assert.equal(chatRequest?.model, "glm5.3-flash");
@@ -307,4 +343,10 @@ export async function run(): Promise<void> {
     }
     await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }
+}
+
+function responseWithStatusText(status: number, statusText: string): Response {
+  const mockedResponse = new Response(null, { status });
+  Object.defineProperty(mockedResponse, "statusText", { value: statusText });
+  return mockedResponse;
 }
