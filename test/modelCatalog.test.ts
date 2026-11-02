@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { filterDiscoveredModelIds, knownChatModelIds, reasoningDescription, toDisplayMetadata } from "../src/modelCatalog";
+import {
+  filterDiscoveredModelIds,
+  filterDiscoveredModels,
+  knownChatModelIds,
+  parseDiscoveredModel,
+  reasoningDescription,
+  toDisplayMetadata,
+  type DiscoveredModel,
+} from "../src/modelCatalog";
 
 test("filters known non-chat endpoints and deduplicates discovered models", () => {
   assert.deepEqual(
@@ -65,4 +73,114 @@ test("reasoning metadata distinguishes adjustable, model-managed, and unknown mo
   assert.match(reasoningDescription(toDisplayMetadata("qwen3.6")), /none, minimal, low, medium, high, max/);
   assert.match(reasoningDescription(toDisplayMetadata("deepseek-v4-flash")), /model-managed/);
   assert.match(reasoningDescription(toDisplayMetadata("future-model")), /unknown/);
+  assert.match(reasoningDescription(toDisplayMetadata("glm5.3-flash")), /nanBuilders\.defaultReasoningEffort/);
+});
+
+test("parseDiscoveredModel extracts metadata from raw API response", () => {
+  const raw = {
+    id: "test-model",
+    model_type: "chat",
+    is_chat: true,
+    context_window: 200_000,
+    max_output_tokens: 32_000,
+    image_support: true,
+    tool_calling: true,
+    capabilities: ["vision", "tools"],
+  };
+  const parsed = parseDiscoveredModel(raw);
+  assert.ok(parsed);
+  assert.equal(parsed!.id, "test-model");
+  assert.equal(parsed!.model_type, "chat");
+  assert.equal(parsed!.is_chat, true);
+  assert.equal(parsed!.context_window, 200_000);
+  assert.equal(parsed!.max_output_tokens, 32_000);
+  assert.equal(parsed!.image_support, true);
+  assert.equal(parsed!.tool_calling, true);
+  assert.deepEqual(parsed!.capabilities, ["vision", "tools"]);
+});
+
+test("parseDiscoveredModel rejects invalid input", () => {
+  assert.equal(parseDiscoveredModel(null), undefined);
+  assert.equal(parseDiscoveredModel("not-an-object"), undefined);
+  assert.equal(parseDiscoveredModel({}), undefined);
+  assert.equal(parseDiscoveredModel({ id: 123 }), undefined);
+  assert.equal(parseDiscoveredModel({ id: "   " }), undefined);
+});
+
+test("parseDiscoveredModel handles partial responses", () => {
+  const parsed = parseDiscoveredModel({ id: "minimal" });
+  assert.ok(parsed);
+  assert.equal(parsed!.id, "minimal");
+  assert.equal(parsed!.model_type, undefined);
+  assert.equal(parsed!.is_chat, undefined);
+});
+
+test("filterDiscoveredModels uses API metadata to filter chat models", () => {
+  const rawModels: readonly unknown[] = [
+    { id: "glm5.3-flash", is_chat: true },
+    { id: "qwen3-embedding", is_chat: false },
+    { id: "mimo-v2.6-flash", model_type: "chat" },
+    { id: "rerank", model_type: "reranker" },
+    { id: "unknown-chat", model_type: "chat" },
+    { id: "known-but-no-meta" },
+  ];
+
+  // With includeUnknown: true, unknown models with chat metadata pass through
+  const withUnknown = filterDiscoveredModels(rawModels, true);
+  assert.deepEqual(withUnknown.map((m) => m.id).sort(), [
+    "glm5.3-flash",
+    "known-but-no-meta",
+    "mimo-v2.6-flash",
+    "unknown-chat",
+  ]);
+
+  // With includeUnknown: false, explicit chat metadata still passes (metadata is authoritative)
+  // but models with no metadata and no catalog entry are excluded.
+  const strict = filterDiscoveredModels(rawModels, false);
+  assert.deepEqual(strict.map((m) => m.id).sort(), ["glm5.3-flash", "mimo-v2.6-flash", "unknown-chat"]);
+});
+
+test("filterDiscoveredModels deduplicates and preserves first-seen", () => {
+  const rawModels: readonly unknown[] = [
+    { id: "glm5.3-flash", is_chat: true },
+    { id: "glm5.3-flash", is_chat: false },
+  ];
+  const result = filterDiscoveredModels(rawModels, true);
+  assert.equal(result.length, 1);
+  assert.equal(result[0]!.id, "glm5.3-flash");
+});
+
+test("toDisplayMetadata merges API metadata with catalog defaults", () => {
+  const api: DiscoveredModel = {
+    id: "future-model",
+    context_window: 500_000,
+    max_output_tokens: 64_000,
+    image_support: true,
+    tool_calling: true,
+  };
+  const metadata = toDisplayMetadata("future-model", api);
+  assert.equal(metadata.contextWindow, 500_000);
+  assert.equal(metadata.maxOutputTokens, 64_000);
+  assert.equal(metadata.imageInput, true);
+  assert.equal(metadata.toolCalling, true);
+  assert.equal(metadata.name, "future-model");
+});
+
+test("toDisplayMetadata clamps maxOutputTokens to contextWindow - 1", () => {
+  const api: DiscoveredModel = {
+    id: "future-model",
+    context_window: 10_000,
+    max_output_tokens: 50_000,
+  };
+  const metadata = toDisplayMetadata("future-model", api);
+  assert.equal(metadata.maxOutputTokens, 9_999);
+});
+
+test("toDisplayMetadata respects catalog toolCalling=false for XML-only models", () => {
+  const api: DiscoveredModel = {
+    id: "qwen3.8-flash",
+    tool_calling: true,
+  };
+  const metadata = toDisplayMetadata("qwen3.8-flash", api);
+  assert.equal(metadata.toolCalling, false, "catalog should override API for XML-only models");
 });

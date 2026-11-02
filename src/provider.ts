@@ -1,7 +1,13 @@
 import * as vscode from "vscode";
 import { DEFAULT_API_BASE_URL, SECRET_API_KEY } from "./constants";
 import { diagnostic } from "./diagnostics";
-import { filterDiscoveredModelIds, getKnownModel, reasoningDescription, toDisplayMetadata } from "./modelCatalog";
+import {
+  filterDiscoveredModels,
+  getKnownModel,
+  reasoningDescription,
+  toDisplayMetadata,
+  type DiscoveredModel,
+} from "./modelCatalog";
 import { convertMessages, convertTools, estimateTokens, httpError, isImagePart, reasoningEffort } from "./openai/request";
 import { OpenAIStreamDecoder, StreamLimitError, type StreamEvent } from "./openai/stream";
 import type { OpenAIUsage } from "./openai/types";
@@ -17,7 +23,7 @@ import {
 } from "./responseBody";
 
 interface ModelListResponse {
-  data?: Array<{ id?: string }>;
+  data?: DiscoveredModel[];
 }
 
 interface CachedModels {
@@ -63,9 +69,9 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       return [];
     }
 
-    let ids: string[];
+    let models: DiscoveredModel[];
     try {
-      ids = await this.fetchModelIds(apiKey, token);
+          models = await this.fetchModelIds(apiKey, token);
     } catch (error) {
       if (isAbortError(error)) {
         return [];
@@ -80,18 +86,18 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     // Only expose model IDs returned for this key. Known non-chat endpoints are
     // filtered out; unknown IDs are opt-in because a future non-chat endpoint
     // must not accidentally be advertised to VS Code as a chat model.
-    const modelIds = filterDiscoveredModelIds(ids, includeUnknown);
-    const models = modelIds.map((id) => this.toVsCodeModel(id));
+        const chatModels = filterDiscoveredModels(models, includeUnknown);
+        const vsCodeModels = chatModels.map((m) => this.toVsCodeModel(m));
     const cacheSeconds = vscode.workspace
       .getConfiguration("nanBuilders")
       .get<number>("modelCacheSeconds", 300);
 
     this.cache = {
-      models,
+          models: vsCodeModels,
       expiresAt: Date.now() + Math.max(0, cacheSeconds) * 1000,
     };
-    diagnostic("models.provide.complete", { discoveredIdCount: ids.length, chatModelCount: models.length });
-    return models;
+        diagnostic("models.provide.complete", { discoveredIdCount: models.length, chatModelCount: vsCodeModels.length });
+        return vsCodeModels;
   }
 
   async provideLanguageModelChatResponse(
@@ -124,7 +130,10 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       stream_options: { include_usage: true },
       max_tokens: model.maxOutputTokens || 4096,
       // NaN can spend several minutes in silent reasoning unless this is bounded.
-      reasoning_effort: reasoningEffort(options.modelOptions),
+            reasoning_effort: reasoningEffort(
+              options.modelOptions,
+              vscode.workspace.getConfiguration("nanBuilders").get<string>("defaultReasoningEffort", "low"),
+            ),
     };
 
     if (toolMapping.definitions.length > 0) {
@@ -294,51 +303,49 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     return apiKey;
   }
 
-  private async fetchModelIds(apiKey: string, token: vscode.CancellationToken): Promise<string[]> {
-    const startedAt = Date.now();
-    diagnostic("models.fetch.begin", { cancelled: token.isCancellationRequested });
-    const cancellation = cancellationSignal(token);
-    let response: Response;
-    let body: ModelListResponse;
-    try {
-      const baseUrl = this.apiBaseUrl();
-      await this.endpointAuthorizer.authorize(baseUrl, cancellation.signal);
-      response = await fetch(`${baseUrl}/models`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          Accept: "application/json",
-          "User-Agent": this.userAgent(),
-        },
-        signal: cancellation.signal,
-      });
-      diagnostic("models.fetch.response", { status: response.status, elapsedMs: Date.now() - startedAt });
-      if (!response.ok) {
-        await response.body?.cancel();
-        if (response.status === 401 || response.status === 403) {
-          throw new Error("NaN Builders rejected the API key. Update it with 'NaN Builders: Manage Provider'.");
+  private async fetchModelIds(apiKey: string, token: vscode.CancellationToken): Promise<DiscoveredModel[]> {
+      const startedAt = Date.now();
+      diagnostic("models.fetch.begin", { cancelled: token.isCancellationRequested });
+      const cancellation = cancellationSignal(token);
+      let response: Response;
+      let body: ModelListResponse;
+      try {
+        const baseUrl = this.apiBaseUrl();
+        await this.endpointAuthorizer.authorize(baseUrl, cancellation.signal);
+        response = await fetch(`${baseUrl}/models`, {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            Accept: "application/json",
+            "User-Agent": this.userAgent(),
+          },
+          signal: cancellation.signal,
+        });
+        diagnostic("models.fetch.response", { status: response.status, elapsedMs: Date.now() - startedAt });
+        if (!response.ok) {
+          await response.body?.cancel();
+          if (response.status === 401 || response.status === 403) {
+            throw new Error("NaN Builders rejected the API key. Update it with 'NaN Builders: Manage Provider'.");
+          }
+          throw new Error(
+            `Unable to discover NaN Builders models: HTTP ${response.status} ${sanitizeUpstreamText(response.statusText, 200)}`,
+          );
         }
-        throw new Error(
-          `Unable to discover NaN Builders models: HTTP ${response.status} ${sanitizeUpstreamText(response.statusText, 200)}`,
-        );
+        body = (await readBoundedJson(response, MAX_JSON_RESPONSE_BYTES)) as ModelListResponse;
+        diagnostic("models.fetch.json", { rawModelCount: body.data?.length ?? 0, elapsedMs: Date.now() - startedAt });
+      } catch (error) {
+        diagnostic("models.fetch.error", {
+          elapsedMs: Date.now() - startedAt,
+          errorName: error instanceof Error ? error.name : typeof error,
+          cancelled: token.isCancellationRequested,
+        });
+        throw error;
+      } finally {
+        cancellation.dispose();
       }
-      body = (await readBoundedJson(response, MAX_JSON_RESPONSE_BYTES)) as ModelListResponse;
-      diagnostic("models.fetch.json", { rawModelCount: body.data?.length ?? 0, elapsedMs: Date.now() - startedAt });
-    } catch (error) {
-      diagnostic("models.fetch.error", {
-        elapsedMs: Date.now() - startedAt,
-        errorName: error instanceof Error ? error.name : typeof error,
-        cancelled: token.isCancellationRequested,
-      });
-      throw error;
-    } finally {
-      cancellation.dispose();
-    }
 
-    return (body.data ?? [])
-      .map((model) => model.id?.trim())
-      .filter((id): id is string => Boolean(id));
-  }
+      return body.data ?? [];
+    }
 
   private async sendChatRequest(
     apiKey: string,
@@ -396,9 +403,9 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     return `nan-vscode/${version} VSCode/${vscode.version}`;
   }
 
-  private toVsCodeModel(id: string): vscode.LanguageModelChatInformation {
-    const metadata = toDisplayMetadata(id);
-    const known = getKnownModel(id);
+  private toVsCodeModel(discovered: DiscoveredModel): vscode.LanguageModelChatInformation {
+      const metadata = toDisplayMetadata(discovered.id, discovered);
+      const known = getKnownModel(discovered.id);
     return {
       id: metadata.id,
       name: metadata.premium ? `${metadata.name} (premium)` : metadata.name,

@@ -26,9 +26,15 @@ export interface PlainTool {
 
 const REASONING_EFFORTS = /^(none|minimal|low|medium|high|max)$/;
 
-export function reasoningEffort(options: { readonly [name: string]: unknown } | undefined): string {
+export function reasoningEffort(
+  options: { readonly [name: string]: unknown } | undefined,
+  fallback = "low",
+): string {
   const requested = options?.reasoning_effort;
-  return typeof requested === "string" && REASONING_EFFORTS.test(requested) ? requested : "low";
+  if (typeof requested === "string" && REASONING_EFFORTS.test(requested)) {
+    return requested;
+  }
+  return REASONING_EFFORTS.test(fallback) ? fallback : "low";
 }
 
 export function estimateTokens(text: string): number {
