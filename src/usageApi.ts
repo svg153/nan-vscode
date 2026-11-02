@@ -24,6 +24,7 @@ export type UsageApiErrorKind =
   | "not_found"
   | "conflict"
   | "rate_limited"
+  | "timeout"
   | "server"
   | "malformed"
   | "network";

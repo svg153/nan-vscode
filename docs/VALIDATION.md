@@ -106,6 +106,7 @@ Expected:
 - Percentages appear only for models with a documented fixed monthly counter. `qwen3.6` and `gemma4` show "No token counter"; `glm5.3` shows its billing-period quota note. No percentage is fabricated.
 - A failed refresh keeps the previous snapshot and adds a "Last refresh failed" line; a 429 shows its `Retry-After` hint.
 - Automatic refreshes are throttled (60s between refreshes, 30 requests/minute limiter); a manual refresh bypasses the throttle.
+- A stalled usage refresh times out after 30 seconds, aborts the request, keeps the last good snapshot, and clears its loading state.
 - Without a key, the status bar and command fall back to local session usage and the tooltip says account usage is unavailable.
 
 ## Quotas
