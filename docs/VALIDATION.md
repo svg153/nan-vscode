@@ -13,6 +13,10 @@ npm run package
 
 Expected: TypeScript compilation, `oxlint` lint, unit tests, and VSIX packaging all complete successfully. `npm run check` runs `clean → compile → lint → test:unit → test:insiders`.
 
+## GitHub Actions pin updates
+
+Workflow actions are pinned to full commit SHAs, with the corresponding release tag in a trailing comment. Dependabot checks the GitHub Actions ecosystem weekly and opens reviewable update pull requests. For each update, verify the SHA against the action's upstream release/tag, update the version comment, inspect release notes and the workflow diff (permissions, inputs, artifact paths/retention, and release behavior), then require the pull-request CI checks before merging. Do not broaden workflow permissions or alter secret use as part of a routine pin update.
+
 ## Unit-test coverage gate
 
 `npm run test:coverage` measures compiled files under `src/` with c8; tests and generated output are excluded. It enforces a minimum of **58.99% total source line coverage**, the measured round-two baseline. The gate reads c8's `coverage/coverage-summary.json` and reports both measured and required percentages when it fails. Its unit test uses temporary summaries just above and below the floor to exercise both outcomes without changing generated coverage artifacts.
