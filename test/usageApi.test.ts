@@ -162,6 +162,37 @@ test("stops at maxPages and reports hasMore when pages remain", async () => {
   assert.equal(report.nextCursor, "cur_3");
 });
 
+test("returns a valid empty report for an empty first page", async () => {
+  let page = 0;
+  const fetchImpl: typeof fetch = async () => {
+    page += 1;
+    return json(reportPayload({ data: [], has_more: true, next_cursor: "cur_2" }));
+  };
+  const report = await fetchUsageReport({ baseUrl: BASE_URL, apiKey: "k", fetchImpl });
+  assert.equal(page, 1);
+  assert.equal(report.object, "usage.report");
+  assert.equal(report.rows.length, 0);
+  assert.equal(report.totals.totalTokens, 180);
+  assert.equal(report.hasMore, false);
+  assert.equal(report.nextCursor, undefined);
+});
+
+test("ends pagination cleanly on an empty intermediate page", async () => {
+  let page = 0;
+  const fetchImpl: typeof fetch = async () => {
+    page += 1;
+    if (page === 1) {
+      return json(reportPayload({ has_more: true, next_cursor: "cur_2" }));
+    }
+    return json(reportPayload({ data: [], has_more: true, next_cursor: "cur_3" }));
+  };
+  const report = await fetchUsageReport({ baseUrl: BASE_URL, apiKey: "k", fetchImpl });
+  assert.equal(page, 2);
+  assert.equal(report.rows.length, 1);
+  assert.equal(report.hasMore, false);
+  assert.equal(report.nextCursor, undefined);
+});
+
 test("clamps a too-wide window to the most recent 90 inclusive days, never past today", () => {
   const clamped = clampUsageWindow("2026-01-01", "2026-12-31", "2026-09-18");
   assert.deepEqual(clamped, { startDate: "2026-06-21", endDate: "2026-09-18" });

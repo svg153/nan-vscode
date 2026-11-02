@@ -183,23 +183,31 @@ export async function fetchUsagePage(options: UsagePageOptions): Promise<UsageRe
 export async function fetchUsageReport(options: UsageReportOptions): Promise<UsageReport> {
   const maxPages = Math.max(1, options.maxPages ?? 3);
   let cursor = options.cursor;
-  let merged: UsageReport | undefined;
 
-  for (let page = 0; page < maxPages; page += 1) {
+  const first = await fetchUsagePage({ ...options, cursor });
+  let merged = first;
+  // An empty page cannot contribute rows: stop instead of following its cursor.
+  if (first.rows.length === 0 || !first.hasMore || !first.nextCursor) {
+    return { ...merged, hasMore: false, nextCursor: undefined };
+  }
+  cursor = first.nextCursor;
+
+  for (let page = 1; page < maxPages; page += 1) {
     const current = await fetchUsagePage({ ...options, cursor });
-    if (!merged) {
-      merged = current;
-    } else {
-      merged = { ...merged, rows: [...merged.rows, ...current.rows], hasMore: current.hasMore, nextCursor: current.nextCursor };
-    }
-    if (!current.hasMore || !current.nextCursor) {
+    merged = {
+      ...merged,
+      rows: [...merged.rows, ...current.rows],
+      hasMore: current.hasMore,
+      nextCursor: current.nextCursor,
+    };
+    if (current.rows.length === 0 || !current.hasMore || !current.nextCursor) {
       return { ...merged, hasMore: false, nextCursor: undefined };
     }
     cursor = current.nextCursor;
   }
 
   // Safety cap reached with rows still available: report hasMore so the caller knows.
-  return { ...merged!, hasMore: true, nextCursor: cursor };
+  return { ...merged, hasMore: true, nextCursor: cursor };
 }
 
 /** Validate and normalize an untrusted GET /v1/usage payload. Throws UsageApiError("malformed"). */
