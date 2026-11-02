@@ -1,0 +1,17 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "import", "unicorn"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn",
+    "perf": "warn"
+  },
+  "rules": {
+    "typescript/no-explicit-any": "error",
+    "typescript/no-unused-vars": "error",
+    "no-console": "off",
+    "unicorn/no-null": "off",
+    "unicorn/prefer-node-protocol": "error"
+  },
+  "ignorePatterns": ["out/**", "node_modules/**", ".vscode-test/**", "*.vsix"]
+}

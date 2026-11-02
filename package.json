@@ -112,7 +112,8 @@
     "test:unit": "node --test out/test/*.test.js",
     "test": "npm run compile && npm run test:unit",
     "test:insiders": "npm run compile && node scripts/run-insiders-integration.cjs",
-    "check": "npm run clean && npm run compile && npm run test:unit && npm run test:insiders",
+    "lint": "oxlint src test",
+    "check": "npm run clean && npm run compile && npm run lint && npm run test:unit && npm run test:insiders",
     "package": "vsce package --no-dependencies",
     "lint:commits": "commitlint --from=HEAD~1 --to=HEAD",
     "release": "semantic-release",
@@ -133,6 +134,7 @@
     "@vscode/vsce": "^4.0.0",
     "conventional-changelog-conventionalcommits": "^10.0.0",
     "husky": "^9.1.7",
+    "oxlint": "^1.90.0",
     "semantic-release": "^25.0.9",
     "typescript": "^7.0.0"
   }
