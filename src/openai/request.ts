@@ -35,9 +35,56 @@ export function estimateTokens(text: string): number {
 }
 
 export function httpError(status: number, statusText: string, body: string): Error {
-  const cleanBody = body.trim().slice(0, 500);
-  const suffix = cleanBody ? `: ${cleanBody}` : "";
+  const summary = sanitizeErrorBody(body);
+  const suffix = summary ? `: ${summary}` : "";
   return new Error(`NaN Builders API error ${status} ${statusText}${suffix}`);
+}
+
+const SECRET_PATTERN = /\b(sk-[A-Za-z0-9_-]{6,}|Bearer\s+[A-Za-z0-9._-]{6,})\b/gi;
+const REDACTED = "******";
+const MAX_SUMMARY_LENGTH = 200;
+const MAX_FIELD_LENGTH = 64;
+
+/**
+ * Upstream bodies can echo the request, including user prompt text and API
+ * keys. Only structural error identifiers are surfaced; free-form messages are
+ * dropped entirely.
+ */
+export function sanitizeErrorBody(body: string): string {
+  const trimmed = body.trim();
+  if (!trimmed) {
+    return "";
+  }
+  const summary = summarizeError(trimmed);
+  return summary ? redactSecrets(summary).slice(0, MAX_SUMMARY_LENGTH) : "";
+}
+
+function summarizeError(body: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return "";
+  }
+  if (!parsed || typeof parsed !== "object") {
+    return "";
+  }
+  const error = (parsed as { error?: unknown }).error;
+  if (!error || typeof error !== "object") {
+    return "";
+  }
+  const fields = error as { type?: unknown; code?: unknown; param?: unknown };
+  const parts: string[] = [];
+  for (const value of [fields.type, fields.code, fields.param]) {
+    if (typeof value === "string" && value.trim()) {
+      parts.push(value.trim().slice(0, MAX_FIELD_LENGTH));
+    }
+  }
+  return parts.join(" ");
+}
+
+function redactSecrets(text: string): string {
+  return text.replace(SECRET_PATTERN, REDACTED);
 }
 
 export function convertMessages(

@@ -147,18 +147,41 @@ test("estimates tokens with a floor of one", () => {
   assert.equal(estimateTokens("abcde"), 2);
 });
 
-test("formats HTTP errors with status, status text and trimmed body", () => {
-  const error = httpError(429, "Too Many Requests", "  rate limited  ");
-  assert.equal(error.message, "NaN Builders API error 429 Too Many Requests: rate limited");
+test("formats HTTP errors with status, status text and structural error fields", () => {
+  const error = httpError(429, "Too Many Requests", '{"error":{"type":"rate_limit","code":"slow_down"}}');
+  assert.equal(error.message, "NaN Builders API error 429 Too Many Requests: rate_limit slow_down");
 });
 
 test("omits the body suffix when the response body is empty", () => {
   assert.equal(httpError(500, "Internal Server Error", "   ").message, "NaN Builders API error 500 Internal Server Error");
 });
 
-test("truncates long error bodies to 500 characters", () => {
-  const error = httpError(400, "Bad Request", "x".repeat(900));
-  assert.equal(error.message.length, "NaN Builders API error 400 Bad Request: ".length + 500);
+test("does not echo prompt content from long upstream bodies", () => {
+  const prompt = "my private prompt ".repeat(40);
+  const error = httpError(400, "Bad Request", JSON.stringify({ error: { message: prompt } }));
+  assert.equal(error.message, "NaN Builders API error 400 Bad Request");
+  assert.equal(error.message.includes("my private prompt"), false);
+});
+
+test("drops non-JSON bodies instead of surfacing them", () => {
+  const error = httpError(502, "Bad Gateway", "<html>upstream echoed the request body</html>");
+  assert.equal(error.message, "NaN Builders API error 502 Bad Gateway");
+});
+
+test("redacts credential-like tokens in structural error fields", () => {
+  const error = httpError(401, "Unauthorized", '{"error":{"code":"sk-live-abc123456","type":"auth"}}');
+  assert.equal(error.message.includes("sk-live-abc123456"), false);
+  assert.equal(error.message, "NaN Builders API error 401 Unauthorized: auth ******");
+});
+
+test("redacts bearer tokens in structural error fields", () => {
+  const error = httpError(401, "Unauthorized", '{"error":{"code":"Bearer abcdef123456"}}');
+  assert.equal(error.message.includes("abcdef123456"), false);
+});
+
+test("bounds the sanitized summary length", () => {
+  const error = httpError(400, "Bad Request", JSON.stringify({ error: { type: "t".repeat(400) } }));
+  assert.equal(error.message.length, "NaN Builders API error 400 Bad Request: ".length + 64);
 });
 
 test("detects image parts only for image mime types backed by bytes", () => {
