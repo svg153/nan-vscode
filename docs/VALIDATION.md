@@ -58,6 +58,12 @@ Expected: text appears progressively and finishes with `NAN_OK`.
 
 Repeat with `glm5.3-flash`.
 
+## Upstream response size limits
+
+Successful JSON responses from model discovery, usage, and inline completion are limited to **5 MiB**. JSON error bodies and chat error text are limited to **64 KiB**. Limits count bytes read from the Fetch response stream, and streamed bodies are canceled as soon as they exceed the limit. Oversize failures use a stable message and never include response content.
+
+Unit tests cover an exactly-at-limit body, streamed over-limit bodies, cancellation/release, multibyte decoding across chunks, and each API surface. These caps apply to response bodies only; request payload limits and successful chat SSE buffer limits are separate concerns.
+
 ## Agent tool calling
 
 Select `glm5.3-flash` in Agent mode in a disposable test repository and ask:

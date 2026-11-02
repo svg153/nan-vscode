@@ -6,6 +6,7 @@
  */
 
 import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
+import { MAX_JSON_RESPONSE_BYTES, ResponseTooLargeError, readBoundedJson } from "./responseBody";
 
 /** Maximum prompt characters sent per request (tail ending at the cursor). */
 export const MAX_PROMPT_CHARS = 4000;
@@ -35,7 +36,7 @@ export interface CompletionRequest {
   temperature: number;
 }
 
-export type CompletionFailureReason = "cancelled" | "http" | "network" | "malformed" | "empty";
+export type CompletionFailureReason = "cancelled" | "http" | "network" | "malformed" | "empty" | "too_large";
 
 export type CompletionOutcome =
   | { ok: true; text: string }
@@ -151,9 +152,12 @@ export async function requestInlineCompletion(options: {
     return { ok: false, reason: "http", status: response.status };
   }
   try {
-    const payload: unknown = await response.json();
+    const payload: unknown = await readBoundedJson(response, MAX_JSON_RESPONSE_BYTES);
     return parseCompletionResponse(payload);
-  } catch {
+  } catch (error) {
+    if (error instanceof ResponseTooLargeError) {
+      return { ok: false, reason: "too_large" };
+    }
     return options.signal?.aborted ? { ok: false, reason: "cancelled" } : { ok: false, reason: "malformed" };
   }
 }

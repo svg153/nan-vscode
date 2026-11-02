@@ -10,6 +10,7 @@ import {
   requestInlineCompletion,
   waitForInlineCompletionDebounce,
 } from "../src/inlineCompletion";
+import { MAX_JSON_RESPONSE_BYTES } from "../src/responseBody";
 
 const LONG_TEXT = "x".repeat(MAX_PROMPT_CHARS * 2);
 
@@ -372,6 +373,31 @@ test("requestInlineCompletion maps network errors and malformed bodies", async (
     fetchImpl: notJson,
   });
   assert.deepEqual(malformedOutcome, { ok: false, reason: "malformed" });
+});
+
+test("requestInlineCompletion rejects oversized JSON without exposing its body", async () => {
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        controller.enqueue(new Uint8Array(MAX_JSON_RESPONSE_BYTES + 1));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  const fetchImpl = (() => Promise.resolve(new Response(body))) as unknown as typeof fetch;
+  const outcome = await requestInlineCompletion({
+    baseUrl: "https://api.example.com/v1",
+    apiKey: "k",
+    userAgent: "test",
+    request: { model: "m", prompt: "p", max_tokens: 64, temperature: 0 },
+    fetchImpl,
+  });
+  assert.deepEqual(outcome, { ok: false, reason: "too_large" });
+  assert.equal(cancelled, true);
 });
 
 test("requestInlineCompletion maps empty suggestions from a valid payload", async () => {

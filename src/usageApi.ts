@@ -9,6 +9,12 @@
 
 import { sanitizeUpstreamText } from "./text";
 import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
+import {
+  MAX_ERROR_RESPONSE_BYTES,
+  MAX_JSON_RESPONSE_BYTES,
+  ResponseTooLargeError,
+  readBoundedJson,
+} from "./responseBody";
 
 export const MAX_USAGE_WINDOW_DAYS = 90;
 export const USAGE_LIMIT_MIN = 1;
@@ -25,6 +31,7 @@ export type UsageApiErrorKind =
   | "conflict"
   | "rate_limited"
   | "timeout"
+  | "response_too_large"
   | "server"
   | "malformed"
   | "network";
@@ -172,8 +179,14 @@ export async function fetchUsagePage(options: UsagePageOptions): Promise<UsageRe
 
   let payload: unknown;
   try {
-    payload = await response.json();
+    payload = await readBoundedJson(response, MAX_JSON_RESPONSE_BYTES);
   } catch (error) {
+    if (error instanceof ResponseTooLargeError) {
+      throw new UsageApiError("response_too_large", "NaN Builders returned a usage response that is too large.", {
+        status: response.status,
+        cause: error,
+      });
+    }
     throw new UsageApiError("malformed", "NaN Builders returned a usage response that is not valid JSON.", {
       status: response.status,
       cause: error,
@@ -346,7 +359,9 @@ async function httpError(response: Response): Promise<UsageApiError> {
 
 async function serverMessage(response: Response): Promise<string> {
   try {
-    const payload = (await response.json()) as { error?: { message?: unknown } };
+    const payload = (await readBoundedJson(response, MAX_ERROR_RESPONSE_BYTES)) as {
+      error?: { message?: unknown };
+    };
     const message = payload?.error?.message;
     return typeof message === "string" && message.trim() ? sanitizeErrorText(message) : "";
   } catch {

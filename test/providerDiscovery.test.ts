@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import test from "node:test";
 import type * as vscode from "vscode";
+import { MAX_ERROR_RESPONSE_BYTES, MAX_JSON_RESPONSE_BYTES, ResponseTooLargeError } from "../src/responseBody";
 
 type ModuleLoader = {
   _load: (request: string, parent: NodeJS.Module | null, isMain: boolean) => unknown;
@@ -108,6 +109,22 @@ function modelListResponse(body: unknown, init?: ResponseInit): Response {
   return new Response(JSON.stringify(body), init);
 }
 
+function oversizedResponse(byteLength: number, status = 200): { response: Response; wasCancelled: () => boolean } {
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        controller.enqueue(new Uint8Array(byteLength));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  return { response: new Response(body, { status }), wasCancelled: () => cancelled };
+}
+
 async function discoverChatModel(provider: InstanceType<typeof NanChatModelProvider>) {
   const [model] = await provider.provideLanguageModelChatInformation({ silent: true }, new TestCancellationToken());
   assert.ok(model);
@@ -187,6 +204,25 @@ test("malformed and unsuccessful model responses reject discovery with useful er
       });
     }
   } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("model discovery rejects oversized JSON with a stable error and cancels the body", async () => {
+  const originalFetch = globalThis.fetch;
+  const oversized = oversizedResponse(MAX_JSON_RESPONSE_BYTES + 1);
+  const harness = createHarness(async () => oversized.response);
+  try {
+    await assert.rejects(
+      harness.provider.provideLanguageModelChatInformation({ silent: true }, new TestCancellationToken()),
+      (error: unknown) =>
+        error instanceof ResponseTooLargeError &&
+        error.message === "Upstream response exceeded the maximum allowed size." &&
+        !error.message.includes("A".repeat(32)),
+    );
+    assert.equal(oversized.wasCancelled(), true);
+  } finally {
+    harness.provider.dispose();
     globalThis.fetch = originalFetch;
   }
 });
@@ -377,6 +413,34 @@ test("chat cancellation skips final text and tool events buffered in the SSE dec
       });
     }
   } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("chat rejects oversized HTTP error text with a stable error and cancels the body", async () => {
+  const originalFetch = globalThis.fetch;
+  const oversized = oversizedResponse(MAX_ERROR_RESPONSE_BYTES + 1, 400);
+  const harness = createHarness(async (input) =>
+    String(input).endsWith("/models") ? modelListResponse({ data: [{ id: "mimo-v2.6-flash" }] }) : oversized.response,
+  );
+  try {
+    const model = await discoverChatModel(harness.provider);
+    await assert.rejects(
+      harness.provider.provideLanguageModelChatResponse(
+        model,
+        [],
+        { toolMode: 1 as vscode.LanguageModelChatToolMode },
+        chatProgress([]),
+        new TestCancellationToken(),
+      ),
+      (error: unknown) =>
+        error instanceof Error &&
+        error.message.includes("API error 400") &&
+        !error.message.includes("A".repeat(32)),
+    );
+    assert.equal(oversized.wasCancelled(), true);
+  } finally {
+    harness.provider.dispose();
     globalThis.fetch = originalFetch;
   }
 });

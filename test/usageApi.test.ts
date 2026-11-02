@@ -11,6 +11,7 @@ import {
   fetchUsageReport,
   parseRetryAfter,
 } from "../src/usageApi";
+import { MAX_ERROR_RESPONSE_BYTES, MAX_JSON_RESPONSE_BYTES } from "../src/responseBody";
 
 const authScheme = "Bearer";
 const BASE_URL = "https://api.nan.builders/v1/";
@@ -76,6 +77,22 @@ function capturingFetch(calls: CapturedCall[]): typeof fetch {
     calls.push({ url: String(url), headers: new Headers(init?.headers) });
     return json(reportPayload());
   };
+}
+
+function oversizedResponse(byteLength: number, status = 200): { response: Response; wasCancelled: () => boolean } {
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        controller.enqueue(new Uint8Array(byteLength));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  return { response: new Response(body, { status }), wasCancelled: () => cancelled };
 }
 
 test("requests GET /v1/usage with clamped window, clamped limit, and Bearer auth", async () => {
@@ -399,6 +416,49 @@ test("rejects non-JSON and structurally malformed bodies as malformed", async ()
     }),
     (error: unknown) => error instanceof UsageApiError && error.kind === "malformed",
   );
+});
+
+test("rejects oversized successful usage JSON with a stable error and cancels its body", async () => {
+  const oversized = oversizedResponse(MAX_JSON_RESPONSE_BYTES + 1);
+  await assert.rejects(
+    fetchUsagePage({ baseUrl: BASE_URL, apiKey: "k", fetchImpl: async () => oversized.response }),
+    (error: unknown) =>
+      error instanceof UsageApiError &&
+      error.kind === "response_too_large" &&
+      error.message === "NaN Builders returned a usage response that is too large.",
+  );
+  assert.equal(oversized.wasCancelled(), true);
+});
+
+test("classifies an oversized HTTP error body by status without exposing its body", async () => {
+  const oversized = oversizedResponse(MAX_ERROR_RESPONSE_BYTES + 1, 400);
+  await assert.rejects(
+    fetchUsagePage({ baseUrl: BASE_URL, apiKey: "k", fetchImpl: async () => oversized.response }),
+    (error: unknown) =>
+      error instanceof UsageApiError &&
+      error.kind === "bad_request" &&
+      error.message === "NaN Builders rejected the usage query parameters." &&
+      !error.message.includes("A".repeat(32)),
+  );
+  assert.equal(oversized.wasCancelled(), true);
+});
+
+test("preserves rate-limit metadata when the HTTP error body is oversized", async () => {
+  const oversized = oversizedResponse(MAX_ERROR_RESPONSE_BYTES + 1, 429);
+  const fetchImpl = (async () => {
+    const response = oversized.response;
+    response.headers.set("Retry-After", "12");
+    return response;
+  }) as typeof fetch;
+  await assert.rejects(
+    fetchUsagePage({ baseUrl: BASE_URL, apiKey: "k", fetchImpl }),
+    (error: unknown) =>
+      error instanceof UsageApiError &&
+      error.kind === "rate_limited" &&
+      error.retryAfterSeconds === 12 &&
+      error.status === 429,
+  );
+  assert.equal(oversized.wasCancelled(), true);
 });
 
 test("rethrows cancellation AbortError untouched", async () => {

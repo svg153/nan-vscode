@@ -8,6 +8,13 @@ import type { OpenAIUsage } from "./openai/types";
 import { sanitizeUpstreamText } from "./text";
 import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
 import type { UsageTracker } from "./usageTracker";
+import {
+  MAX_ERROR_RESPONSE_BYTES,
+  MAX_JSON_RESPONSE_BYTES,
+  ResponseTooLargeError,
+  readBoundedJson,
+  readBoundedResponseText,
+} from "./responseBody";
 
 interface ModelListResponse {
   data?: Array<{ id?: string }>;
@@ -296,6 +303,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       });
       diagnostic("models.fetch.response", { status: response.status, elapsedMs: Date.now() - startedAt });
       if (!response.ok) {
+        await response.body?.cancel();
         if (response.status === 401 || response.status === 403) {
           throw new Error("NaN Builders rejected the API key. Update it with 'NaN Builders: Manage Provider'.");
         }
@@ -303,7 +311,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
           `Unable to discover NaN Builders models: HTTP ${response.status} ${sanitizeUpstreamText(response.statusText, 200)}`,
         );
       }
-      body = (await response.json()) as ModelListResponse;
+      body = (await readBoundedJson(response, MAX_JSON_RESPONSE_BYTES)) as ModelListResponse;
       diagnostic("models.fetch.json", { rawModelCount: body.data?.length ?? 0, elapsedMs: Date.now() - startedAt });
     } catch (error) {
       diagnostic("models.fetch.error", {
@@ -343,7 +351,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
 
     let response = await send(body);
     if (!response.ok) {
-      const text = await response.text();
+      const text = await readChatErrorText(response);
       if (
         response.status === 400 &&
         "stream_options" in body &&
@@ -358,7 +366,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     }
 
     if (!response.ok) {
-      const text = await response.text();
+      const text = await readChatErrorText(response);
       throw httpError(response.status, response.statusText, text);
     }
     return response;
@@ -410,6 +418,17 @@ function cancellationSignal(token: vscode.CancellationToken): { signal: AbortSig
   }
   const listener = token.onCancellationRequested(() => controller.abort());
   return { signal: controller.signal, dispose: () => listener.dispose() };
+}
+
+async function readChatErrorText(response: Response): Promise<string> {
+  try {
+    return await readBoundedResponseText(response, MAX_ERROR_RESPONSE_BYTES);
+  } catch (error) {
+    if (error instanceof ResponseTooLargeError) {
+      return "";
+    }
+    throw error;
+  }
 }
 
 function isAbortError(error: unknown): boolean {
