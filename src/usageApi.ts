@@ -7,6 +7,8 @@
 //   is partial; rows are paged via next_cursor.
 // - Rate limit: 30 requests per minute per member; a 429 carries Retry-After.
 
+import { sanitizeUpstreamText } from "./text";
+
 export const MAX_USAGE_WINDOW_DAYS = 90;
 export const USAGE_LIMIT_MIN = 1;
 export const USAGE_LIMIT_MAX = 500;
@@ -186,8 +188,7 @@ export async function fetchUsageReport(options: UsageReportOptions): Promise<Usa
 
   const first = await fetchUsagePage({ ...options, cursor });
   let merged = first;
-  // An empty page cannot contribute rows: stop instead of following its cursor.
-  if (first.rows.length === 0 || !first.hasMore || !first.nextCursor) {
+  if (!first.hasMore || !first.nextCursor) {
     return { ...merged, hasMore: false, nextCursor: undefined };
   }
   cursor = first.nextCursor;
@@ -200,7 +201,7 @@ export async function fetchUsageReport(options: UsageReportOptions): Promise<Usa
       hasMore: current.hasMore,
       nextCursor: current.nextCursor,
     };
-    if (current.rows.length === 0 || !current.hasMore || !current.nextCursor) {
+    if (!current.hasMore || !current.nextCursor) {
       return { ...merged, hasMore: false, nextCursor: undefined };
     }
     cursor = current.nextCursor;
@@ -231,6 +232,9 @@ export function parseUsageReport(payload: unknown): UsageReport {
   const nextCursor = root.next_cursor;
   if (nextCursor !== null && typeof nextCursor !== "string") {
     throw malformed('usage response "next_cursor" is not a string or null');
+  }
+  if (hasMore && (typeof nextCursor !== "string" || !nextCursor.trim())) {
+    throw malformed('usage response "next_cursor" is required when "has_more" is true');
   }
   return {
     object: "usage.report",
@@ -292,6 +296,7 @@ function buildUsageUrl(options: UsagePageOptions): string {
 
 async function httpError(response: Response): Promise<UsageApiError> {
   const status = response.status;
+  const statusText = sanitizeErrorText(response.statusText);
   const retryAfterSeconds = parseRetryAfter(response.headers.get("Retry-After"));
   const message = await serverMessage(response);
   if (status === 401 || status === 403) {
@@ -325,11 +330,11 @@ async function httpError(response: Response): Promise<UsageApiError> {
     return new UsageApiError("conflict", message || "This API key alias cannot query usage.", { status });
   }
   if (status >= 500) {
-    return new UsageApiError("server", `NaN Builders usage endpoint failed: HTTP ${status} ${response.statusText}`, {
+    return new UsageApiError("server", `NaN Builders usage endpoint failed: HTTP ${status} ${statusText}`, {
       status,
     });
   }
-  return new UsageApiError("network", `Unexpected NaN Builders usage response: HTTP ${status} ${response.statusText}`, {
+  return new UsageApiError("network", `Unexpected NaN Builders usage response: HTTP ${status} ${statusText}`, {
     status,
   });
 }
@@ -338,10 +343,14 @@ async function serverMessage(response: Response): Promise<string> {
   try {
     const payload = (await response.json()) as { error?: { message?: unknown } };
     const message = payload?.error?.message;
-    return typeof message === "string" && message.trim() ? message.trim() : "";
+    return typeof message === "string" && message.trim() ? sanitizeErrorText(message) : "";
   } catch {
     return "";
   }
+}
+
+function sanitizeErrorText(text: string): string {
+  return sanitizeUpstreamText(text, 200);
 }
 
 function parseRetryAfter(header: string | null): number | undefined {

@@ -1,7 +1,8 @@
 import { accountModelRows, type AccountUsageError, type AccountUsageSnapshot } from "./accountUsage";
 import type { QuotaSummaryItem } from "./quotaCatalog";
+import { sanitizeUpstreamText } from "./text";
 import { API_REQUESTS_CUTOFF_DATE } from "./usageApi";
-import { formatHistory, type DailyUsage } from "./usageHistory";
+import type { DailyUsage } from "./usageHistory";
 
 export interface TooltipInput {
   readonly snapshot?: AccountUsageSnapshot;
@@ -29,7 +30,7 @@ export function formatPercent(value: number): string {
 }
 
 export function escapeMarkdown(text: string): string {
-  return text.replace(/([\\`*_[\]()])/g, "\\$1").replace(/\r?\n/g, " ");
+  return sanitizeUpstreamText(text, Number.MAX_SAFE_INTEGER).replace(/([\\`*_[\]()])/g, "\\$1");
 }
 
 /**
@@ -58,7 +59,7 @@ export function buildTooltipMarkdown(input: TooltipInput): string {
     );
     lines.push(
       `- All-time: ${report.allTime.totalTokens.toLocaleString()} tokens · ` +
-        `${report.allTime.apiRequests.toLocaleString()} API requests (cached at ${report.allTime.cachedAt})\n`,
+        `${report.allTime.apiRequests.toLocaleString()} API requests (cached at ${escapeMarkdown(report.allTime.cachedAt)})\n`,
     );
     for (const row of accountModelRows(report)) {
       const suffix =
@@ -67,7 +68,7 @@ export function buildTooltipMarkdown(input: TooltipInput): string {
           : row.note
             ? ` · ${row.note}`
             : "";
-      lines.push(`- \`${row.model}\`: ${row.totalTokens.toLocaleString()} tokens${suffix}\n`);
+      lines.push(`- ${escapeMarkdown(row.model)}: ${row.totalTokens.toLocaleString()} tokens${suffix}\n`);
     }
     lines.push(`- Daily API-request counts are reported from ${API_REQUESTS_CUTOFF_DATE} onward; earlier days count 0.\n`);
     lines.push(`- Last refresh: ${snapshot.fetchedAt}\n`);
@@ -94,11 +95,20 @@ export function buildTooltipMarkdown(input: TooltipInput): string {
       `completion ${input.completionTokens.toLocaleString()} = ${localTotal.toLocaleString()} tokens\n`,
   );
   if (input.lastModel) {
-    lines.push(`- Last model: \`${input.lastModel}\`\n`);
+    lines.push(`- Last model: ${escapeMarkdown(input.lastModel)}\n`);
   }
   for (const item of input.quotaItems) {
-    lines.push(`- ${item.label}: ${item.description}\n`);
+    lines.push(`- ${escapeMarkdown(item.label)}: ${escapeMarkdown(item.description)}\n`);
   }
-  lines.push(`\nLocal history (last 30 days):\n\n\`\`\`\n${formatHistory(input.history.slice(0, 20))}\n\`\`\`\n`);
+  lines.push("\nLocal history (last 30 days):\n\n");
+  for (const row of input.history.slice(0, 20)) {
+    lines.push(
+      `- ${row.date} · ${escapeMarkdown(row.modelId)} · ${row.requests} request(s) · ` +
+        `prompt ${row.promptTokens.toLocaleString()} + completion ${row.completionTokens.toLocaleString()}\n`,
+    );
+  }
+  if (input.history.length === 0) {
+    lines.push("No local usage history yet.\n");
+  }
   return lines.join("");
 }

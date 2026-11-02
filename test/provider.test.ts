@@ -156,6 +156,15 @@ test("omits the body suffix when the response body is empty", () => {
   assert.equal(httpError(500, "Internal Server Error", "   ").message, "NaN Builders API error 500 Internal Server Error");
 });
 
+test("redacts and bounds untrusted HTTP status text", () => {
+  const statusText = `Bearer abcdef123456 ${"x".repeat(100)}\r\nInjected`;
+  const error = httpError(500, statusText, "");
+  assert.equal(error.message.includes("abcdef123456"), false);
+  assert.equal(error.message.includes("\r"), false);
+  assert.equal(error.message.includes("Injected"), false);
+  assert.equal(error.message, `NaN Builders API error 500 ****** ${"x".repeat(57)}`);
+});
+
 test("does not echo prompt content from long upstream bodies", () => {
   const prompt = "my private prompt ".repeat(40);
   const error = httpError(400, "Bad Request", JSON.stringify({ error: { message: prompt } }));

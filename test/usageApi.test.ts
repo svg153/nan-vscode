@@ -114,6 +114,17 @@ test("parses a valid usage report into camelCase", async () => {
   assert.equal(report.nextCursor, undefined);
 });
 
+test("rejects a usage page that advertises more rows without a cursor", async () => {
+  await assert.rejects(
+    fetchUsagePage({
+      baseUrl: BASE_URL,
+      apiKey: "k",
+      fetchImpl: async () => json(reportPayload({ has_more: true, next_cursor: null })),
+    }),
+    (error: unknown) => error instanceof UsageApiError && error.kind === "malformed",
+  );
+});
+
 test("merges rows across pages and keeps first-page full-window totals", async () => {
   const urls: string[] = [];
   let page = 0;
@@ -162,33 +173,39 @@ test("stops at maxPages and reports hasMore when pages remain", async () => {
   assert.equal(report.nextCursor, "cur_3");
 });
 
-test("returns a valid empty report for an empty first page", async () => {
+test("follows the cursor when the first page is empty but more pages are advertised", async () => {
   let page = 0;
   const fetchImpl: typeof fetch = async () => {
     page += 1;
-    return json(reportPayload({ data: [], has_more: true, next_cursor: "cur_2" }));
+    if (page === 1) {
+      return json(reportPayload({ data: [], has_more: true, next_cursor: "cur_2" }));
+    }
+    return json(reportPayload({ has_more: false, next_cursor: null }));
   };
   const report = await fetchUsageReport({ baseUrl: BASE_URL, apiKey: "k", fetchImpl });
-  assert.equal(page, 1);
+  assert.equal(page, 2);
   assert.equal(report.object, "usage.report");
-  assert.equal(report.rows.length, 0);
+  assert.equal(report.rows.length, 1);
   assert.equal(report.totals.totalTokens, 180);
   assert.equal(report.hasMore, false);
   assert.equal(report.nextCursor, undefined);
 });
 
-test("ends pagination cleanly on an empty intermediate page", async () => {
+test("continues after an empty intermediate page while the API advertises more rows", async () => {
   let page = 0;
   const fetchImpl: typeof fetch = async () => {
     page += 1;
     if (page === 1) {
       return json(reportPayload({ has_more: true, next_cursor: "cur_2" }));
     }
-    return json(reportPayload({ data: [], has_more: true, next_cursor: "cur_3" }));
+    if (page === 2) {
+      return json(reportPayload({ data: [], has_more: true, next_cursor: "cur_3" }));
+    }
+    return json(reportPayload({ has_more: false, next_cursor: null }));
   };
   const report = await fetchUsageReport({ baseUrl: BASE_URL, apiKey: "k", fetchImpl });
-  assert.equal(page, 2);
-  assert.equal(report.rows.length, 1);
+  assert.equal(page, 3);
+  assert.equal(report.rows.length, 2);
   assert.equal(report.hasMore, false);
   assert.equal(report.nextCursor, undefined);
 });
@@ -259,6 +276,42 @@ test("maps 400 to bad_request carrying the server message", async () => {
       error instanceof UsageApiError &&
       error.kind === "bad_request" &&
       error.message.includes("window too wide"),
+  );
+});
+
+test("redacts credentials and control characters from upstream error text", async () => {
+  const body = JSON.stringify({ error: { message: "Invalid Bearer abcdef123456\r\nrequest" } });
+  await assert.rejects(
+    fetchUsagePage({
+      baseUrl: BASE_URL,
+      apiKey: "k",
+      fetchImpl: async () => new Response(body, { status: 400, statusText: "Bad Request" }),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof UsageApiError);
+      assert.equal(error.message, "Invalid ****** request");
+      assert.equal(error.message.includes("abcdef123456"), false);
+      assert.equal(error.message.includes("\r"), false);
+      return true;
+    },
+  );
+});
+
+test("redacts and bounds status text from server failures", async () => {
+  await assert.rejects(
+    fetchUsagePage({
+      baseUrl: BASE_URL,
+      apiKey: "k",
+      fetchImpl: async () =>
+        new Response("", { status: 503, statusText: `Bearer abcdef123456 ${"x".repeat(300)}\r\nInjected` }),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof UsageApiError);
+      assert.equal(error.message.includes("abcdef123456"), false);
+      assert.equal(error.message.includes("Injected"), false);
+      assert.equal(error.message.length < 250, true);
+      return true;
+    },
   );
 });
 

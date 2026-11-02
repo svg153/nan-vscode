@@ -1,5 +1,6 @@
 import { buildToolNameMappings, sanitizeSchema, sanitizeToolName } from "./tooling";
 import type { OpenAIContentPart, OpenAIMessage, OpenAIToolDefinition } from "./types";
+import { sanitizeUpstreamText } from "../text";
 
 export interface ToolMapping {
   readonly definitions: OpenAIToolDefinition[];
@@ -37,11 +38,9 @@ export function estimateTokens(text: string): number {
 export function httpError(status: number, statusText: string, body: string): Error {
   const summary = sanitizeErrorBody(body);
   const suffix = summary ? `: ${summary}` : "";
-  return new Error(`NaN Builders API error ${status} ${statusText}${suffix}`);
+  return new Error(`NaN Builders API error ${status} ${sanitizeUpstreamText(statusText, MAX_FIELD_LENGTH)}${suffix}`);
 }
 
-const SECRET_PATTERN = /\b(sk-[A-Za-z0-9_-]{6,}|Bearer\s+[A-Za-z0-9._-]{6,})\b/gi;
-const REDACTED = "******";
 const MAX_SUMMARY_LENGTH = 200;
 const MAX_FIELD_LENGTH = 64;
 
@@ -84,7 +83,7 @@ function summarizeError(body: string): string {
 }
 
 function redactSecrets(text: string): string {
-  return text.replace(SECRET_PATTERN, REDACTED);
+  return sanitizeUpstreamText(text, MAX_SUMMARY_LENGTH);
 }
 
 export function convertMessages(

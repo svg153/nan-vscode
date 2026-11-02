@@ -103,7 +103,7 @@ test("tooltip includes the quota percentage and the reporting period", () => {
     history: [],
   });
   assert.match(md, /Account usage\*\* — 2026-01-01 → 2026-01-31/);
-  assert.match(md, /`deepseek-v4-flash`: 3[.,]?000 tokens · \*\*0%\*\* of monthly quota/);
+  assert.match(md, /deepseek-v4-flash: 3[.,]?000 tokens · \*\*0%\*\* of monthly quota/);
   assert.match(md, /Window totals: \*\*3[.,]?000 tokens\*\*/);
   assert.match(md, /Last refresh: 2026-01-31T12:00:00\.000Z/);
 });
@@ -155,10 +155,34 @@ test("tooltip renders local session usage, quota items and history", () => {
     history: [{ date: "2026-01-31", modelId: "deepseek-v4-flash", requests: 3, promptTokens: 1_500, completionTokens: 500 }],
   });
   assert.match(md, /Requests: 3 · prompt 1[.,]?500 \+ completion 500 = 2[.,]?000 tokens/);
-  assert.match(md, /Last model: `deepseek-v4-flash`/);
+  assert.match(md, /Last model: deepseek-v4-flash/);
   assert.match(md, /DeepSeek V4 Flash: 3B per month · local usage: 3K/);
   assert.match(md, /Local history \(last 30 days\):/);
   assert.match(md, /2026-01-31 · deepseek-v4-flash/);
+});
+
+test("tooltip escapes untrusted model identifiers without opening markdown links or code blocks", () => {
+  const hostile = "model`\\n[phish](https://bad.example)```";
+  const md = buildTooltipMarkdown({
+    snapshot: snapshot({
+      totals: {
+        promptTokens: 1,
+        completionTokens: 0,
+        totalTokens: 1,
+        apiRequests: 1,
+        byModel: [{ model: hostile, promptTokens: 1, completionTokens: 0, totalTokens: 1, apiRequests: 1 }],
+      },
+    }),
+    requests: 1,
+    promptTokens: 1,
+    completionTokens: 0,
+    lastModel: hostile,
+    quotaItems: [{ label: hostile, description: "usage", detail: "" }],
+    history: [{ date: "2026-01-31", modelId: hostile, requests: 1, promptTokens: 1, completionTokens: 0 }],
+  });
+  assert.equal(md.includes("[phish]("), false);
+  assert.equal(md.includes("```"), false);
+  assert.equal(md.includes("model\\`"), true);
 });
 
 test("history loading keeps only valid stored records", () => {
