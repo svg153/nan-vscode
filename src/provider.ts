@@ -2,20 +2,13 @@ import * as vscode from "vscode";
 import { DEFAULT_API_BASE_URL, SECRET_API_KEY } from "./constants";
 import { diagnostic } from "./diagnostics";
 import { filterDiscoveredModelIds, getKnownModel, reasoningDescription, toDisplayMetadata } from "./modelCatalog";
+import { convertMessages, convertTools, estimateTokens, httpError, isImagePart, reasoningEffort } from "./openai/request";
 import { OpenAIStreamDecoder } from "./openai/stream";
-import { buildToolNameMappings, sanitizeSchema, sanitizeToolName } from "./openai/tooling";
-import type { OpenAIContentPart, OpenAIMessage, OpenAIToolDefinition, OpenAIUsage } from "./openai/types";
+import type { OpenAIUsage } from "./openai/types";
 import { UsageTracker } from "./usageTracker";
 
 interface ModelListResponse {
   data?: Array<{ id?: string }>;
-}
-
-interface ToolMapping {
-  readonly definitions: OpenAIToolDefinition[];
-  readonly sanitizedToOriginal: ReadonlyMap<string, string>;
-  readonly originalToSanitized: ReadonlyMap<string, string>;
-  readonly toolChoice?: "auto" | "required" | { type: "function"; function: { name: string } };
 }
 
 interface CachedModels {
@@ -98,8 +91,14 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       throw new Error("NaN Builders API key is not configured. Run 'NaN Builders: Manage Provider'.");
     }
 
-    const toolMapping = convertTools(options);
-    const openaiMessages = convertMessages(messages, toolMapping.originalToSanitized);
+    const toolMapping = convertTools(options.tools ?? [], options.toolMode === vscode.LanguageModelChatToolMode.Required);
+    const openaiMessages = convertMessages(
+      messages.map((message) => ({
+        role: message.role === vscode.LanguageModelChatMessageRole.User ? "user" : "assistant",
+        content: message.content ?? [],
+      })),
+      toolMapping.originalToSanitized,
+    );
     const requestBody: Record<string, unknown> = {
       model: model.id,
       messages: openaiMessages,
@@ -335,13 +334,13 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
         delete fallback.stream_options;
         response = await send(fallback);
       } else {
-        throw httpError(response, text);
+        throw httpError(response.status, response.statusText, text);
       }
     }
 
     if (!response.ok) {
       const text = await response.text();
-      throw httpError(response, text);
+      throw httpError(response.status, response.statusText, text);
     }
     return response;
   }
@@ -384,12 +383,6 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   }
 }
 
-function httpError(response: Response, body: string): Error {
-  const cleanBody = body.trim().slice(0, 500);
-  const suffix = cleanBody ? `: ${cleanBody}` : "";
-  return new Error(`NaN Builders API error ${response.status} ${response.statusText}${suffix}`);
-}
-
 function cancellationSignal(token: vscode.CancellationToken): { signal: AbortSignal; dispose: () => void } {
   const controller = new AbortController();
   if (token.isCancellationRequested) {
@@ -400,151 +393,3 @@ function cancellationSignal(token: vscode.CancellationToken): { signal: AbortSig
   return { signal: controller.signal, dispose: () => listener.dispose() };
 }
 
-function reasoningEffort(options: { readonly [name: string]: unknown } | undefined): string {
-  const requested = options?.reasoning_effort;
-  return typeof requested === "string" && /^(none|minimal|low|medium|high|max)$/.test(requested)
-    ? requested
-    : "low";
-}
-
-function estimateTokens(text: string): number {
-  return Math.max(1, Math.ceil(text.length / 4));
-}
-
-function convertMessages(
-  messages: readonly vscode.LanguageModelChatRequestMessage[],
-  originalToSanitized: ReadonlyMap<string, string>,
-): OpenAIMessage[] {
-  const converted: OpenAIMessage[] = [];
-
-  for (const message of messages) {
-    const textParts: OpenAIContentPart[] = [];
-    const toolCalls: NonNullable<OpenAIMessage["tool_calls"]> = [];
-    const toolResults: Array<{ callId: string; content: string }> = [];
-
-    for (const part of message.content ?? []) {
-      if (part instanceof vscode.LanguageModelTextPart) {
-        textParts.push({ type: "text", text: part.value });
-      } else if (part instanceof vscode.LanguageModelToolCallPart) {
-        toolCalls.push({
-          id: part.callId,
-          type: "function",
-          function: {
-            name: originalToSanitized.get(part.name) ?? sanitizeToolName(part.name),
-            arguments: safeStringify(part.input),
-          },
-        });
-      } else if (isToolResultPart(part)) {
-        toolResults.push({
-          callId: part.callId,
-          content: flattenToolResult(part.content),
-        });
-      } else if (isImagePart(part)) {
-        textParts.push({
-          type: "image_url",
-          image_url: {
-            url: `data:${part.mimeType};base64,${Buffer.from(part.data).toString("base64")}`,
-          },
-        });
-      }
-    }
-
-    if (toolCalls.length > 0) {
-      converted.push({
-        role: "assistant",
-        content: textParts.length ? contentValue(textParts) : null,
-        tool_calls: toolCalls,
-      });
-    }
-
-    for (const result of toolResults) {
-      converted.push({
-        role: "tool",
-        tool_call_id: result.callId,
-        content: result.content,
-      });
-    }
-
-    if (toolCalls.length === 0 && textParts.length > 0) {
-      converted.push({
-        role: message.role === vscode.LanguageModelChatMessageRole.User ? "user" : "assistant",
-        content: contentValue(textParts),
-      });
-    }
-  }
-
-  return converted;
-}
-
-function contentValue(parts: OpenAIContentPart[]): string | OpenAIContentPart[] {
-  if (parts.every((part) => part.type === "text")) {
-    return parts.map((part) => (part.type === "text" ? part.text : "")).join("");
-  }
-  return parts;
-}
-
-function convertTools(options: vscode.ProvideLanguageModelChatResponseOptions): ToolMapping {
-  const tools = options.tools ?? [];
-  const { originalToSanitized, sanitizedToOriginal } = buildToolNameMappings(tools.map((tool) => tool.name));
-  const definitions: OpenAIToolDefinition[] = [];
-
-  for (const tool of tools) {
-    const sanitized = originalToSanitized.get(tool.name) ?? sanitizeToolName(tool.name);
-    definitions.push({
-      type: "function",
-      function: {
-        name: sanitized,
-        description: tool.description,
-        parameters: sanitizeSchema(tool.inputSchema),
-      },
-    });
-  }
-
-  let toolChoice: ToolMapping["toolChoice"];
-  if (definitions.length > 0) {
-    toolChoice = "auto";
-  }
-  if (options.toolMode === vscode.LanguageModelChatToolMode.Required) {
-    toolChoice = "required";
-  }
-
-  return { definitions, sanitizedToOriginal, originalToSanitized, toolChoice };
-}
-
-function safeStringify(value: unknown): string {
-  try {
-    return JSON.stringify(value ?? {});
-  } catch {
-    return "{}";
-  }
-}
-
-function isToolResultPart(value: unknown): value is { callId: string; content: readonly unknown[] } {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const candidate = value as { callId?: unknown; content?: unknown };
-  return typeof candidate.callId === "string" && Array.isArray(candidate.content);
-}
-
-function isImagePart(value: unknown): value is { data: Uint8Array; mimeType: string } {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const candidate = value as { data?: unknown; mimeType?: unknown };
-  return candidate.data instanceof Uint8Array && typeof candidate.mimeType === "string" && candidate.mimeType.startsWith("image/");
-}
-
-function flattenToolResult(content: readonly unknown[]): string {
-  const pieces: string[] = [];
-  for (const part of content) {
-    if (part instanceof vscode.LanguageModelTextPart) {
-      pieces.push(part.value);
-    } else if (typeof part === "string") {
-      pieces.push(part);
-    } else {
-      pieces.push(safeStringify(part));
-    }
-  }
-  return pieces.join("");
-}
