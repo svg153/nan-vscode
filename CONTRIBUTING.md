@@ -40,10 +40,12 @@ Releases are automated by Semantic Release from `main`. The generated [`CHANGELO
 
 ### Marketplace publishing
 
-The release workflow attaches the versioned VSIX to the GitHub Release first, then publishes the same VSIX to the VS Code Marketplace as `svg153.nan-builders-vscode`:
+The release workflow attaches the versioned VSIX to the GitHub Release first, then passes that same VSIX to a separate Marketplace publishing job for `svg153.nan-builders-vscode`. The publishing job is bound to the `marketplace` GitHub Environment and runs only when the repository variable `MARKETPLACE_PUBLISH_ENABLED` is exactly `true`.
 
-- The repository secret `VSCE_PAT` must hold an Azure DevOps personal access token with the **Marketplace: Manage** scope for the `svg153` publisher (`vsce verify-pat svg153` runs first). The value is read from the `VSCE_PAT` environment variable, is masked in logs, and must never be committed or printed.
-- If `VSCE_PAT` is missing or rejected, the Marketplace step fails with an explicit error and the GitHub Release VSIX remains available for recovery.
+- Before enabling `MARKETPLACE_PUBLISH_ENABLED`, a repository administrator must create the `marketplace` environment, add required reviewers, restrict deployments to `main`, and disable administrator bypass where repository policy allows. The workflow reference alone does not configure or enforce those environment rules; until the environment is protected and the variable is enabled, Marketplace publishing is skipped while the GitHub Release still keeps the VSIX.
+- Store `VSCE_PAT` as an environment secret on `marketplace`, not as a repository secret. Remove any repository-level `VSCE_PAT`. The publisher job receives it only in the final publish step; the release/build job and CI jobs do not receive it. The token must be an Azure DevOps personal access token with the **Marketplace: Manage** scope for the `svg153` publisher (`vsce verify-pat svg153` runs first). The value is masked in logs and must never be committed or printed.
+- The release job gets only `contents: write` for Semantic Release; the publisher job gets `contents: read` and `actions: read` to check out the package manifest and download the VSIX artifact. The VSIX transfer artifact expires after seven days; the GitHub Release asset remains available for recovery.
+- If `VSCE_PAT` is missing or rejected, the Marketplace job fails with an explicit error and the GitHub Release VSIX remains available for recovery.
 - Microsoft Entra ID workload identity federation (`vsce publish --azure-credential`) is the preferred long-term credential once the publisher is linked to Entra ID; global Azure DevOps PATs are scheduled for retirement on 2026-12-01.
 - The listing is a community publication under `svg153`; keep README and Marketplace wording accurate about ownership and support.
 
