@@ -1,7 +1,13 @@
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-/** Temporary local crash diagnostics. Remove after identifying the Insiders restart cause. */
+/**
+ * Opt-in local diagnostics for provider and status-bar troubleshooting.
+ * Disabled by default: nothing is written to disk unless the user enables it.
+ * When enabled, JSON lines are appended to a size-bounded log file.
+ */
+export const MAX_DIAGNOSTIC_LOG_BYTES = 1_048_576;
+
 let logFile: string | undefined;
 let enabled = false;
 
@@ -39,9 +45,28 @@ export function diagnostic(event: string, details: Record<string, string | numbe
   console.info("[NaN-DEBUG]", line);
   if (logFile) {
     try {
+      rotateIfFull(logFile);
       appendFileSync(logFile, `${line}\n`, "utf8");
     } catch {
       logFile = undefined;
     }
+  }
+}
+
+/** Keep the log bounded: rotate the full file to `<log>.1`, truncating if rotation fails. */
+function rotateIfFull(file: string): void {
+  let size: number;
+  try {
+    size = statSync(file).size;
+  } catch {
+    return;
+  }
+  if (size < MAX_DIAGNOSTIC_LOG_BYTES) {
+    return;
+  }
+  try {
+    renameSync(file, `${file}.1`);
+  } catch {
+    writeFileSync(file, "", "utf8");
   }
 }
