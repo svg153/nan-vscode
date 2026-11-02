@@ -163,7 +163,8 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       };
 
       while (!token.isCancellationRequested) {
-        const { done, value } = await reader.read();
+              // oxlint-disable-next-line eslint/no-await-in-loop
+              const { done, value } = await reader.read();
         if (token.isCancellationRequested) {
           break;
         }

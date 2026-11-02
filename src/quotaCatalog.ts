@@ -36,7 +36,8 @@ export function nonMonthlyQuotaNote(modelId: string): string | undefined {
 
 export function quotaSummaryItems(localUsage: ReadonlyMap<string, { requests: number; tokens: number }>): QuotaSummaryItem[] {
   const modelIds = new Set([...knownChatModelIds(), ...localUsage.keys()]);
-  return [...modelIds].sort().map((modelId) => {
+  // oxlint-disable-next-line unicorn/no-array-sort
+  return [...modelIds].sort().map((modelId: string) => {
     const limit = MODEL_QUOTA_LIMITS[modelId];
     const local = localUsage.get(modelId) ?? { requests: 0, tokens: 0 };
     const cap = limit
@@ -91,6 +92,7 @@ export function monthlyQuotaProgress(entries: readonly QuotaUsageEntry[]): Quota
       limitTokens: limit.tokens,
     });
   }
+  // oxlint-disable-next-line unicorn/no-array-sort
   return progress.sort((a, b) => b.percent - a.percent);
 }
 

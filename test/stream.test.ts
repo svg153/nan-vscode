@@ -9,6 +9,22 @@ import {
   StreamLimitError,
 } from "../src/openai/stream";
 
+const sendArguments = (argumentsPart: string): string =>
+  `data: ${JSON.stringify({
+    choices: [
+      {
+        delta: {
+          tool_calls: [{ index: 0, id: "call_1", function: { name: "tool", arguments: argumentsPart } }],
+        },
+      },
+    ],
+  })}\n`;
+
+const sendName = (name: string): string =>
+  `data: ${JSON.stringify({
+    choices: [{ delta: { tool_calls: [{ index: 0, function: { name, arguments: "" } }] } }],
+  })}\n`;
+
 test("streams text across arbitrary network chunk boundaries", () => {
   const decoder = new OpenAIStreamDecoder();
   const events = [
@@ -91,16 +107,6 @@ test("accepts tool arguments exactly at their configured character limit", () =>
 
 test("rejects oversized tool arguments and never flushes the partial tool call", () => {
   const decoder = new OpenAIStreamDecoder();
-  const sendArguments = (argumentsPart: string): string =>
-    `data: ${JSON.stringify({
-      choices: [
-        {
-          delta: {
-            tool_calls: [{ index: 0, id: "call_1", function: { name: "tool", arguments: argumentsPart } }],
-          },
-        },
-      ],
-    })}\n`;
   decoder.push(sendArguments("x".repeat(MAX_TOOL_ARGUMENT_CHARS)));
   let failure: unknown;
   assert.throws(
@@ -129,10 +135,6 @@ test("caps the number of buffered tool calls", () => {
 
 test("caps accumulated tool metadata", () => {
   const decoder = new OpenAIStreamDecoder();
-  const sendName = (name: string): string =>
-    `data: ${JSON.stringify({
-      choices: [{ delta: { tool_calls: [{ index: 0, function: { name, arguments: "" } }] } }],
-    })}\n`;
   decoder.push(sendName("n".repeat(MAX_TOOL_METADATA_CHARS)));
   assert.throws(
     () => decoder.push(sendName("n")),

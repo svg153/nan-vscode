@@ -9,6 +9,19 @@ import { compactTokens } from "./quotaCatalog";
 import { API_REQUESTS_CUTOFF_DATE } from "./usageApi";
 import { UsageTracker } from "./usageTracker";
 
+function buildQuickPickItems(
+  account: AccountUsageService,
+  usage: UsageTracker,
+): vscode.QuickPickItem[] {
+  return [
+    ...accountItems(account),
+    { kind: vscode.QuickPickItemKind.Separator, label: "Published quotas (local session)" },
+    ...usage.quotaItems(),
+    { kind: vscode.QuickPickItemKind.Separator, label: "Recent local daily history" },
+    ...usage.historyItems(),
+  ];
+}
+
 export function activate(context: vscode.ExtensionContext): {
   setTestApiKey(key: string): Promise<void>;
   clearTestApiKey(): Promise<void>;
@@ -154,15 +167,8 @@ export function activate(context: vscode.ExtensionContext): {
       picker.placeholder = "Account-wide usage, published quotas, and this extension's local history.";
       picker.matchOnDescription = true;
       picker.matchOnDetail = true;
-      const buildItems = (): vscode.QuickPickItem[] => [
-        ...accountItems(account),
-        { kind: vscode.QuickPickItemKind.Separator, label: "Published quotas (local session)" },
-        ...usage.quotaItems(),
-        { kind: vscode.QuickPickItemKind.Separator, label: "Recent local daily history" },
-        ...usage.historyItems(),
-      ];
-      picker.items = buildItems();
-      picker.buttons = [
+      picker.items = buildQuickPickItems(account, usage);
+            picker.buttons = [
         { iconPath: new vscode.ThemeIcon("refresh"), tooltip: "Refresh account usage" },
         { iconPath: new vscode.ThemeIcon("trash"), tooltip: "Clear local usage history" },
         { iconPath: new vscode.ThemeIcon("gear"), tooltip: "Manage provider (API key)" },
@@ -175,14 +181,14 @@ export function activate(context: vscode.ExtensionContext): {
           try {
             await refreshAccountUsage({ force: true, manual: true });
           } finally {
-            picker.items = buildItems();
+            picker.items = buildQuickPickItems(account, usage);
             picker.busy = false;
           }
           return;
         }
         if (icon === "trash") {
           if (await usage.clearHistory()) {
-            picker.items = buildItems();
+                    picker.items = buildQuickPickItems(account, usage);
             vscode.window.showInformationMessage("NaN Builders local usage history cleared.");
           } else {
             vscode.window.showErrorMessage("Could not clear NaN Builders local usage history from VS Code storage.");

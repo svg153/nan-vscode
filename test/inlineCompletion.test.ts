@@ -73,6 +73,7 @@ test("buildCompletionRequest stays within documented bounds and fields", () => {
   assert.equal(request.max_tokens, MAX_COMPLETION_TOKENS);
   assert.equal(request.temperature, 0);
   assert.ok(request.prompt.length <= MAX_PROMPT_CHARS);
+  // oxlint-disable-next-line unicorn/no-array-sort
   assert.deepEqual(Object.keys(request).sort(), ["max_tokens", "model", "prompt", "temperature"]);
 });
 
@@ -254,8 +255,10 @@ test("requestInlineCompletion maps HTTP failures without throwing", async () => 
     [500, 500],
   ];
   for (const [status, expected] of cases) {
-    const fetchImpl = (() => Promise.resolve(jsonResponse({}, status))) as unknown as typeof fetch;
-    const outcome = await requestInlineCompletion({
+      // oxlint-disable-next-line eslint/no-await-in-loop
+      const fetchImpl = (() => Promise.resolve(jsonResponse({}, status))) as unknown as typeof fetch;
+      // oxlint-disable-next-line eslint/no-await-in-loop
+      const outcome = await requestInlineCompletion({
       baseUrl: "https://api.example.com/v1",
       apiKey: "sk-test",
       userAgent: "test",

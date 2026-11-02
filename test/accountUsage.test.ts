@@ -193,8 +193,9 @@ test("blocks the 31st usage query within a minute with a rate_limited error", as
   const calls: { count: number } = { count: 0 };
   const service = new AccountUsageService(() => CONFIG);
   for (let i = 0; i < 30; i += 1) {
-    await service.refresh({ today: TODAY, force: true, fetchImpl: okFetch(calls) });
-  }
+      // oxlint-disable-next-line eslint/no-await-in-loop
+      await service.refresh({ today: TODAY, force: true, fetchImpl: okFetch(calls) });
+    }
   await assert.rejects(
     service.refresh({ today: TODAY, force: true, fetchImpl: okFetch(calls) }),
     (error: unknown) =>

@@ -7,11 +7,12 @@
     "perf": "warn"
   },
   "rules": {
-    "typescript/no-explicit-any": "error",
-    "typescript/no-unused-vars": "error",
-    "no-console": "off",
-    "unicorn/no-null": "off",
-    "unicorn/prefer-node-protocol": "error"
-  },
-  "ignorePatterns": ["out/**", "node_modules/**", ".vscode-test/**", "*.vsix"]
+      "typescript/no-explicit-any": "error",
+      "typescript/no-unused-vars": "error",
+      "no-console": "off",
+      "unicorn/no-null": "off",
+      "unicorn/prefer-node-protocol": "error",
+      "eslint/no-underscore-dangle": ["warn", { "allow": ["_part", "_load", "__raw"] }]
+    },
+    "ignorePatterns": ["out/**", "node_modules/**", ".vscode-test/**", "*.vsix"]
 }

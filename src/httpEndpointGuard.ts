@@ -1,5 +1,16 @@
 import { isIP } from "node:net";
 
+function parseIpv6Section(section: string): number[] | undefined {
+  if (!section) {
+    return [];
+  }
+  const words = section.split(":");
+  if (words.some((word) => !/^[\da-f]{1,4}$/i.test(word))) {
+    return undefined;
+  }
+  return words.map((word) => Number.parseInt(word, 16));
+}
+
 export interface HttpEndpointAuthorizer {
   authorize(baseUrl: string, signal?: AbortSignal): Promise<void>;
 }
@@ -123,21 +134,11 @@ function parseIpv6Words(hostname: string): number[] | undefined {
   }
 
   const sections = address.split("::");
-  if (sections.length > 2) {
-    return undefined;
-  }
-  const parseSection = (section: string): number[] | undefined => {
-    if (!section) {
-      return [];
-    }
-    const words = section.split(":");
-    if (words.some((word) => !/^[\da-f]{1,4}$/i.test(word))) {
+    if (sections.length > 2) {
       return undefined;
     }
-    return words.map((word) => Number.parseInt(word, 16));
-  };
-  const left = parseSection(sections[0]);
-  const right = parseSection(sections[1] ?? "");
+    const left = parseIpv6Section(sections[0]);
+    const right = parseIpv6Section(sections[1] ?? "");
   if (!left || !right) {
     return undefined;
   }

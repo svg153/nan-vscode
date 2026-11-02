@@ -212,7 +212,8 @@ export async function fetchUsageReport(options: UsageReportOptions): Promise<Usa
   cursor = first.nextCursor;
 
   for (let page = 1; page < maxPages; page += 1) {
-    const current = await fetchUsagePage({ ...options, cursor });
+      // oxlint-disable-next-line eslint/no-await-in-loop
+      const current = await fetchUsagePage({ ...options, cursor });
     merged = {
       ...merged,
       rows: [...merged.rows, ...current.rows],

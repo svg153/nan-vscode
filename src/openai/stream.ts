@@ -170,7 +170,8 @@ export class OpenAIStreamDecoder {
     this.emittedTools = true;
 
     const events: StreamEvent[] = [];
-    const sorted = [...this.toolBuffers.entries()].sort(([a], [b]) => a - b);
+        // oxlint-disable-next-line unicorn/no-array-sort
+        const sorted = [...this.toolBuffers.entries()].sort(([a], [b]) => a - b);
     for (const [index, tool] of sorted) {
       const id = tool.id || `nan-tool-${index}`;
       const name = tool.name || "tool";

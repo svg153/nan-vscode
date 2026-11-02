@@ -187,8 +187,9 @@ export function accountModelRows(report: UsageReport): AccountModelRow[] {
     ).map((entry) => [entry.model, entry.percent]),
   );
   return [...report.totals.byModel]
-    .sort((a, b) => b.totalTokens - a.totalTokens)
-    .map((entry) => {
+      // oxlint-disable-next-line unicorn/no-array-sort
+      .sort((a, b) => b.totalTokens - a.totalTokens)
+      .map((entry) => {
       const percent = progress.get(entry.model);
       return {
         model: entry.model,

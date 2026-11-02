@@ -16,6 +16,8 @@ import { MAX_ERROR_RESPONSE_BYTES, MAX_JSON_RESPONSE_BYTES } from "../src/respon
 const authScheme = "Bearer";
 const BASE_URL = "https://api.nan.builders/v1/";
 
+const failingFetchImpl: typeof fetch = async () => { throw new TypeError("fetch failed"); };
+
 interface CapturedCall {
   readonly url: string;
   readonly headers: Headers;
@@ -474,11 +476,8 @@ test("rethrows cancellation AbortError untouched", async () => {
 });
 
 test("wraps fetch failures as network errors", async () => {
-  const fetchImpl: typeof fetch = async () => {
-    throw new TypeError("fetch failed");
-  };
   await assert.rejects(
-    fetchUsagePage({ baseUrl: BASE_URL, apiKey: "k", fetchImpl }),
+    fetchUsagePage({ baseUrl: BASE_URL, apiKey: "k", fetchImpl: failingFetchImpl }),
     (error: unknown) => error instanceof UsageApiError && error.kind === "network",
   );
 });

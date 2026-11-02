@@ -191,10 +191,12 @@ test("malformed and unsuccessful model responses reject discovery with useful er
 
   try {
     for (const testCase of cases) {
-      await t.test(testCase.name, async () => {
-        const harness = createHarness(async () => testCase.response());
-        try {
-          await assert.rejects(
+        // oxlint-disable-next-line eslint/no-await-in-loop
+        await t.test(testCase.name, async () => {
+          const harness = createHarness(async () => testCase.response());
+          try {
+            // oxlint-disable-next-line eslint/no-await-in-loop
+            await assert.rejects(
             harness.provider.provideLanguageModelChatInformation({ silent: true }, new TestCancellationToken()),
             testCase.message,
           );
@@ -357,8 +359,9 @@ test("chat cancellation skips final text and tool events buffered in the SSE dec
 
   try {
     for (const testCase of cases) {
-      await t.test(testCase.name, async () => {
-        let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+        // oxlint-disable-next-line eslint/no-await-in-loop
+        await t.test(testCase.name, async () => {
+          let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
         let resolveNextRead!: () => void;
         const nextRead = new Promise<void>((resolve) => {
           resolveNextRead = resolve;

@@ -49,13 +49,13 @@ test("remoteHttpEndpoint omits credentials, query, fragments, and trailing slash
 test("HttpEndpointGuard remembers approval and de-duplicates concurrent prompts", async () => {
   let promptCount = 0;
   let resolvePrompt!: (approved: boolean) => void;
-  const prompt = new Promise<boolean>((resolve) => {
-    resolvePrompt = resolve;
+  const promptPromise = new Promise<boolean>((resolveFn) => {
+      resolvePrompt = resolveFn;
   });
   const guard = new HttpEndpointGuard(async (endpoint) => {
     promptCount += 1;
     assert.equal(endpoint, "http://api.example.test/v1");
-    return prompt;
+    return promptPromise;
   });
 
   const first = guard.authorize("http://api.example.test/v1");

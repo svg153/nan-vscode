@@ -88,8 +88,8 @@ export async function run(): Promise<void> {
       if (messages.some(({ content }) => content === "TRUNCATE_NOW")) {
         response.writeHead(200, { "Content-Type": "text/event-stream" });
         response.end([
-          'data: {"choices":[{"delta":{},"finish_reason":"length"}]}' + "\n",
-          'data: {"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":15,"total_tokens":17,"estimated":true,"billed":false,"nan_truncation":true}}' + "\n",
+                  'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n',
+                  'data: {"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":15,"total_tokens":17,"estimated":true,"billed":false,"nan_truncation":true}}\n',
           "data: [DONE]\n\n",
         ].join(""));
         return;

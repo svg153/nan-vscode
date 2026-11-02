@@ -26,13 +26,15 @@ export async function readBoundedResponseText(response: Response, maxBytes: numb
   let totalBytes = 0;
   try {
     while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
-      if (value.byteLength > maxBytes - totalBytes) {
-        throw await cancelOversizedReader(reader, maxBytes);
-      }
+        // oxlint-disable-next-line eslint/no-await-in-loop
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        if (value.byteLength > maxBytes - totalBytes) {
+          // oxlint-disable-next-line eslint/no-await-in-loop
+          throw await cancelOversizedReader(reader, maxBytes);
+        }
       totalBytes += value.byteLength;
       text += decoder.decode(value, { stream: true });
     }
