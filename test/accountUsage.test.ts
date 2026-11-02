@@ -86,6 +86,69 @@ test("a failed refresh keeps the previous snapshot and records lastError", async
   assert.equal(service.loading, false);
 });
 
+test("a stalled refresh times out, aborts the request, and keeps the previous snapshot", async (t) => {
+  const service = new AccountUsageService(() => CONFIG);
+  const snapshot = await service.refresh({ today: TODAY, fetchImpl: okFetch({ count: 0 }) });
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  let requestSignal: AbortSignal | null | undefined;
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+
+  const pending = service.refresh({
+    today: TODAY,
+    force: true,
+    fetchImpl: async (_input, init) => {
+      requestSignal = init?.signal;
+      markStarted();
+      return new Promise<Response>(() => {});
+    },
+  });
+  await started;
+  assert.equal(service.loading, true);
+  t.mock.timers.tick(30_000);
+
+  await assert.rejects(
+    pending,
+    (error: unknown) =>
+      error instanceof UsageApiError &&
+      error.kind === "timeout" &&
+      error.message === "NaN Builders usage refresh timed out after 30 seconds.",
+  );
+  assert.equal(requestSignal?.aborted, true);
+  assert.equal(service.loading, false);
+  assert.equal(service.snapshot, snapshot);
+  assert.equal(service.lastError?.message, "NaN Builders usage refresh timed out after 30 seconds.");
+});
+
+test("successful refresh disposes its deadline and external cancellation listener", async (t) => {
+  const service = new AccountUsageService(() => CONFIG);
+  const caller = new AbortController();
+  let requestSignal: AbortSignal | null | undefined;
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+
+  const snapshot = await service.refresh({
+    today: TODAY,
+    signal: caller.signal,
+    fetchImpl: async (_input, init) => {
+      requestSignal = init?.signal;
+      return new Response(JSON.stringify(reportPayload()), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+  });
+  assert.equal(service.snapshot, snapshot);
+  assert.equal(service.loading, false);
+  assert.equal(requestSignal?.aborted, false);
+
+  caller.abort();
+  t.mock.timers.tick(30_000);
+  assert.equal(requestSignal?.aborted, false);
+  assert.equal(service.lastError, undefined);
+});
+
 test("missing API key fails with unauthorized and records lastError", async () => {
   const calls: { count: number } = { count: 0 };
   const service = new AccountUsageService(() => undefined);
@@ -130,8 +193,9 @@ test("blocks the 31st usage query within a minute with a rate_limited error", as
   const calls: { count: number } = { count: 0 };
   const service = new AccountUsageService(() => CONFIG);
   for (let i = 0; i < 30; i += 1) {
-    await service.refresh({ today: TODAY, force: true, fetchImpl: okFetch(calls) });
-  }
+      // oxlint-disable-next-line eslint/no-await-in-loop
+      await service.refresh({ today: TODAY, force: true, fetchImpl: okFetch(calls) });
+    }
   await assert.rejects(
     service.refresh({ today: TODAY, force: true, fetchImpl: okFetch(calls) }),
     (error: unknown) =>

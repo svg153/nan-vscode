@@ -2,12 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   MAX_COMPLETION_TOKENS,
+  INLINE_COMPLETION_DEBOUNCE_MS,
   MAX_PROMPT_CHARS,
   MAX_SUGGESTION_CHARS,
   buildCompletionRequest,
   parseCompletionResponse,
   requestInlineCompletion,
+  waitForInlineCompletionDebounce,
 } from "../src/inlineCompletion";
+import { MAX_JSON_RESPONSE_BYTES } from "../src/responseBody";
 
 const LONG_TEXT = "x".repeat(MAX_PROMPT_CHARS * 2);
 
@@ -70,7 +73,36 @@ test("buildCompletionRequest stays within documented bounds and fields", () => {
   assert.equal(request.max_tokens, MAX_COMPLETION_TOKENS);
   assert.equal(request.temperature, 0);
   assert.ok(request.prompt.length <= MAX_PROMPT_CHARS);
+  // oxlint-disable-next-line unicorn/no-array-sort
   assert.deepEqual(Object.keys(request).sort(), ["max_tokens", "model", "prompt", "temperature"]);
+});
+
+test("inline debounce uses the fixed quiet period and an injectable scheduler", async () => {
+  const controller = new AbortController();
+  const delays: number[] = [];
+  const ready = await waitForInlineCompletionDebounce(controller.signal, async (delayMs, signal) => {
+    assert.equal(signal, controller.signal);
+    delays.push(delayMs);
+  });
+
+  assert.equal(ready, true);
+  assert.deepEqual(delays, [INLINE_COMPLETION_DEBOUNCE_MS]);
+  assert.equal(INLINE_COMPLETION_DEBOUNCE_MS, 150);
+});
+
+test("inline debounce resolves as canceled when its signal aborts", async () => {
+  const controller = new AbortController();
+  let scheduledDelay = 0;
+  const pending = waitForInlineCompletionDebounce(controller.signal, (delayMs, signal) => {
+    scheduledDelay = delayMs;
+    return new Promise<void>((resolve) => {
+      signal.addEventListener("abort", () => resolve(), { once: true });
+    });
+  });
+
+  controller.abort();
+  assert.equal(await pending, false);
+  assert.equal(scheduledDelay, INLINE_COMPLETION_DEBOUNCE_MS);
 });
 
 test("parseCompletionResponse normalizes newlines and strips leading blank lines", () => {
@@ -157,6 +189,65 @@ test("requestInlineCompletion posts a bounded payload to {base}/completions", as
   });
 });
 
+test("requestInlineCompletion does not send the API key when endpoint authorization is canceled", async () => {
+  let fetchCalls = 0;
+  const outcome = await requestInlineCompletion({
+    baseUrl: "http://api.example.test/v1",
+    apiKey: "test-key",
+    userAgent: "test",
+    request: { model: "m", prompt: "p", max_tokens: 64, temperature: 0 },
+    endpointAuthorizer: {
+      authorize: async () => {
+        const error = new Error("User canceled endpoint confirmation.");
+        error.name = "AbortError";
+        throw error;
+      },
+    },
+    fetchImpl: (async () => {
+      fetchCalls += 1;
+      return jsonResponse({ choices: [{ text: "should not be sent" }] });
+    }) as typeof fetch,
+  });
+
+  assert.deepEqual(outcome, { ok: false, reason: "cancelled" });
+  assert.equal(fetchCalls, 0);
+});
+
+test("requestInlineCompletion keeps the confirmed endpoint when configuration changes during authorization", async () => {
+  const options = {
+    baseUrl: "http://confirmed.example.test/v1",
+    apiKey: "test-key",
+    userAgent: "test",
+    request: { model: "m", prompt: "p", max_tokens: 64, temperature: 0 },
+  };
+  let releaseAuthorization!: () => void;
+  let authorizedBaseUrl = "";
+  let requestedUrl = "";
+  const authorizationPending = new Promise<void>((resolve) => {
+    releaseAuthorization = resolve;
+  });
+  const requestOptions = {
+    ...options,
+    endpointAuthorizer: {
+      authorize: async (baseUrl: string) => {
+        authorizedBaseUrl = baseUrl;
+        await authorizationPending;
+      },
+    },
+    fetchImpl: async (url: RequestInfo | URL) => {
+      requestedUrl = String(url);
+      return jsonResponse({ choices: [{ text: "done" }] });
+    },
+  };
+  const completion = requestInlineCompletion(requestOptions);
+
+  requestOptions.baseUrl = "http://changed.example.test/v1";
+  releaseAuthorization();
+  assert.deepEqual(await completion, { ok: true, text: "done" });
+  assert.equal(authorizedBaseUrl, "http://confirmed.example.test/v1");
+  assert.equal(requestedUrl, "http://confirmed.example.test/v1/completions");
+});
+
 test("requestInlineCompletion maps HTTP failures without throwing", async () => {
   const cases: Array<[number, number]> = [
     [429, 429],
@@ -164,8 +255,10 @@ test("requestInlineCompletion maps HTTP failures without throwing", async () => 
     [500, 500],
   ];
   for (const [status, expected] of cases) {
-    const fetchImpl = (() => Promise.resolve(jsonResponse({}, status))) as unknown as typeof fetch;
-    const outcome = await requestInlineCompletion({
+      // oxlint-disable-next-line eslint/no-await-in-loop
+      const fetchImpl = (() => Promise.resolve(jsonResponse({}, status))) as unknown as typeof fetch;
+      // oxlint-disable-next-line eslint/no-await-in-loop
+      const outcome = await requestInlineCompletion({
       baseUrl: "https://api.example.com/v1",
       apiKey: "sk-test",
       userAgent: "test",
@@ -283,6 +376,31 @@ test("requestInlineCompletion maps network errors and malformed bodies", async (
     fetchImpl: notJson,
   });
   assert.deepEqual(malformedOutcome, { ok: false, reason: "malformed" });
+});
+
+test("requestInlineCompletion rejects oversized JSON without exposing its body", async () => {
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        controller.enqueue(new Uint8Array(MAX_JSON_RESPONSE_BYTES + 1));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  const fetchImpl = (() => Promise.resolve(new Response(body))) as unknown as typeof fetch;
+  const outcome = await requestInlineCompletion({
+    baseUrl: "https://api.example.com/v1",
+    apiKey: "k",
+    userAgent: "test",
+    request: { model: "m", prompt: "p", max_tokens: 64, temperature: 0 },
+    fetchImpl,
+  });
+  assert.deepEqual(outcome, { ok: false, reason: "too_large" });
+  assert.equal(cancelled, true);
 });
 
 test("requestInlineCompletion maps empty suggestions from a valid payload", async () => {

@@ -9,6 +9,8 @@ export async function run(): Promise<void> {
   let chatRequest: Record<string, unknown> | undefined;
   let completionRequest: Record<string, unknown> | undefined;
   let completionRequests = 0;
+  const routedRequests: string[] = [];
+  let originalGlobalFetch: typeof fetch | undefined;
   let cancelResponse: http.ServerResponse | undefined;
   let onCancelRequest: (() => void) | undefined;
   let serverError: Error | undefined;
@@ -20,6 +22,11 @@ export async function run(): Promise<void> {
     if (request.method === "GET" && request.url === "/v1/models") {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ data: [{ id: "glm5.3-flash" }] }));
+      return;
+    }
+    if (request.method === "GET" && request.url?.startsWith("/v1/usage")) {
+      response.writeHead(404, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "No usage report in integration fixture." } }));
       return;
     }
     if (request.method === "POST" && request.url === "/v1/completions") {
@@ -81,8 +88,8 @@ export async function run(): Promise<void> {
       if (messages.some(({ content }) => content === "TRUNCATE_NOW")) {
         response.writeHead(200, { "Content-Type": "text/event-stream" });
         response.end([
-          'data: {"choices":[{"delta":{},"finish_reason":"length"}]}' + "\n",
-          'data: {"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":15,"total_tokens":17,"estimated":true,"billed":false,"nan_truncation":true}}' + "\n",
+                  'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n',
+                  'data: {"choices":[],"usage":{"prompt_tokens":2,"completion_tokens":15,"total_tokens":17,"estimated":true,"billed":false,"nan_truncation":true}}\n',
           "data: [DONE]\n\n",
         ].join(""));
         return;
@@ -109,6 +116,10 @@ export async function run(): Promise<void> {
   let testApi: {
     setTestApiKey(key: string): Promise<void>;
     clearTestApiKey(): Promise<void>;
+    validateModelsTest(): Promise<number>;
+    refreshUsageTest(): Promise<void>;
+    setHttpConsentTest(approved: boolean): void;
+    readHttpConsentPromptsTest(): string[];
     readTestUsageHistory(): unknown;
     clearTestUsageHistory(): Promise<boolean>;
     provideInlineTest(
@@ -129,6 +140,10 @@ export async function run(): Promise<void> {
     const extension = vscode.extensions.getExtension<{
       setTestApiKey(key: string): Promise<void>;
       clearTestApiKey(): Promise<void>;
+      validateModelsTest(): Promise<number>;
+      refreshUsageTest(): Promise<void>;
+      setHttpConsentTest(approved: boolean): void;
+      readHttpConsentPromptsTest(): string[];
       readTestUsageHistory(): unknown;
       clearTestUsageHistory(): Promise<boolean>;
       provideInlineTest(
@@ -141,15 +156,76 @@ export async function run(): Promise<void> {
     }>("svg153.nan-builders-vscode");
     assert.ok(extension, "NaN Builders extension is not loaded in the development host.");
     assert.deepEqual(extension.packageJSON.extensionKind, ["workspace", "ui"]);
-    testApi = await extension.activate();
-    assert.ok(testApi, `Test hook missing (extension path ${extension.extensionPath}).`);
-
     config = vscode.workspace.getConfiguration("nanBuilders");
     previousBaseUrl = config.get<string>("apiBaseUrl");
     previousCompletionModel = config.get<string>("completionModel");
-    await config.update("apiBaseUrl", `http://127.0.0.1:${address.port}/v1`, vscode.ConfigurationTarget.Global);
+    await config.update("completionModel", "", vscode.ConfigurationTarget.Global);
+    testApi = await extension.activate();
+    assert.ok(testApi, `Test hook missing (extension path ${extension.extensionPath}).`);
+    const activeTestApi = testApi;
+    assert.equal(
+      testApi.getInlineRegistrationTest(),
+      undefined,
+      "Inline provider must not be registered when completionModel is empty.",
+    );
+    originalGlobalFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      const requestUrl = new URL(String(input));
+      if (requestUrl.hostname === "api.example.test") {
+        routedRequests.push(requestUrl.pathname);
+        const localUrl = new URL(`${requestUrl.pathname}${requestUrl.search}`, `http://127.0.0.1:${address.port}`);
+        return originalGlobalFetch!(localUrl, init);
+      }
+      return originalGlobalFetch!(input, init);
+    };
+    const remoteEndpoint = `http://api.example.test:${address.port}/v1`;
+    await config.update("apiBaseUrl", remoteEndpoint, vscode.ConfigurationTarget.Global);
     await testApi.setTestApiKey("integration-test-key");
     assert.equal(await testApi.clearTestUsageHistory(), true);
+
+    await assert.rejects(testApi.validateModelsTest(), (error: unknown) =>
+      error instanceof Error && error.name === "AbortError",
+    );
+    const promptsAfterCancel = testApi.readHttpConsentPromptsTest();
+    assert.ok(promptsAfterCancel.length >= 1);
+    assert.ok(promptsAfterCancel.every((endpoint) => endpoint === remoteEndpoint));
+    assert.equal(routedRequests.length, 0, "Canceling remote HTTP confirmation must prevent network requests.");
+    testApi.setHttpConsentTest(true);
+
+    const originalFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = async () =>
+        responseWithStatusText(503, `Bearer secret_token_123\x01${"X".repeat(300)}`);
+      await assert.rejects(testApi.validateModelsTest(), (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /^Unable to discover NaN Builders models: HTTP 503 /);
+        assert.doesNotMatch(error.message, /secret_token_123/);
+        assert.equal(
+          Array.from(error.message).some((character) => {
+            const code = character.charCodeAt(0);
+            return code < 0x20 || code === 0x7f;
+          }),
+          false,
+        );
+        assert.ok(error.message.length <= "Unable to discover NaN Builders models: HTTP 503 ".length + 200);
+        return true;
+      });
+
+      const assertAuthStatus = async (status: number): Promise<void> => {
+        globalThis.fetch = async () => new Response(null, { status, statusText: "Rejected" });
+        await assert.rejects(
+          activeTestApi.validateModelsTest(),
+          /NaN Builders rejected the API key\. Update it with 'NaN Builders: Manage Provider'\./,
+        );
+      };
+      await assertAuthStatus(401);
+      await assertAuthStatus(403);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    const promptsAfterApproval = testApi.readHttpConsentPromptsTest();
+    assert.ok(promptsAfterApproval.length > promptsAfterCancel.length);
+    assert.ok(promptsAfterApproval.every((endpoint) => endpoint === remoteEndpoint));
 
     source = new vscode.CancellationTokenSource();
     timeout = setTimeout(() => source?.cancel(), 10_000);
@@ -168,6 +244,7 @@ export async function run(): Promise<void> {
         text += part.value;
       }
     }
+
     assert.equal(text, "NAN_OK");
     assert.ifError(serverError);
     assert.equal(chatRequest?.model, "glm5.3-flash");
@@ -260,6 +337,22 @@ export async function run(): Promise<void> {
     assert.equal(inlineRange.end.line, cursor.line);
     assert.equal(inlineRange.end.character, cursor.character);
 
+    const beforeDebouncedTriggers = completionRequests;
+    const debouncedResults = await Promise.all([
+      testApi.provideInlineTest(inlineDoc, cursor),
+      testApi.provideInlineTest(inlineDoc, cursor),
+    ]);
+    assert.equal(
+      debouncedResults.filter((result) => result !== undefined).length,
+      1,
+      "Only the latest inline trigger may return a suggestion.",
+    );
+    assert.equal(
+      completionRequests,
+      beforeDebouncedTriggers + 1,
+      "Rapid inline triggers must collapse into one billable request.",
+    );
+
     // Cancelación a nivel de proveedor: el token se cancela en cuanto el mock
     // recibe la solicitud (en vuelo) y el proveedor devuelve undefined sin texto.
     const cancelPath = path.join(tempDir, "cancel.js");
@@ -270,19 +363,30 @@ export async function run(): Promise<void> {
       cancelDoc.positionAt(cancelDoc.getText().length),
     );
     assert.equal(cancelItems, undefined, "Cancelled request must not yield items.");
-    assert.equal(completionRequests, 2, "Cancellation must not skip the request itself.");
+    assert.equal(completionRequests, 3, "Cancellation must not skip the request itself.");
 
     // Cancelación durante el arranque: el token se cancela exactamente en el
     // límite de secrets.get, tras la comprobación de entrada y antes de la
     // solicitud, sin depender de temporizadores.
     const earlyCancelItems = await testApi.provideInlineTest(inlineDoc, cursor, { cancelDuringStartup: true });
     assert.equal(earlyCancelItems, undefined, "Token cancelled during startup must not yield items.");
-    assert.equal(completionRequests, 2, "Token cancelled during startup must not send requests.");
+    assert.equal(completionRequests, 3, "Token cancelled during startup must not send requests.");
 
     // Disabled when the setting is empty: no request, no stale text.
     await config.update("completionModel", "", vscode.ConfigurationTarget.Global);
+    assert.equal(testApi.getInlineRegistrationTest(), undefined, "Clearing completionModel must dispose the registration.");
     assert.equal(await testApi.provideInlineTest(inlineDoc, cursor), undefined);
-    assert.equal(completionRequests, 2, "Disabled feature must not send requests.");
+    assert.equal(completionRequests, 3, "Disabled feature must not send requests.");
+    await testApi.refreshUsageTest();
+    assert.ok(routedRequests.includes("/v1/models"), "Model discovery must use the authorized remote endpoint.");
+    assert.ok(routedRequests.includes("/v1/chat/completions"), "Chat must use the authorized remote endpoint.");
+    assert.ok(routedRequests.includes("/v1/completions"), "Inline completions must use the authorized remote endpoint.");
+    assert.ok(routedRequests.includes("/v1/usage"), "Account usage must use the authorized remote endpoint.");
+    assert.equal(
+      testApi.readHttpConsentPromptsTest().length,
+      promptsAfterApproval.length,
+      "Approval for an endpoint must be shared across model, chat, usage, and inline requests.",
+    );
     assert.ifError(serverError);
 
     console.log("NaN Builders VS Code integration test passed (mock API; no real key used).");
@@ -296,9 +400,18 @@ export async function run(): Promise<void> {
       await config.update("apiBaseUrl", previousBaseUrl, vscode.ConfigurationTarget.Global);
       await config.update("completionModel", previousCompletionModel, vscode.ConfigurationTarget.Global);
     }
+    if (originalGlobalFetch) {
+      globalThis.fetch = originalGlobalFetch;
+    }
     if (tempDir) {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
     await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }
+}
+
+function responseWithStatusText(status: number, statusText: string): Response {
+  const mockedResponse = new Response(null, { status });
+  Object.defineProperty(mockedResponse, "statusText", { value: statusText });
+  return mockedResponse;
 }

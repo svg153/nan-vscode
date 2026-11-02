@@ -78,6 +78,8 @@ Available settings:
 | `nanBuilders.includeUnknownModels` | `false` | Expose unknown IDs without tool or vision metadata. |
 | `nanBuilders.completionModel` | `""` | Model ID for opt-in inline ghost-text completions; empty disables the feature and no completion request is sent. |
 
+When `nanBuilders.apiBaseUrl` uses non-loopback `http:`, the extension asks before sending the stored API key. The decision is remembered for that endpoint until the extension session ends and covers model discovery, chat, account usage, and inline completions. A declined endpoint stays blocked without repeating the prompt; changing the endpoint clears declined decisions. Canceling prevents the request; HTTPS and loopback HTTP endpoints do not prompt.
+
 ## Remote workspaces
 
 The provider prefers the workspace extension host when using WSL, SSH, or a Dev Container. This keeps the model provider on the same host as the Chat/Agent session and avoids a known VS Code routing problem where Auto can replace an explicitly selected remote-provider model. In a remote workspace, install the extension and enter the API key in that remote host's SecretStorage.
@@ -111,12 +113,13 @@ Account-wide usage details:
 - `api_requests` counts are only meaningful from 2026-09-02, the API's data cutoff.
 - Usage refreshes are throttled client-side (60s between automatic refreshes, plus a 30 requests/minute limiter). A 429 response surfaces its `Retry-After` hint.
 - Errors never clear the last good snapshot; they are reported in the tooltip and command output.
+- The shipped account-usage decision and its remaining deferrals are recorded in [Implementation decisions](https://github.com/svg153/nan-vscode/blob/main/docs/DECISIONS.md); the manual checks live in the [Validation checklist](https://github.com/svg153/nan-vscode/blob/main/docs/VALIDATION.md).
 
 Local usage remains available regardless of the API: **NaN Builders: Show Usage** also shows per-model daily aggregates (UTC days) retained locally for 30 days (up to 1,000 model/day records); use **Clear local history** in that dialog to remove them. Only counts and model IDs are stored in VS Code extension storage—never prompts, completions, API keys, or request payloads.
 
 VS Code does not expose a documented usage-reporting callback for third-party chat providers, so local counts only cover turns where the API returned OpenAI-compatible streaming usage metadata; see [issue #7](https://github.com/svg153/nan-vscode/issues/7).
 
-Inline ghost-text completions are opt-in and off by default. Set `nanBuilders.completionModel` to a model ID returned by `/v1/models` and the extension registers an `InlineCompletionItemProvider` for file-scheme documents. Each suggestion is one `POST {apiBaseUrl}/completions` request carrying only the last 4,000 characters before the cursor, capped at 64 completion tokens and 1,000 suggestion characters, and aborted as soon as you keep typing; HTTP errors, network failures, and empty or malformed responses never surface stale text. Quality depends on the chosen model, and while enabled each pause while typing can send an extra billed request that local usage history does not count yet (see [issue #7](https://github.com/svg153/nan-vscode/issues/7)).
+Inline ghost-text completions are opt-in and off by default. Set `nanBuilders.completionModel` to a model ID returned by `/v1/models` and the extension registers an `InlineCompletionItemProvider` for file-scheme documents. Each suggestion is one `POST {apiBaseUrl}/completions` request carrying only the last 4,000 characters before the cursor, capped at 64 completion tokens and 1,000 suggestion characters. The provider waits for a fixed 150 ms quiet period after the latest trigger, cancels pending or in-flight work when another trigger arrives, and never returns stale text; HTTP errors, network failures, and empty or malformed responses are dropped. Quality depends on the chosen model, and while enabled each pause while typing can send an extra billed request that local usage history does not count yet (see [issue #7](https://github.com/svg153/nan-vscode/issues/7)).
 
 ## Architecture
 
@@ -150,6 +153,7 @@ No alternate chat webview is created; the provider uses the built-in VS Code Cha
 
 - API keys are stored with VS Code `SecretStorage`, not in settings JSON or the repository.
 - The extension does not log API keys.
+- `nanBuilders.apiBaseUrl` is machine-scoped so a workspace cannot redirect the stored API key to another endpoint.
 - Changing `nanBuilders.apiBaseUrl` sends the configured key to that endpoint, so only change it to a server you trust.
 
 ## Development and contribution

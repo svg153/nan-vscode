@@ -7,6 +7,15 @@
 //   is partial; rows are paged via next_cursor.
 // - Rate limit: 30 requests per minute per member; a 429 carries Retry-After.
 
+import { sanitizeUpstreamText } from "./text";
+import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
+import {
+  MAX_ERROR_RESPONSE_BYTES,
+  MAX_JSON_RESPONSE_BYTES,
+  ResponseTooLargeError,
+  readBoundedJson,
+} from "./responseBody";
+
 export const MAX_USAGE_WINDOW_DAYS = 90;
 export const USAGE_LIMIT_MIN = 1;
 export const USAGE_LIMIT_MAX = 500;
@@ -21,6 +30,8 @@ export type UsageApiErrorKind =
   | "not_found"
   | "conflict"
   | "rate_limited"
+  | "timeout"
+  | "response_too_large"
   | "server"
   | "malformed"
   | "network";
@@ -99,6 +110,7 @@ export interface UsagePageOptions {
   readonly userAgent?: string;
   readonly signal?: AbortSignal;
   readonly fetchImpl?: typeof fetch;
+  readonly endpointAuthorizer?: HttpEndpointAuthorizer;
 }
 
 export interface UsageReportOptions extends UsagePageOptions {
@@ -137,10 +149,12 @@ export function clampUsageLimit(value: number | undefined): number {
 /** Fetch one page of GET /v1/usage. Throws UsageApiError for every non-2xx or malformed body. */
 export async function fetchUsagePage(options: UsagePageOptions): Promise<UsageReport> {
   const fetchImpl = options.fetchImpl ?? fetch;
-  const url = buildUsageUrl(options);
+  const baseUrl = options.baseUrl;
+  const url = buildUsageUrl(options, baseUrl);
   const authScheme = "Bearer";
   let response: Response;
   try {
+    await options.endpointAuthorizer?.authorize(baseUrl, options.signal);
     response = await fetchImpl(url, {
       method: "GET",
       headers: {
@@ -165,8 +179,14 @@ export async function fetchUsagePage(options: UsagePageOptions): Promise<UsageRe
 
   let payload: unknown;
   try {
-    payload = await response.json();
+    payload = await readBoundedJson(response, MAX_JSON_RESPONSE_BYTES);
   } catch (error) {
+    if (error instanceof ResponseTooLargeError) {
+      throw new UsageApiError("response_too_large", "NaN Builders returned a usage response that is too large.", {
+        status: response.status,
+        cause: error,
+      });
+    }
     throw new UsageApiError("malformed", "NaN Builders returned a usage response that is not valid JSON.", {
       status: response.status,
       cause: error,
@@ -183,15 +203,23 @@ export async function fetchUsagePage(options: UsagePageOptions): Promise<UsageRe
 export async function fetchUsageReport(options: UsageReportOptions): Promise<UsageReport> {
   const maxPages = Math.max(1, options.maxPages ?? 3);
   let cursor = options.cursor;
-  let merged: UsageReport | undefined;
 
-  for (let page = 0; page < maxPages; page += 1) {
-    const current = await fetchUsagePage({ ...options, cursor });
-    if (!merged) {
-      merged = current;
-    } else {
-      merged = { ...merged, rows: [...merged.rows, ...current.rows], hasMore: current.hasMore, nextCursor: current.nextCursor };
-    }
+  const first = await fetchUsagePage({ ...options, cursor });
+  let merged = first;
+  if (!first.hasMore || !first.nextCursor) {
+    return { ...merged, hasMore: false, nextCursor: undefined };
+  }
+  cursor = first.nextCursor;
+
+  for (let page = 1; page < maxPages; page += 1) {
+      // oxlint-disable-next-line eslint/no-await-in-loop
+      const current = await fetchUsagePage({ ...options, cursor });
+    merged = {
+      ...merged,
+      rows: [...merged.rows, ...current.rows],
+      hasMore: current.hasMore,
+      nextCursor: current.nextCursor,
+    };
     if (!current.hasMore || !current.nextCursor) {
       return { ...merged, hasMore: false, nextCursor: undefined };
     }
@@ -199,7 +227,7 @@ export async function fetchUsageReport(options: UsageReportOptions): Promise<Usa
   }
 
   // Safety cap reached with rows still available: report hasMore so the caller knows.
-  return { ...merged!, hasMore: true, nextCursor: cursor };
+  return { ...merged, hasMore: true, nextCursor: cursor };
 }
 
 /** Validate and normalize an untrusted GET /v1/usage payload. Throws UsageApiError("malformed"). */
@@ -223,6 +251,9 @@ export function parseUsageReport(payload: unknown): UsageReport {
   const nextCursor = root.next_cursor;
   if (nextCursor !== null && typeof nextCursor !== "string") {
     throw malformed('usage response "next_cursor" is not a string or null');
+  }
+  if (hasMore && (typeof nextCursor !== "string" || !nextCursor.trim())) {
+    throw malformed('usage response "next_cursor" is required when "has_more" is true');
   }
   return {
     object: "usage.report",
@@ -271,8 +302,8 @@ export class UsageRateLimiter {
   }
 }
 
-function buildUsageUrl(options: UsagePageOptions): string {
-  const base = options.baseUrl.replace(/\/+$/, "");
+function buildUsageUrl(options: UsagePageOptions, baseUrl: string): string {
+  const base = baseUrl.replace(/\/+$/, "");
   const params = new URLSearchParams();
   if (options.startDate) params.set("start_date", options.startDate);
   if (options.endDate) params.set("end_date", options.endDate);
@@ -284,6 +315,7 @@ function buildUsageUrl(options: UsagePageOptions): string {
 
 async function httpError(response: Response): Promise<UsageApiError> {
   const status = response.status;
+  const statusText = sanitizeErrorText(response.statusText);
   const retryAfterSeconds = parseRetryAfter(response.headers.get("Retry-After"));
   const message = await serverMessage(response);
   if (status === 401 || status === 403) {
@@ -317,29 +349,39 @@ async function httpError(response: Response): Promise<UsageApiError> {
     return new UsageApiError("conflict", message || "This API key alias cannot query usage.", { status });
   }
   if (status >= 500) {
-    return new UsageApiError("server", `NaN Builders usage endpoint failed: HTTP ${status} ${response.statusText}`, {
+    return new UsageApiError("server", `NaN Builders usage endpoint failed: HTTP ${status} ${statusText}`, {
       status,
     });
   }
-  return new UsageApiError("network", `Unexpected NaN Builders usage response: HTTP ${status} ${response.statusText}`, {
+  return new UsageApiError("network", `Unexpected NaN Builders usage response: HTTP ${status} ${statusText}`, {
     status,
   });
 }
 
 async function serverMessage(response: Response): Promise<string> {
   try {
-    const payload = (await response.json()) as { error?: { message?: unknown } };
+    const payload = (await readBoundedJson(response, MAX_ERROR_RESPONSE_BYTES)) as {
+      error?: { message?: unknown };
+    };
     const message = payload?.error?.message;
-    return typeof message === "string" && message.trim() ? message.trim() : "";
+    return typeof message === "string" && message.trim() ? sanitizeErrorText(message) : "";
   } catch {
     return "";
   }
 }
 
-function parseRetryAfter(header: string | null): number | undefined {
+function sanitizeErrorText(text: string): string {
+  return sanitizeUpstreamText(text, 200);
+}
+
+export function parseRetryAfter(header: string | null, now: number = Date.now()): number | undefined {
   if (!header) return undefined;
   const seconds = Number(header);
-  return Number.isFinite(seconds) && seconds >= 0 ? Math.ceil(seconds) : undefined;
+  if (Number.isFinite(seconds)) return seconds >= 0 ? Math.ceil(seconds) : undefined;
+
+  const retryAt = Date.parse(header);
+  if (!Number.isFinite(retryAt) || !Number.isFinite(now) || retryAt <= now) return undefined;
+  return Math.ceil((retryAt - now) / 1_000);
 }
 
 function parseRow(value: unknown, index: number): UsageRow {

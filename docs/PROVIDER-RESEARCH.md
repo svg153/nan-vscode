@@ -10,7 +10,7 @@ This repository deliberately follows the smallest native VS Code provider shape 
 
 ## Usage
 
-VS Code does not currently expose a documented usage-reporting callback for third-party chat providers. The extension's status bar therefore reports local session totals from streamed NaN usage metadata. Account-wide usage remains issue [#7](https://github.com/svg153/nan-vscode/issues/7) and must use a stable API-key-authenticated NaN endpoint.
+VS Code does not currently expose a documented usage-reporting callback for third-party chat providers, so local session totals only include turns where NaN returns OpenAI-compatible streaming usage metadata. Account-wide monthly usage is shipped through the API-key-authenticated `GET /v1/usage` endpoint; the status bar and **NaN Builders: Show Usage** use that snapshot when a key is configured, with local usage as a fallback. The extension does not reuse browser cookies or `nan-cli` sessions. See the [usage and limitations](../README.md#usage-and-limitations) section and [implementation decisions](DECISIONS.md) for the current behavior and remaining limitations.
 
 ## Inline completions
 
@@ -19,5 +19,5 @@ Chat providers do not automatically provide ghost text. Inline suggestions use t
 ## Product boundary
 
 - The current extension supports native Chat and Agent mode, model discovery, streaming, tool calls, vision metadata, SecretStorage, and remote/WSL UI-host behavior.
-- It does not claim account quota or browser-session reuse; inline ghost-text completions exist but are opt-in and off by default.
+- It supports account-wide monthly quota reporting through `GET /v1/usage`; it does not reuse browser sessions. Local session totals remain limited to turns with streaming usage metadata, and inline ghost-text completions are opt-in and off by default.
 - The extension remains community-maintained until NaN Builders approves official branding and publisher ownership.

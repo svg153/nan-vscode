@@ -12,6 +12,30 @@ interface ToolBuffer {
   arguments: string;
 }
 
+export const MAX_SSE_LINE_CHARS = 1_048_576;
+export const MAX_TOOL_ARGUMENT_CHARS = 262_144;
+export const MAX_TOOL_CALLS = 128;
+export const MAX_TOOL_METADATA_CHARS = 256;
+
+export type StreamLimitKind = "line" | "tool_arguments" | "tool_calls" | "tool_metadata";
+
+const STREAM_LIMIT_MESSAGES: Record<StreamLimitKind, string> = {
+  line: "NaN Builders chat stream exceeded the maximum SSE line size.",
+  tool_arguments: "NaN Builders chat stream exceeded the maximum tool argument size.",
+  tool_calls: "NaN Builders chat stream exceeded the maximum number of tool calls.",
+  tool_metadata: "NaN Builders chat stream exceeded the maximum tool metadata size.",
+};
+
+export class StreamLimitError extends Error {
+  constructor(
+    readonly kind: StreamLimitKind,
+    readonly limit: number,
+  ) {
+    super(STREAM_LIMIT_MESSAGES[kind]);
+    this.name = "StreamLimitError";
+  }
+}
+
 export type StreamEvent =
   | { type: "text"; text: string }
   | { type: "tool"; tool: CompletedToolCall }
@@ -21,20 +45,41 @@ export class OpenAIStreamDecoder {
   private buffer = "";
   private readonly toolBuffers = new Map<number, ToolBuffer>();
   private emittedTools = false;
+  private failure?: StreamLimitError;
 
   push(chunk: string): StreamEvent[] {
-    this.buffer += chunk;
-    const lines = this.buffer.split(/\r?\n/);
-    this.buffer = lines.pop() ?? "";
-
+    this.throwIfFailed();
     const events: StreamEvent[] = [];
-    for (const line of lines) {
+    let segmentStart = 0;
+    for (let index = 0; index < chunk.length; index += 1) {
+      if (chunk[index] !== "\n") {
+        continue;
+      }
+      const segment = chunk.slice(segmentStart, index);
+      const trailingCarriageReturn = segment.endsWith("\r") || (!segment && this.buffer.endsWith("\r"));
+      if (this.buffer.length + segment.length - (trailingCarriageReturn ? 1 : 0) > MAX_SSE_LINE_CHARS) {
+        this.fail("line");
+      }
+      let line = this.buffer + segment;
+      if (trailingCarriageReturn) {
+        line = line.slice(0, -1);
+      }
+      this.buffer = "";
       events.push(...this.consumeLine(line));
+      segmentStart = index + 1;
     }
+
+    const remainder = chunk.slice(segmentStart);
+    const trailingCarriageReturn = remainder.endsWith("\r") || (!remainder && this.buffer.endsWith("\r"));
+    if (this.buffer.length + remainder.length - (trailingCarriageReturn ? 1 : 0) > MAX_SSE_LINE_CHARS) {
+      this.fail("line");
+    }
+    this.buffer += remainder;
     return events;
   }
 
   finish(): StreamEvent[] {
+    this.throwIfFailed();
     const events: StreamEvent[] = [];
     if (this.buffer.trim()) {
       events.push(...this.consumeLine(this.buffer));
@@ -78,15 +123,31 @@ export class OpenAIStreamDecoder {
 
     for (const call of delta?.tool_calls ?? []) {
       const index = call.index ?? 0;
-      const current = this.toolBuffers.get(index) ?? { id: "", name: "", arguments: "" };
-      if (call.id) {
-        current.id = call.id;
+      let current = this.toolBuffers.get(index);
+      if (!current) {
+        if (this.toolBuffers.size >= MAX_TOOL_CALLS) {
+          this.fail("tool_calls");
+        }
+        current = { id: "", name: "", arguments: "" };
       }
-      if (call.function?.name) {
-        current.name += call.function.name;
+      const id = typeof call.id === "string" ? call.id : "";
+      const name = typeof call.function?.name === "string" ? call.function.name : "";
+      const argumentsFragment =
+        typeof call.function?.arguments === "string" ? call.function.arguments : "";
+      if (id.length > MAX_TOOL_METADATA_CHARS || name.length > MAX_TOOL_METADATA_CHARS - current.name.length) {
+        this.fail("tool_metadata");
       }
-      if (call.function?.arguments) {
-        current.arguments += call.function.arguments;
+      if (argumentsFragment.length > MAX_TOOL_ARGUMENT_CHARS - current.arguments.length) {
+        this.fail("tool_arguments");
+      }
+      if (id) {
+        current.id = id;
+      }
+      if (name) {
+        current.name += name;
+      }
+      if (argumentsFragment) {
+        current.arguments += argumentsFragment;
       }
       this.toolBuffers.set(index, current);
     }
@@ -109,7 +170,8 @@ export class OpenAIStreamDecoder {
     this.emittedTools = true;
 
     const events: StreamEvent[] = [];
-    const sorted = [...this.toolBuffers.entries()].sort(([a], [b]) => a - b);
+        // oxlint-disable-next-line unicorn/no-array-sort
+        const sorted = [...this.toolBuffers.entries()].sort(([a], [b]) => a - b);
     for (const [index, tool] of sorted) {
       const id = tool.id || `nan-tool-${index}`;
       const name = tool.name || "tool";
@@ -129,5 +191,25 @@ export class OpenAIStreamDecoder {
       events.push({ type: "tool", tool: { id, name, input } });
     }
     return events;
+  }
+
+  private throwIfFailed(): void {
+    if (this.failure) {
+      throw this.failure;
+    }
+  }
+
+  private fail(kind: StreamLimitKind): never {
+    const limits = {
+      line: MAX_SSE_LINE_CHARS,
+      tool_arguments: MAX_TOOL_ARGUMENT_CHARS,
+      tool_calls: MAX_TOOL_CALLS,
+      tool_metadata: MAX_TOOL_METADATA_CHARS,
+    } satisfies Record<StreamLimitKind, number>;
+    const error = new StreamLimitError(kind, limits[kind]);
+    this.buffer = "";
+    this.toolBuffers.clear();
+    this.failure = error;
+    throw error;
   }
 }

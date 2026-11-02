@@ -9,10 +9,14 @@ import {
   clampUsageWindow,
   fetchUsagePage,
   fetchUsageReport,
+  parseRetryAfter,
 } from "../src/usageApi";
+import { MAX_ERROR_RESPONSE_BYTES, MAX_JSON_RESPONSE_BYTES } from "../src/responseBody";
 
 const authScheme = "Bearer";
 const BASE_URL = "https://api.nan.builders/v1/";
+
+const failingFetchImpl: typeof fetch = async () => { throw new TypeError("fetch failed"); };
 
 interface CapturedCall {
   readonly url: string;
@@ -77,6 +81,22 @@ function capturingFetch(calls: CapturedCall[]): typeof fetch {
   };
 }
 
+function oversizedResponse(byteLength: number, status = 200): { response: Response; wasCancelled: () => boolean } {
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        controller.enqueue(new Uint8Array(byteLength));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  return { response: new Response(body, { status }), wasCancelled: () => cancelled };
+}
+
 test("requests GET /v1/usage with clamped window, clamped limit, and Bearer auth", async () => {
   const calls: CapturedCall[] = [];
   await fetchUsagePage({
@@ -112,6 +132,17 @@ test("parses a valid usage report into camelCase", async () => {
   assert.equal(report.allTime.cachedAt, "2026-09-18T06:00:00Z");
   assert.equal(report.hasMore, false);
   assert.equal(report.nextCursor, undefined);
+});
+
+test("rejects a usage page that advertises more rows without a cursor", async () => {
+  await assert.rejects(
+    fetchUsagePage({
+      baseUrl: BASE_URL,
+      apiKey: "k",
+      fetchImpl: async () => json(reportPayload({ has_more: true, next_cursor: null })),
+    }),
+    (error: unknown) => error instanceof UsageApiError && error.kind === "malformed",
+  );
 });
 
 test("merges rows across pages and keeps first-page full-window totals", async () => {
@@ -162,6 +193,43 @@ test("stops at maxPages and reports hasMore when pages remain", async () => {
   assert.equal(report.nextCursor, "cur_3");
 });
 
+test("follows the cursor when the first page is empty but more pages are advertised", async () => {
+  let page = 0;
+  const fetchImpl: typeof fetch = async () => {
+    page += 1;
+    if (page === 1) {
+      return json(reportPayload({ data: [], has_more: true, next_cursor: "cur_2" }));
+    }
+    return json(reportPayload({ has_more: false, next_cursor: null }));
+  };
+  const report = await fetchUsageReport({ baseUrl: BASE_URL, apiKey: "k", fetchImpl });
+  assert.equal(page, 2);
+  assert.equal(report.object, "usage.report");
+  assert.equal(report.rows.length, 1);
+  assert.equal(report.totals.totalTokens, 180);
+  assert.equal(report.hasMore, false);
+  assert.equal(report.nextCursor, undefined);
+});
+
+test("continues after an empty intermediate page while the API advertises more rows", async () => {
+  let page = 0;
+  const fetchImpl: typeof fetch = async () => {
+    page += 1;
+    if (page === 1) {
+      return json(reportPayload({ has_more: true, next_cursor: "cur_2" }));
+    }
+    if (page === 2) {
+      return json(reportPayload({ data: [], has_more: true, next_cursor: "cur_3" }));
+    }
+    return json(reportPayload({ has_more: false, next_cursor: null }));
+  };
+  const report = await fetchUsageReport({ baseUrl: BASE_URL, apiKey: "k", fetchImpl });
+  assert.equal(page, 3);
+  assert.equal(report.rows.length, 2);
+  assert.equal(report.hasMore, false);
+  assert.equal(report.nextCursor, undefined);
+});
+
 test("clamps a too-wide window to the most recent 90 inclusive days, never past today", () => {
   const clamped = clampUsageWindow("2026-01-01", "2026-12-31", "2026-09-18");
   assert.deepEqual(clamped, { startDate: "2026-06-21", endDate: "2026-09-18" });
@@ -199,6 +267,60 @@ test("maps 401 to unauthorized", async () => {
   );
 });
 
+test("does not send usage requests when endpoint authorization is canceled", async () => {
+  let fetchCalls = 0;
+  const abortError = new Error("User canceled endpoint confirmation.");
+  abortError.name = "AbortError";
+
+  await assert.rejects(
+    fetchUsagePage({
+      baseUrl: "http://api.example.test/v1",
+      apiKey: "test-key",
+      endpointAuthorizer: {
+        authorize: async () => {
+          throw abortError;
+        },
+      },
+      fetchImpl: (async () => {
+        fetchCalls += 1;
+        return json({}, { status: 200 });
+      }) as typeof fetch,
+    }),
+    (error: unknown) => error === abortError,
+  );
+  assert.equal(fetchCalls, 0);
+});
+
+test("usage request stays bound to the endpoint captured before authorization", async () => {
+  const options = { baseUrl: "http://confirmed.example.test/v1", apiKey: "test-key" };
+  let releaseAuthorization!: () => void;
+  let authorizedBaseUrl = "";
+  let requestedUrl = "";
+  const authorizationPending = new Promise<void>((resolve) => {
+    releaseAuthorization = resolve;
+  });
+  const requestOptions = {
+    ...options,
+    endpointAuthorizer: {
+      authorize: async (baseUrl: string) => {
+        authorizedBaseUrl = baseUrl;
+        await authorizationPending;
+      },
+    },
+    fetchImpl: async (url: RequestInfo | URL) => {
+      requestedUrl = String(url);
+      return json(reportPayload());
+    },
+  };
+  const request = fetchUsagePage(requestOptions);
+
+  requestOptions.baseUrl = "http://changed.example.test/v1";
+  releaseAuthorization();
+  await request;
+  assert.equal(authorizedBaseUrl, "http://confirmed.example.test/v1");
+  assert.equal(requestedUrl, "http://confirmed.example.test/v1/usage");
+});
+
 test("maps 429 to rate_limited with Retry-After seconds", async () => {
   await assert.rejects(
     fetchUsagePage({
@@ -217,6 +339,14 @@ test("maps 429 to rate_limited with Retry-After seconds", async () => {
   );
 });
 
+test("parses Retry-After HTTP dates using the supplied reference time", () => {
+  const now = Date.parse("2026-11-02T18:00:00.000Z");
+  assert.equal(parseRetryAfter("Mon, 02 Nov 2026 18:00:12 GMT", now), 12);
+  assert.equal(parseRetryAfter("Mon, 02 Nov 2026 17:59:59 GMT", now), undefined);
+  assert.equal(parseRetryAfter("not a date", now), undefined);
+  assert.equal(parseRetryAfter("-1", now), undefined);
+});
+
 test("maps 400 to bad_request carrying the server message", async () => {
   await assert.rejects(
     fetchUsagePage({
@@ -228,6 +358,42 @@ test("maps 400 to bad_request carrying the server message", async () => {
       error instanceof UsageApiError &&
       error.kind === "bad_request" &&
       error.message.includes("window too wide"),
+  );
+});
+
+test("redacts credentials and control characters from upstream error text", async () => {
+  const body = JSON.stringify({ error: { message: "Invalid Bearer abcdef123456\r\nrequest" } });
+  await assert.rejects(
+    fetchUsagePage({
+      baseUrl: BASE_URL,
+      apiKey: "k",
+      fetchImpl: async () => new Response(body, { status: 400, statusText: "Bad Request" }),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof UsageApiError);
+      assert.equal(error.message, "Invalid ****** request");
+      assert.equal(error.message.includes("abcdef123456"), false);
+      assert.equal(error.message.includes("\r"), false);
+      return true;
+    },
+  );
+});
+
+test("redacts and bounds status text from server failures", async () => {
+  await assert.rejects(
+    fetchUsagePage({
+      baseUrl: BASE_URL,
+      apiKey: "k",
+      fetchImpl: async () =>
+        new Response("", { status: 503, statusText: `Bearer abcdef123456 ${"x".repeat(300)}\r\nInjected` }),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof UsageApiError);
+      assert.equal(error.message.includes("abcdef123456"), false);
+      assert.equal(error.message.includes("Injected"), false);
+      assert.equal(error.message.length < 250, true);
+      return true;
+    },
   );
 });
 
@@ -254,6 +420,49 @@ test("rejects non-JSON and structurally malformed bodies as malformed", async ()
   );
 });
 
+test("rejects oversized successful usage JSON with a stable error and cancels its body", async () => {
+  const oversized = oversizedResponse(MAX_JSON_RESPONSE_BYTES + 1);
+  await assert.rejects(
+    fetchUsagePage({ baseUrl: BASE_URL, apiKey: "k", fetchImpl: async () => oversized.response }),
+    (error: unknown) =>
+      error instanceof UsageApiError &&
+      error.kind === "response_too_large" &&
+      error.message === "NaN Builders returned a usage response that is too large.",
+  );
+  assert.equal(oversized.wasCancelled(), true);
+});
+
+test("classifies an oversized HTTP error body by status without exposing its body", async () => {
+  const oversized = oversizedResponse(MAX_ERROR_RESPONSE_BYTES + 1, 400);
+  await assert.rejects(
+    fetchUsagePage({ baseUrl: BASE_URL, apiKey: "k", fetchImpl: async () => oversized.response }),
+    (error: unknown) =>
+      error instanceof UsageApiError &&
+      error.kind === "bad_request" &&
+      error.message === "NaN Builders rejected the usage query parameters." &&
+      !error.message.includes("A".repeat(32)),
+  );
+  assert.equal(oversized.wasCancelled(), true);
+});
+
+test("preserves rate-limit metadata when the HTTP error body is oversized", async () => {
+  const oversized = oversizedResponse(MAX_ERROR_RESPONSE_BYTES + 1, 429);
+  const fetchImpl = (async () => {
+    const response = oversized.response;
+    response.headers.set("Retry-After", "12");
+    return response;
+  }) as typeof fetch;
+  await assert.rejects(
+    fetchUsagePage({ baseUrl: BASE_URL, apiKey: "k", fetchImpl }),
+    (error: unknown) =>
+      error instanceof UsageApiError &&
+      error.kind === "rate_limited" &&
+      error.retryAfterSeconds === 12 &&
+      error.status === 429,
+  );
+  assert.equal(oversized.wasCancelled(), true);
+});
+
 test("rethrows cancellation AbortError untouched", async () => {
   const abortError = new Error("The operation was aborted.");
   abortError.name = "AbortError";
@@ -267,11 +476,8 @@ test("rethrows cancellation AbortError untouched", async () => {
 });
 
 test("wraps fetch failures as network errors", async () => {
-  const fetchImpl: typeof fetch = async () => {
-    throw new TypeError("fetch failed");
-  };
   await assert.rejects(
-    fetchUsagePage({ baseUrl: BASE_URL, apiKey: "k", fetchImpl }),
+    fetchUsagePage({ baseUrl: BASE_URL, apiKey: "k", fetchImpl: failingFetchImpl }),
     (error: unknown) => error instanceof UsageApiError && error.kind === "network",
   );
 });

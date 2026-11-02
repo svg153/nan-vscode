@@ -6,6 +6,7 @@ import {
   fetchUsageReport,
 } from "./usageApi";
 import { monthlyQuotaProgress, NO_TOKEN_COUNTER_MODELS, nonMonthlyQuotaNote } from "./quotaCatalog";
+import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
 
 export interface AccountUsageConfig {
   readonly baseUrl: string;
@@ -36,6 +37,7 @@ export interface AccountUsageError {
 }
 
 const MIN_REFRESH_INTERVAL_MS = 60_000;
+const REFRESH_TIMEOUT_MS = 30_000;
 
 export type AccountUsageConfigSource = () => AccountUsageConfig | undefined | Promise<AccountUsageConfig | undefined>;
 
@@ -51,7 +53,10 @@ export class AccountUsageService {
   private loadingValue = false;
   private readonly limiter = new UsageRateLimiter();
 
-  constructor(private readonly config: AccountUsageConfigSource) {}
+  constructor(
+    private readonly config: AccountUsageConfigSource,
+    private readonly endpointAuthorizer?: HttpEndpointAuthorizer,
+  ) {}
 
   get snapshot(): AccountUsageSnapshot | undefined {
     return this.snapshotValue;
@@ -93,15 +98,40 @@ export class AccountUsageService {
     const fetchImpl = options.fetchImpl ?? fetch;
 
     this.loadingValue = true;
+    const requestController = new AbortController();
+    const externalSignal = options.signal;
+    const forwardExternalAbort = () => requestController.abort(externalSignal?.reason);
+    if (externalSignal?.aborted) {
+      forwardExternalAbort();
+    } else {
+      externalSignal?.addEventListener("abort", forwardExternalAbort, { once: true });
+    }
+
+    const timeoutError = new UsageApiError("timeout", "NaN Builders usage refresh timed out after 30 seconds.");
+    let didTimeout = false;
+    let rejectTimeout!: (error: UsageApiError) => void;
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      rejectTimeout = reject;
+    });
+    const timeoutHandle = setTimeout(() => {
+      didTimeout = true;
+      requestController.abort(timeoutError);
+      rejectTimeout(timeoutError);
+    }, REFRESH_TIMEOUT_MS);
+
     try {
-      const report = await fetchUsageReport({
-        baseUrl: config.baseUrl,
-        apiKey: config.apiKey,
-        startDate: window.startDate,
-        endDate: window.endDate,
-        signal: options.signal,
-        fetchImpl,
-      });
+      const report = await Promise.race([
+        fetchUsageReport({
+          baseUrl: config.baseUrl,
+          apiKey: config.apiKey,
+          startDate: window.startDate,
+          endDate: window.endDate,
+          signal: requestController.signal,
+          fetchImpl,
+          endpointAuthorizer: this.endpointAuthorizer,
+        }),
+        timeoutPromise,
+      ]);
       const snapshot: AccountUsageSnapshot = {
         startDate: report.startDate,
         endDate: report.endDate,
@@ -112,8 +142,10 @@ export class AccountUsageService {
       this.lastErrorValue = undefined;
       return snapshot;
     } catch (error) {
-      throw this.recordError(error);
+      throw this.recordError(didTimeout ? timeoutError : error);
     } finally {
+      clearTimeout(timeoutHandle);
+      externalSignal?.removeEventListener("abort", forwardExternalAbort);
       this.loadingValue = false;
     }
   }
@@ -155,8 +187,9 @@ export function accountModelRows(report: UsageReport): AccountModelRow[] {
     ).map((entry) => [entry.model, entry.percent]),
   );
   return [...report.totals.byModel]
-    .sort((a, b) => b.totalTokens - a.totalTokens)
-    .map((entry) => {
+      // oxlint-disable-next-line unicorn/no-array-sort
+      .sort((a, b) => b.totalTokens - a.totalTokens)
+      .map((entry) => {
       const percent = progress.get(entry.model);
       return {
         model: entry.model,

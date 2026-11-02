@@ -1,10 +1,10 @@
 import * as vscode from "vscode";
-import { accountHeadline, accountModelRows, type AccountUsageService } from "./accountUsage";
+import { accountHeadline, type AccountUsageService } from "./accountUsage";
 import { diagnostic } from "./diagnostics";
 import type { OpenAIUsage } from "./openai/types";
-import { quotaSummaryItems } from "./quotaCatalog";
-import { API_REQUESTS_CUTOFF_DATE } from "./usageApi";
+import { quotaSummaryItems, type QuotaSummaryItem } from "./quotaCatalog";
 import { addUsage, formatHistory, normalizeHistory, type DailyUsage } from "./usageHistory";
+import { buildTooltipMarkdown, statusBarText } from "./usagePresentation";
 
 const HISTORY_KEY = "nanBuilders.localUsageHistory";
 
@@ -62,7 +62,7 @@ export class UsageTracker implements vscode.Disposable {
     this.render();
   }
 
-  quotaItems(): vscode.QuickPickItem[] {
+  quotaItems(): QuotaSummaryItem[] {
     return quotaSummaryItems(this.modelUsage);
   }
 
@@ -115,12 +115,7 @@ export class UsageTracker implements vscode.Disposable {
   private render(): void {
     const headline = this.accountHeadlinePercent();
     const localTotal = this.promptTokens + this.completionTokens;
-    if (headline !== undefined) {
-      // Most-restricted monthly quota: the account-wide percentage from GET /v1/usage.
-      this.item.text = `$(graph) NaN ${formatPercent(headline)}%`;
-    } else {
-      this.item.text = localTotal > 0 ? `$(graph) NaN ${compact(localTotal)}` : "$(sparkle) NaN";
-    }
+    this.item.text = statusBarText(headline, localTotal);
     this.item.tooltip = this.buildTooltip();
   }
 
@@ -132,63 +127,18 @@ export class UsageTracker implements vscode.Disposable {
   private buildTooltip(): vscode.MarkdownString {
     const md = new vscode.MarkdownString();
     md.supportThemeIcons = true;
-    const snapshot = this.account?.snapshot;
-    const error = this.account?.lastError;
-
-    if (snapshot) {
-      const report = snapshot.report;
-      md.appendMarkdown(`$(pulse) **Account usage** — ${snapshot.startDate} → ${snapshot.endDate}\n\n`);
-      md.appendMarkdown(
-        `- Window totals: **${report.totals.totalTokens.toLocaleString()} tokens** ` +
-          `(${report.totals.promptTokens.toLocaleString()} prompt + ${report.totals.completionTokens.toLocaleString()} completion)` +
-          ` · ${report.totals.apiRequests.toLocaleString()} API requests\n`,
-      );
-      md.appendMarkdown(
-        `- All-time: ${report.allTime.totalTokens.toLocaleString()} tokens · ` +
-          `${report.allTime.apiRequests.toLocaleString()} API requests (cached at ${report.allTime.cachedAt})\n`,
-      );
-      for (const row of accountModelRows(report)) {
-        const suffix =
-          row.percent !== undefined
-            ? ` · **${formatPercent(row.percent)}%** of monthly quota`
-            : row.note
-              ? ` · ${row.note}`
-              : "";
-        md.appendMarkdown(`- \`${row.model}\`: ${row.totalTokens.toLocaleString()} tokens${suffix}\n`);
-      }
-      md.appendMarkdown(
-        `- Daily API-request counts are reported from ${API_REQUESTS_CUTOFF_DATE} onward; earlier days count 0.\n`,
-      );
-      md.appendMarkdown(`- Last refresh: ${snapshot.fetchedAt}\n`);
-      if (error) {
-        md.appendMarkdown(
-          `- $(warning) Last refresh failed: ${escapeMarkdown(error.message)}` +
-            `${error.retryAfterSeconds !== undefined ? ` (retry after ${error.retryAfterSeconds}s)` : ""}\n`,
-        );
-      }
-      md.appendMarkdown("\n---\n\n");
-    } else if (error) {
-      md.appendMarkdown(
-        `$(warning) **Account usage unavailable**: ${escapeMarkdown(error.message)}` +
-          `${error.retryAfterSeconds !== undefined ? ` (retry after ${error.retryAfterSeconds}s)` : ""}\n\n---\n\n`,
-      );
-    } else {
-      md.appendMarkdown("$(pulse) **Account usage**: not loaded yet.\n\n---\n\n");
-    }
-
-    md.appendMarkdown("**Local session usage** (observed by this VS Code extension only)\n\n");
-    const localTotal = this.promptTokens + this.completionTokens;
     md.appendMarkdown(
-      `- Requests: ${this.requests} · prompt ${this.promptTokens.toLocaleString()} + ` +
-        `completion ${this.completionTokens.toLocaleString()} = ${localTotal.toLocaleString()} tokens\n`,
+      buildTooltipMarkdown({
+        snapshot: this.account?.snapshot,
+        error: this.account?.lastError,
+        requests: this.requests,
+        promptTokens: this.promptTokens,
+        completionTokens: this.completionTokens,
+        lastModel: this.lastModel,
+        quotaItems: this.quotaItems(),
+        history: this.history,
+      }),
     );
-    if (this.lastModel) {
-      md.appendMarkdown(`- Last model: \`${this.lastModel}\`\n`);
-    }
-    for (const item of this.quotaItems()) {
-      md.appendMarkdown(`- ${item.label}: ${item.description}\n`);
-    }
-    md.appendMarkdown(`\nLocal history (last 30 days):\n\n\`\`\`\n${formatHistory(this.history.slice(0, 20))}\n\`\`\`\n`);
     return md;
   }
 
@@ -205,22 +155,4 @@ export class UsageTracker implements vscode.Disposable {
     });
     return this.persistQueue;
   }
-}
-
-function compact(value: number): string {
-  if (value >= 1_000_000) {
-    return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`;
-  }
-  if (value >= 1_000) {
-    return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}K`;
-  }
-  return String(value);
-}
-
-function formatPercent(value: number): string {
-  return Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1);
-}
-
-function escapeMarkdown(text: string): string {
-  return text.replace(/([\\`*_[\]()])/g, "\\$1").replace(/\r?\n/g, " ");
 }

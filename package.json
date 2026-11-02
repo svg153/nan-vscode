@@ -2,7 +2,7 @@
   "name": "nan-builders-vscode",
   "displayName": "NaN Builders for VS Code",
   "description": "Use NaN Builders models natively in VS Code Chat and Agent mode.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "svg153",
   "license": "MIT",
   "repository": {
@@ -72,6 +72,7 @@
       "properties": {
         "nanBuilders.apiBaseUrl": {
           "type": "string",
+          "scope": "machine",
           "default": "https://api.nan.builders/v1",
           "description": "NaN Builders OpenAI-compatible API base URL. Change only for development or self-hosted compatibility testing."
         },
@@ -100,7 +101,7 @@
         "nanBuilders.completionModel": {
           "type": "string",
           "default": "",
-          "description": "Model ID for opt-in inline (ghost-text) completions. Empty disables the feature and no completion request is sent. Requests use POST /completions with the last 4,000 characters before the cursor, are aborted when you keep typing, and never show stale text."
+          "description": "Model ID for opt-in inline (ghost-text) completions. Empty disables the feature and no completion request is sent. Requests use POST /completions with the last 4,000 characters before the cursor, wait for a 150 ms quiet period, are aborted when you keep typing, and never show stale text."
         }
       }
     }
@@ -110,9 +111,12 @@
     "compile": "tsc -p .",
     "watch": "tsc -p . -w",
     "test:unit": "node --test out/test/*.test.js",
+    "test:coverage": "npm run compile && c8 --all --include \"out/src/**/*.js\" --exclude \"out/test/**/*.js\" --reporter=text --reporter=lcov --reporter=json-summary --reports-dir=coverage node --test out/test/*.test.js && node scripts/check-coverage.cjs",
     "test": "npm run compile && npm run test:unit",
     "test:insiders": "npm run compile && node scripts/run-insiders-integration.cjs",
-    "check": "npm run clean && npm run compile && npm run test:unit && npm run test:insiders",
+    "audit:dependencies": "node scripts/dependency-audit.cjs",
+    "lint": "oxlint src test",
+    "check": "npm run clean && npm run compile && npm run lint && npm run test:unit && npm run test:insiders",
     "package": "vsce package --no-dependencies",
     "lint:commits": "commitlint --from=HEAD~1 --to=HEAD",
     "release": "semantic-release",
@@ -131,8 +135,10 @@
     "@types/vscode": "^1.104.0",
     "@vscode/test-electron": "^3.1.0",
     "@vscode/vsce": "^4.0.0",
+    "c8": "^10.1.3",
     "conventional-changelog-conventionalcommits": "^10.0.0",
     "husky": "^9.1.7",
+    "oxlint": "^1.90.0",
     "semantic-release": "^25.0.9",
     "typescript": "^7.0.0"
   }

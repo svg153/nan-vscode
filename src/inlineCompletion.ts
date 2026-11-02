@@ -5,12 +5,29 @@
  * cancellation, and malformed responses without a VS Code host.
  */
 
+import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
+import { MAX_JSON_RESPONSE_BYTES, ResponseTooLargeError, readBoundedJson } from "./responseBody";
+
 /** Maximum prompt characters sent per request (tail ending at the cursor). */
 export const MAX_PROMPT_CHARS = 4000;
 /** Maximum characters returned as a ghost-text suggestion. */
 export const MAX_SUGGESTION_CHARS = 1000;
 /** Conservative generation budget so a suggestion stays interactive. */
 export const MAX_COMPLETION_TOKENS = 64;
+export const INLINE_COMPLETION_DEBOUNCE_MS = 150;
+
+export type InlineCompletionScheduler = (delayMs: number, signal: AbortSignal) => Promise<void>;
+
+export async function waitForInlineCompletionDebounce(
+  signal: AbortSignal,
+  schedule: InlineCompletionScheduler = scheduleDelay,
+): Promise<boolean> {
+  if (signal.aborted) {
+    return false;
+  }
+  await schedule(INLINE_COMPLETION_DEBOUNCE_MS, signal);
+  return !signal.aborted;
+}
 
 export interface CompletionRequest {
   model: string;
@@ -19,7 +36,7 @@ export interface CompletionRequest {
   temperature: number;
 }
 
-export type CompletionFailureReason = "cancelled" | "http" | "network" | "malformed" | "empty";
+export type CompletionFailureReason = "cancelled" | "http" | "network" | "malformed" | "empty" | "too_large";
 
 export type CompletionOutcome =
   | { ok: true; text: string }
@@ -93,12 +110,24 @@ export async function requestInlineCompletion(options: {
   request: CompletionRequest;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
+  endpointAuthorizer?: HttpEndpointAuthorizer;
 }): Promise<CompletionOutcome> {
   if (options.signal?.aborted) {
     return { ok: false, reason: "cancelled" };
   }
+  const baseUrl = options.baseUrl;
+  const url = `${baseUrl.replace(/\/+$/, "")}/completions`;
+  try {
+    await options.endpointAuthorizer?.authorize(baseUrl, options.signal);
+  } catch (error) {
+    return options.signal?.aborted || (error instanceof Error && error.name === "AbortError")
+      ? { ok: false, reason: "cancelled" }
+      : { ok: false, reason: "network" };
+  }
+  if (options.signal?.aborted) {
+    return { ok: false, reason: "cancelled" };
+  }
   const send = options.fetchImpl ?? fetch;
-  const url = `${options.baseUrl.replace(/\/+$/, "")}/completions`;
   let response: Response;
   try {
     response = await send(url, {
@@ -123,9 +152,28 @@ export async function requestInlineCompletion(options: {
     return { ok: false, reason: "http", status: response.status };
   }
   try {
-    const payload: unknown = await response.json();
+    const payload: unknown = await readBoundedJson(response, MAX_JSON_RESPONSE_BYTES);
     return parseCompletionResponse(payload);
-  } catch {
+  } catch (error) {
+    if (error instanceof ResponseTooLargeError) {
+      return { ok: false, reason: "too_large" };
+    }
     return options.signal?.aborted ? { ok: false, reason: "cancelled" } : { ok: false, reason: "malformed" };
   }
+}
+
+function scheduleDelay(delayMs: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout>;
+    const finish = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    timer = setTimeout(finish, delayMs);
+    signal.addEventListener("abort", finish, { once: true });
+    if (signal.aborted) {
+      finish();
+    }
+  });
 }
