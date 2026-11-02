@@ -281,8 +281,9 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     let response: Response;
     let body: ModelListResponse;
     try {
-      await this.endpointAuthorizer.authorize(this.apiBaseUrl(), cancellation.signal);
-      response = await fetch(`${this.apiBaseUrl()}/models`, {
+      const baseUrl = this.apiBaseUrl();
+      await this.endpointAuthorizer.authorize(baseUrl, cancellation.signal);
+      response = await fetch(`${baseUrl}/models`, {
         method: "GET",
         headers: {
           Authorization: `Bearer ${apiKey}`,
@@ -323,9 +324,10 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     body: Record<string, unknown>,
     signal: AbortSignal,
   ): Promise<Response> {
-    await this.endpointAuthorizer.authorize(this.apiBaseUrl(), signal);
+    const baseUrl = this.apiBaseUrl();
+    await this.endpointAuthorizer.authorize(baseUrl, signal);
     const send = async (requestBody: Record<string, unknown>): Promise<Response> =>
-      fetch(`${this.apiBaseUrl()}/chat/completions`, {
+      fetch(`${baseUrl}/chat/completions`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${apiKey}`,

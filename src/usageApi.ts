@@ -141,11 +141,12 @@ export function clampUsageLimit(value: number | undefined): number {
 /** Fetch one page of GET /v1/usage. Throws UsageApiError for every non-2xx or malformed body. */
 export async function fetchUsagePage(options: UsagePageOptions): Promise<UsageReport> {
   const fetchImpl = options.fetchImpl ?? fetch;
-  const url = buildUsageUrl(options);
+  const baseUrl = options.baseUrl;
+  const url = buildUsageUrl(options, baseUrl);
   const authScheme = "Bearer";
   let response: Response;
   try {
-    await options.endpointAuthorizer?.authorize(options.baseUrl, options.signal);
+    await options.endpointAuthorizer?.authorize(baseUrl, options.signal);
     response = await fetchImpl(url, {
       method: "GET",
       headers: {
@@ -286,8 +287,8 @@ export class UsageRateLimiter {
   }
 }
 
-function buildUsageUrl(options: UsagePageOptions): string {
-  const base = options.baseUrl.replace(/\/+$/, "");
+function buildUsageUrl(options: UsagePageOptions, baseUrl: string): string {
+  const base = baseUrl.replace(/\/+$/, "");
   const params = new URLSearchParams();
   if (options.startDate) params.set("start_date", options.startDate);
   if (options.endDate) params.set("end_date", options.endDate);

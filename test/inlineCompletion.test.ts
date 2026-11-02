@@ -181,6 +181,41 @@ test("requestInlineCompletion does not send the API key when endpoint authorizat
   assert.equal(fetchCalls, 0);
 });
 
+test("requestInlineCompletion keeps the confirmed endpoint when configuration changes during authorization", async () => {
+  const options = {
+    baseUrl: "http://confirmed.example.test/v1",
+    apiKey: "test-key",
+    userAgent: "test",
+    request: { model: "m", prompt: "p", max_tokens: 64, temperature: 0 },
+  };
+  let releaseAuthorization!: () => void;
+  let authorizedBaseUrl = "";
+  let requestedUrl = "";
+  const authorizationPending = new Promise<void>((resolve) => {
+    releaseAuthorization = resolve;
+  });
+  const requestOptions = {
+    ...options,
+    endpointAuthorizer: {
+      authorize: async (baseUrl: string) => {
+        authorizedBaseUrl = baseUrl;
+        await authorizationPending;
+      },
+    },
+    fetchImpl: async (url: RequestInfo | URL) => {
+      requestedUrl = String(url);
+      return jsonResponse({ choices: [{ text: "done" }] });
+    },
+  };
+  const completion = requestInlineCompletion(requestOptions);
+
+  requestOptions.baseUrl = "http://changed.example.test/v1";
+  releaseAuthorization();
+  assert.deepEqual(await completion, { ok: true, text: "done" });
+  assert.equal(authorizedBaseUrl, "http://confirmed.example.test/v1");
+  assert.equal(requestedUrl, "http://confirmed.example.test/v1/completions");
+});
+
 test("requestInlineCompletion maps HTTP failures without throwing", async () => {
   const cases: Array<[number, number]> = [
     [429, 429],

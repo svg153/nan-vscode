@@ -272,6 +272,36 @@ test("does not send usage requests when endpoint authorization is canceled", asy
   assert.equal(fetchCalls, 0);
 });
 
+test("usage request stays bound to the endpoint captured before authorization", async () => {
+  const options = { baseUrl: "http://confirmed.example.test/v1", apiKey: "test-key" };
+  let releaseAuthorization!: () => void;
+  let authorizedBaseUrl = "";
+  let requestedUrl = "";
+  const authorizationPending = new Promise<void>((resolve) => {
+    releaseAuthorization = resolve;
+  });
+  const requestOptions = {
+    ...options,
+    endpointAuthorizer: {
+      authorize: async (baseUrl: string) => {
+        authorizedBaseUrl = baseUrl;
+        await authorizationPending;
+      },
+    },
+    fetchImpl: async (url: RequestInfo | URL) => {
+      requestedUrl = String(url);
+      return json(reportPayload());
+    },
+  };
+  const request = fetchUsagePage(requestOptions);
+
+  requestOptions.baseUrl = "http://changed.example.test/v1";
+  releaseAuthorization();
+  await request;
+  assert.equal(authorizedBaseUrl, "http://confirmed.example.test/v1");
+  assert.equal(requestedUrl, "http://confirmed.example.test/v1/usage");
+});
+
 test("maps 429 to rate_limited with Retry-After seconds", async () => {
   await assert.rejects(
     fetchUsagePage({

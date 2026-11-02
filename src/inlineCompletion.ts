@@ -100,8 +100,10 @@ export async function requestInlineCompletion(options: {
   if (options.signal?.aborted) {
     return { ok: false, reason: "cancelled" };
   }
+  const baseUrl = options.baseUrl;
+  const url = `${baseUrl.replace(/\/+$/, "")}/completions`;
   try {
-    await options.endpointAuthorizer?.authorize(options.baseUrl, options.signal);
+    await options.endpointAuthorizer?.authorize(baseUrl, options.signal);
   } catch (error) {
     return options.signal?.aborted || (error instanceof Error && error.name === "AbortError")
       ? { ok: false, reason: "cancelled" }
@@ -111,7 +113,6 @@ export async function requestInlineCompletion(options: {
     return { ok: false, reason: "cancelled" };
   }
   const send = options.fetchImpl ?? fetch;
-  const url = `${options.baseUrl.replace(/\/+$/, "")}/completions`;
   let response: Response;
   try {
     response = await send(url, {
