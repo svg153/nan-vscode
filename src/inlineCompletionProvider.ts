@@ -74,7 +74,7 @@ export class NanInlineCompletionProvider implements vscode.InlineCompletionItemP
         cancellation.dispose();
       }
     } catch (error) {
-      diagnostic("inline.error", { message: error instanceof Error ? error.message : String(error) });
+      diagnostic("inline.error", { errorName: error instanceof Error ? error.name : typeof error });
       return undefined;
     }
   }

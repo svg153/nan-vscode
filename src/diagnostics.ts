@@ -10,10 +10,16 @@ export const MAX_DIAGNOSTIC_LOG_BYTES = 1_048_576;
 
 let logFile: string | undefined;
 let enabled = false;
+let outputChannel: { appendLine(value: string): void } | undefined;
 
-export function configureDiagnosticFile(directory: string, diagnosticsEnabled: boolean): void {
+export function configureDiagnosticFile(
+  directory: string,
+  diagnosticsEnabled: boolean,
+  channel?: { appendLine(value: string): void },
+): void {
   enabled = diagnosticsEnabled;
   logFile = undefined;
+  outputChannel = diagnosticsEnabled ? channel : undefined;
   if (!enabled) {
     return;
   }
@@ -42,7 +48,7 @@ export function diagnostic(event: string, details: Record<string, string | numbe
     heapUsedMb: Math.round(memory.heapUsed / 1_048_576),
     ...details,
   });
-  console.info("[NaN-DEBUG]", line);
+  outputChannel?.appendLine(line);
   if (logFile) {
     try {
       rotateIfFull(logFile);

@@ -24,7 +24,13 @@ export function activate(context: vscode.ExtensionContext): {
   const diagnosticsEnabled = vscode.workspace
     .getConfiguration("nanBuilders")
     .get<boolean>("diagnostics.enabled", false);
-  configureDiagnosticFile(context.logUri.fsPath, diagnosticsEnabled);
+  const diagnosticChannel = diagnosticsEnabled
+    ? vscode.window.createOutputChannel("NaN Builders Diagnostics")
+    : undefined;
+  if (diagnosticChannel) {
+    context.subscriptions.push(diagnosticChannel);
+  }
+  configureDiagnosticFile(context.logUri.fsPath, diagnosticsEnabled, diagnosticChannel);
   if (diagnosticsEnabled) {
     diagnostic("activate.begin", {
       version: String(context.extension.packageJSON.version ?? "unknown"),
@@ -100,7 +106,7 @@ export function activate(context: vscode.ExtensionContext): {
       await account.refresh({ force: options.force ?? false });
     } catch (error) {
       // Background failures stay in diagnostics + tooltip; only manual refreshes toast.
-      diagnostic("refreshAccountUsage.error", { message: errorMessage(error) });
+      diagnostic("refreshAccountUsage.error", { errorName: error instanceof Error ? error.name : typeof error });
       if (options.manual) {
         vscode.window.showErrorMessage(errorMessage(error));
       }
