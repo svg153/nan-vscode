@@ -1,7 +1,12 @@
 import * as vscode from "vscode";
 import { DEFAULT_API_BASE_URL, SECRET_API_KEY } from "./constants";
 import { diagnostic } from "./diagnostics";
-import { buildCompletionRequest, requestInlineCompletion } from "./inlineCompletion";
+import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
+import {
+  buildCompletionRequest,
+  requestInlineCompletion,
+  waitForInlineCompletionDebounce,
+} from "./inlineCompletion";
 
 /**
  * Opt-in inline ghost-text completions through the legacy `POST /completions`
@@ -9,7 +14,12 @@ import { buildCompletionRequest, requestInlineCompletion } from "./inlineComplet
  * text because every failure returns `undefined`.
  */
 export class NanInlineCompletionProvider implements vscode.InlineCompletionItemProvider {
-  constructor(private readonly secrets: vscode.SecretStorage) {}
+  private activeRequest?: AbortController;
+
+  constructor(
+    private readonly secrets: vscode.SecretStorage,
+    private readonly endpointAuthorizer: HttpEndpointAuthorizer,
+  ) {}
 
   async provideInlineCompletionItems(
     document: vscode.TextDocument,
@@ -17,16 +27,27 @@ export class NanInlineCompletionProvider implements vscode.InlineCompletionItemP
     _context: vscode.InlineCompletionContext,
     token: vscode.CancellationToken,
   ): Promise<vscode.InlineCompletionItem[] | undefined> {
+    this.activeRequest?.abort();
+    const controller = new AbortController();
+    this.activeRequest = controller;
+    const cancellation = token.onCancellationRequested(() => controller.abort());
+    if (token.isCancellationRequested) {
+      controller.abort();
+    }
+
     try {
+      if (controller.signal.aborted) {
+        return undefined;
+      }
       const model = vscode.workspace
         .getConfiguration("nanBuilders")
         .get<string>("completionModel", "")
         .trim();
-      if (!model || token.isCancellationRequested) {
+      if (!model || controller.signal.aborted) {
         return undefined;
       }
       const apiKey = await this.secrets.get(SECRET_API_KEY);
-      if (!apiKey || token.isCancellationRequested) {
+      if (!apiKey || controller.signal.aborted) {
         return undefined;
       }
       const request = buildCompletionRequest({
@@ -38,44 +59,50 @@ export class NanInlineCompletionProvider implements vscode.InlineCompletionItemP
         return undefined;
       }
 
-      // Register the listener before any further check so a cancellation in the
-      // gap cannot be missed (the token returns no-op events once cancelled);
-      // re-check and abort for cancellations that already happened.
-      const controller = new AbortController();
-      const cancellation = token.onCancellationRequested(() => controller.abort());
-      if (token.isCancellationRequested) {
-        controller.abort();
+      if (!(await waitForInlineCompletionDebounce(controller.signal))) {
+        return undefined;
       }
-      try {
-        const outcome = await requestInlineCompletion({
-          baseUrl: vscode.workspace
-            .getConfiguration("nanBuilders")
-            .get<string>("apiBaseUrl", DEFAULT_API_BASE_URL),
-          apiKey,
-          userAgent: userAgent(),
-          request,
-          signal: controller.signal,
-        });
-        diagnostic(
-          "inline.complete",
-          outcome.ok
-            ? { ok: true }
-            : {
-                ok: false,
-                reason: outcome.reason,
-                ...(outcome.status !== undefined ? { status: outcome.status } : {}),
-              },
-        );
-        if (!outcome.ok || controller.signal.aborted || token.isCancellationRequested) {
-          return undefined;
-        }
-        return [{ insertText: outcome.text, range: new vscode.Range(position, position) }];
-      } finally {
-        cancellation.dispose();
+
+      const outcome = await requestInlineCompletion({
+        baseUrl: vscode.workspace
+          .getConfiguration("nanBuilders")
+          .get<string>("apiBaseUrl", DEFAULT_API_BASE_URL),
+        apiKey,
+        userAgent: userAgent(),
+        request,
+        signal: controller.signal,
+        endpointAuthorizer: this.endpointAuthorizer,
+      });
+      diagnostic(
+        "inline.complete",
+        outcome.ok
+          ? { ok: true }
+          : {
+              ok: false,
+              reason: outcome.reason,
+              ...(outcome.status !== undefined ? { status: outcome.status } : {}),
+            },
+      );
+      if (
+        !outcome.ok ||
+        controller.signal.aborted ||
+        token.isCancellationRequested ||
+        this.activeRequest !== controller
+      ) {
+        return undefined;
       }
+      return [{ insertText: outcome.text, range: new vscode.Range(position, position) }];
     } catch (error) {
-      diagnostic("inline.error", { message: error instanceof Error ? error.message : String(error) });
+      if (error instanceof Error && error.name === "AbortError") {
+        return undefined;
+      }
+      diagnostic("inline.error", { errorName: error instanceof Error ? error.name : typeof error });
       return undefined;
+    } finally {
+      cancellation.dispose();
+      if (this.activeRequest === controller) {
+        this.activeRequest = undefined;
+      }
     }
   }
 }

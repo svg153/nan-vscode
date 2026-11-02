@@ -12,6 +12,8 @@ src/**
 test/**
 scripts/**
 out/test/**
+coverage/**
+dependency-audit/**
 tsconfig.json
 renovate.json
 **/*.map

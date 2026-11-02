@@ -16,12 +16,14 @@ export function normalizeHistory(value: unknown, today = utcDate()): DailyUsage[
   const firstDate = new Date(Date.parse(`${today}T00:00:00Z`) - (RETENTION_DAYS - 1) * 86_400_000)
     .toISOString()
     .slice(0, 10);
-  return value
-    .filter(isDailyUsage)
-    .map((row) => ({ ...row }))
-    .filter((row) => row.date >= firstDate && row.date <= today)
-    .sort((a, b) => b.date.localeCompare(a.date) || a.modelId.localeCompare(b.modelId))
-    .slice(0, MAX_ROWS);
+  // oxlint-disable-next-line unicorn/no-array-sort
+    return value
+        .filter(isDailyUsage)
+        .map((row) => ({ ...row }))
+        .filter((row) => row.date >= firstDate && row.date <= today)
+        // oxlint-disable-next-line unicorn/no-array-sort
+        .sort((a, b) => b.date.localeCompare(a.date) || a.modelId.localeCompare(b.modelId))
+        .slice(0, MAX_ROWS);
 }
 
 export function addUsage(

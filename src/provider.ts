@@ -2,20 +2,22 @@ import * as vscode from "vscode";
 import { DEFAULT_API_BASE_URL, SECRET_API_KEY } from "./constants";
 import { diagnostic } from "./diagnostics";
 import { filterDiscoveredModelIds, getKnownModel, reasoningDescription, toDisplayMetadata } from "./modelCatalog";
-import { OpenAIStreamDecoder } from "./openai/stream";
-import { buildToolNameMappings, sanitizeSchema, sanitizeToolName } from "./openai/tooling";
-import type { OpenAIContentPart, OpenAIMessage, OpenAIToolDefinition, OpenAIUsage } from "./openai/types";
-import { UsageTracker } from "./usageTracker";
+import { convertMessages, convertTools, estimateTokens, httpError, isImagePart, reasoningEffort } from "./openai/request";
+import { OpenAIStreamDecoder, StreamLimitError, type StreamEvent } from "./openai/stream";
+import type { OpenAIUsage } from "./openai/types";
+import { sanitizeUpstreamText } from "./text";
+import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
+import type { UsageTracker } from "./usageTracker";
+import {
+  MAX_ERROR_RESPONSE_BYTES,
+  MAX_JSON_RESPONSE_BYTES,
+  ResponseTooLargeError,
+  readBoundedJson,
+  readBoundedResponseText,
+} from "./responseBody";
 
 interface ModelListResponse {
   data?: Array<{ id?: string }>;
-}
-
-interface ToolMapping {
-  readonly definitions: OpenAIToolDefinition[];
-  readonly sanitizedToOriginal: ReadonlyMap<string, string>;
-  readonly originalToSanitized: ReadonlyMap<string, string>;
-  readonly toolChoice?: "auto" | "required" | { type: "function"; function: { name: string } };
 }
 
 interface CachedModels {
@@ -30,8 +32,9 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   private cache: CachedModels | undefined;
 
   constructor(
-    private readonly context: vscode.ExtensionContext,
-    private readonly usage: UsageTracker,
+    private readonly context: Pick<vscode.ExtensionContext, "secrets">,
+    private readonly usage: Pick<UsageTracker, "record">,
+    private readonly endpointAuthorizer: HttpEndpointAuthorizer,
   ) {}
 
   dispose(): void {
@@ -60,7 +63,15 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       return [];
     }
 
-    const ids = await this.fetchModelIds(apiKey, token);
+    let ids: string[];
+    try {
+      ids = await this.fetchModelIds(apiKey, token);
+    } catch (error) {
+      if (isAbortError(error)) {
+        return [];
+      }
+      throw error;
+    }
     const includeUnknown = vscode.workspace
       .getConfiguration("nanBuilders")
       .get<boolean>("includeUnknownModels", false);
@@ -98,8 +109,14 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       throw new Error("NaN Builders API key is not configured. Run 'NaN Builders: Manage Provider'.");
     }
 
-    const toolMapping = convertTools(options);
-    const openaiMessages = convertMessages(messages, toolMapping.originalToSanitized);
+    const toolMapping = convertTools(options.tools ?? [], options.toolMode === vscode.LanguageModelChatToolMode.Required);
+    const openaiMessages = convertMessages(
+      messages.map((message) => ({
+        role: message.role === vscode.LanguageModelChatMessageRole.User ? "user" : "assistant",
+        content: message.content ?? [],
+      })),
+      toolMapping.originalToSanitized,
+    );
     const requestBody: Record<string, unknown> = {
       model: model.id,
       messages: openaiMessages,
@@ -129,15 +146,11 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       const textDecoder = new TextDecoder();
       const streamDecoder = new OpenAIStreamDecoder();
       let lastUsage: OpenAIUsage | undefined;
-
-      while (!token.isCancellationRequested) {
-        const { done, value } = await reader.read();
-        if (done) {
-          break;
-        }
-        chunkCount += 1;
-        const events = streamDecoder.push(textDecoder.decode(value, { stream: true }));
+      const reportStreamEvents = (events: StreamEvent[]): void => {
         for (const event of events) {
+          if (token.isCancellationRequested) {
+            return;
+          }
           if (event.type === "text") {
             progress.report(new vscode.LanguageModelTextPart(event.text));
           } else if (event.type === "tool") {
@@ -147,17 +160,24 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
             lastUsage = event.usage;
           }
         }
+      };
+
+      while (!token.isCancellationRequested) {
+              // oxlint-disable-next-line eslint/no-await-in-loop
+              const { done, value } = await reader.read();
+        if (token.isCancellationRequested) {
+          break;
+        }
+        if (done) {
+          break;
+        }
+        chunkCount += 1;
+        reportStreamEvents(streamDecoder.push(textDecoder.decode(value, { stream: true })));
       }
 
-      for (const event of streamDecoder.finish()) {
-        if (event.type === "text") {
-          progress.report(new vscode.LanguageModelTextPart(event.text));
-        } else if (event.type === "tool") {
-          const originalName = toolMapping.sanitizedToOriginal.get(event.tool.name) ?? event.tool.name;
-          progress.report(new vscode.LanguageModelToolCallPart(event.tool.id, originalName, event.tool.input));
-        } else {
-          lastUsage = event.usage;
-        }
+      if (!token.isCancellationRequested) {
+        reportStreamEvents(streamDecoder.push(textDecoder.decode()));
+        reportStreamEvents(streamDecoder.finish());
       }
       if (!token.isCancellationRequested) {
         await this.usage.record(model.id, lastUsage);
@@ -175,13 +195,23 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
         }
       }
     } catch (error) {
+      if (error instanceof StreamLimitError && reader) {
+        try {
+          await reader.cancel(error);
+        } catch (cancelError) {
+          diagnostic("chat.stream.cancel.error", {
+            modelId: model.id,
+            errorName: cancelError instanceof Error ? cancelError.name : typeof cancelError,
+          });
+        }
+      }
       diagnostic("chat.error", {
         modelId: model.id,
         elapsedMs: Date.now() - startedAt,
         errorName: error instanceof Error ? error.name : typeof error,
         cancelled: token.isCancellationRequested,
       });
-      if (!token.isCancellationRequested) {
+      if (!token.isCancellationRequested && !isAbortError(error)) {
         throw error;
       }
     } finally {
@@ -271,7 +301,9 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     let response: Response;
     let body: ModelListResponse;
     try {
-      response = await fetch(`${this.apiBaseUrl()}/models`, {
+      const baseUrl = this.apiBaseUrl();
+      await this.endpointAuthorizer.authorize(baseUrl, cancellation.signal);
+      response = await fetch(`${baseUrl}/models`, {
         method: "GET",
         headers: {
           Authorization: `Bearer ${apiKey}`,
@@ -282,12 +314,15 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       });
       diagnostic("models.fetch.response", { status: response.status, elapsedMs: Date.now() - startedAt });
       if (!response.ok) {
+        await response.body?.cancel();
         if (response.status === 401 || response.status === 403) {
           throw new Error("NaN Builders rejected the API key. Update it with 'NaN Builders: Manage Provider'.");
         }
-        throw new Error(`Unable to discover NaN Builders models: HTTP ${response.status} ${response.statusText}`);
+        throw new Error(
+          `Unable to discover NaN Builders models: HTTP ${response.status} ${sanitizeUpstreamText(response.statusText, 200)}`,
+        );
       }
-      body = (await response.json()) as ModelListResponse;
+      body = (await readBoundedJson(response, MAX_JSON_RESPONSE_BYTES)) as ModelListResponse;
       diagnostic("models.fetch.json", { rawModelCount: body.data?.length ?? 0, elapsedMs: Date.now() - startedAt });
     } catch (error) {
       diagnostic("models.fetch.error", {
@@ -310,8 +345,10 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     body: Record<string, unknown>,
     signal: AbortSignal,
   ): Promise<Response> {
+    const baseUrl = this.apiBaseUrl();
+    await this.endpointAuthorizer.authorize(baseUrl, signal);
     const send = async (requestBody: Record<string, unknown>): Promise<Response> =>
-      fetch(`${this.apiBaseUrl()}/chat/completions`, {
+      fetch(`${baseUrl}/chat/completions`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${apiKey}`,
@@ -325,7 +362,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
 
     let response = await send(body);
     if (!response.ok) {
-      const text = await response.text();
+      const text = await readChatErrorText(response);
       if (
         response.status === 400 &&
         "stream_options" in body &&
@@ -335,13 +372,13 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
         delete fallback.stream_options;
         response = await send(fallback);
       } else {
-        throw httpError(response, text);
+        throw httpError(response.status, response.statusText, text);
       }
     }
 
     if (!response.ok) {
-      const text = await response.text();
-      throw httpError(response, text);
+      const text = await readChatErrorText(response);
+      throw httpError(response.status, response.statusText, text);
     }
     return response;
   }
@@ -384,12 +421,6 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   }
 }
 
-function httpError(response: Response, body: string): Error {
-  const cleanBody = body.trim().slice(0, 500);
-  const suffix = cleanBody ? `: ${cleanBody}` : "";
-  return new Error(`NaN Builders API error ${response.status} ${response.statusText}${suffix}`);
-}
-
 function cancellationSignal(token: vscode.CancellationToken): { signal: AbortSignal; dispose: () => void } {
   const controller = new AbortController();
   if (token.isCancellationRequested) {
@@ -400,151 +431,17 @@ function cancellationSignal(token: vscode.CancellationToken): { signal: AbortSig
   return { signal: controller.signal, dispose: () => listener.dispose() };
 }
 
-function reasoningEffort(options: { readonly [name: string]: unknown } | undefined): string {
-  const requested = options?.reasoning_effort;
-  return typeof requested === "string" && /^(none|minimal|low|medium|high|max)$/.test(requested)
-    ? requested
-    : "low";
-}
-
-function estimateTokens(text: string): number {
-  return Math.max(1, Math.ceil(text.length / 4));
-}
-
-function convertMessages(
-  messages: readonly vscode.LanguageModelChatRequestMessage[],
-  originalToSanitized: ReadonlyMap<string, string>,
-): OpenAIMessage[] {
-  const converted: OpenAIMessage[] = [];
-
-  for (const message of messages) {
-    const textParts: OpenAIContentPart[] = [];
-    const toolCalls: NonNullable<OpenAIMessage["tool_calls"]> = [];
-    const toolResults: Array<{ callId: string; content: string }> = [];
-
-    for (const part of message.content ?? []) {
-      if (part instanceof vscode.LanguageModelTextPart) {
-        textParts.push({ type: "text", text: part.value });
-      } else if (part instanceof vscode.LanguageModelToolCallPart) {
-        toolCalls.push({
-          id: part.callId,
-          type: "function",
-          function: {
-            name: originalToSanitized.get(part.name) ?? sanitizeToolName(part.name),
-            arguments: safeStringify(part.input),
-          },
-        });
-      } else if (isToolResultPart(part)) {
-        toolResults.push({
-          callId: part.callId,
-          content: flattenToolResult(part.content),
-        });
-      } else if (isImagePart(part)) {
-        textParts.push({
-          type: "image_url",
-          image_url: {
-            url: `data:${part.mimeType};base64,${Buffer.from(part.data).toString("base64")}`,
-          },
-        });
-      }
-    }
-
-    if (toolCalls.length > 0) {
-      converted.push({
-        role: "assistant",
-        content: textParts.length ? contentValue(textParts) : null,
-        tool_calls: toolCalls,
-      });
-    }
-
-    for (const result of toolResults) {
-      converted.push({
-        role: "tool",
-        tool_call_id: result.callId,
-        content: result.content,
-      });
-    }
-
-    if (toolCalls.length === 0 && textParts.length > 0) {
-      converted.push({
-        role: message.role === vscode.LanguageModelChatMessageRole.User ? "user" : "assistant",
-        content: contentValue(textParts),
-      });
-    }
-  }
-
-  return converted;
-}
-
-function contentValue(parts: OpenAIContentPart[]): string | OpenAIContentPart[] {
-  if (parts.every((part) => part.type === "text")) {
-    return parts.map((part) => (part.type === "text" ? part.text : "")).join("");
-  }
-  return parts;
-}
-
-function convertTools(options: vscode.ProvideLanguageModelChatResponseOptions): ToolMapping {
-  const tools = options.tools ?? [];
-  const { originalToSanitized, sanitizedToOriginal } = buildToolNameMappings(tools.map((tool) => tool.name));
-  const definitions: OpenAIToolDefinition[] = [];
-
-  for (const tool of tools) {
-    const sanitized = originalToSanitized.get(tool.name) ?? sanitizeToolName(tool.name);
-    definitions.push({
-      type: "function",
-      function: {
-        name: sanitized,
-        description: tool.description,
-        parameters: sanitizeSchema(tool.inputSchema),
-      },
-    });
-  }
-
-  let toolChoice: ToolMapping["toolChoice"];
-  if (definitions.length > 0) {
-    toolChoice = "auto";
-  }
-  if (options.toolMode === vscode.LanguageModelChatToolMode.Required) {
-    toolChoice = "required";
-  }
-
-  return { definitions, sanitizedToOriginal, originalToSanitized, toolChoice };
-}
-
-function safeStringify(value: unknown): string {
+async function readChatErrorText(response: Response): Promise<string> {
   try {
-    return JSON.stringify(value ?? {});
-  } catch {
-    return "{}";
-  }
-}
-
-function isToolResultPart(value: unknown): value is { callId: string; content: readonly unknown[] } {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const candidate = value as { callId?: unknown; content?: unknown };
-  return typeof candidate.callId === "string" && Array.isArray(candidate.content);
-}
-
-function isImagePart(value: unknown): value is { data: Uint8Array; mimeType: string } {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const candidate = value as { data?: unknown; mimeType?: unknown };
-  return candidate.data instanceof Uint8Array && typeof candidate.mimeType === "string" && candidate.mimeType.startsWith("image/");
-}
-
-function flattenToolResult(content: readonly unknown[]): string {
-  const pieces: string[] = [];
-  for (const part of content) {
-    if (part instanceof vscode.LanguageModelTextPart) {
-      pieces.push(part.value);
-    } else if (typeof part === "string") {
-      pieces.push(part);
-    } else {
-      pieces.push(safeStringify(part));
+    return await readBoundedResponseText(response, MAX_ERROR_RESPONSE_BYTES);
+  } catch (error) {
+    if (error instanceof ResponseTooLargeError) {
+      return "";
     }
+    throw error;
   }
-  return pieces.join("");
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }

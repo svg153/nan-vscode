@@ -1,13 +1,25 @@
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-/** Temporary local crash diagnostics. Remove after identifying the Insiders restart cause. */
+/**
+ * Opt-in local diagnostics for provider and status-bar troubleshooting.
+ * Disabled by default: nothing is written to disk unless the user enables it.
+ * When enabled, JSON lines are appended to a size-bounded log file.
+ */
+export const MAX_DIAGNOSTIC_LOG_BYTES = 1_048_576;
+
 let logFile: string | undefined;
 let enabled = false;
+let outputChannel: { appendLine(value: string): void } | undefined;
 
-export function configureDiagnosticFile(directory: string, diagnosticsEnabled: boolean): void {
+export function configureDiagnosticFile(
+  directory: string,
+  diagnosticsEnabled: boolean,
+  channel?: { appendLine(value: string): void },
+): void {
   enabled = diagnosticsEnabled;
   logFile = undefined;
+  outputChannel = diagnosticsEnabled ? channel : undefined;
   if (!enabled) {
     return;
   }
@@ -36,12 +48,31 @@ export function diagnostic(event: string, details: Record<string, string | numbe
     heapUsedMb: Math.round(memory.heapUsed / 1_048_576),
     ...details,
   });
-  console.info("[NaN-DEBUG]", line);
+  outputChannel?.appendLine(line);
   if (logFile) {
     try {
+      rotateIfFull(logFile);
       appendFileSync(logFile, `${line}\n`, "utf8");
     } catch {
       logFile = undefined;
     }
+  }
+}
+
+/** Keep the log bounded: rotate the full file to `<log>.1`, truncating if rotation fails. */
+function rotateIfFull(file: string): void {
+  let size: number;
+  try {
+    size = statSync(file).size;
+  } catch {
+    return;
+  }
+  if (size < MAX_DIAGNOSTIC_LOG_BYTES) {
+    return;
+  }
+  try {
+    renameSync(file, `${file}.1`);
+  } catch {
+    writeFileSync(file, "", "utf8");
   }
 }

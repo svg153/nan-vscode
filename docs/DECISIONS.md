@@ -54,7 +54,17 @@ The marker `AUTONOMOUS-DECISION` is used for decisions made during implementatio
 
 **Research:** Account-wide usage currently comes from a separate cloud endpoint authenticated with the NaN web session, while inference uses the API key. Coupling the extension to browser cookies or `nan-cli` would make installation less self-contained and expand credential handling.
 
-**Decision:** The MVP shows local VS Code session usage from streamed API usage metadata. Account-wide quota is deferred until there is a clean key-authenticated API or a separately reviewed account-login feature.
+**Decision (MVP):** The MVP shows local VS Code session usage from streamed API usage metadata. Account-wide quota is deferred until there is a clean key-authenticated API or a separately reviewed account-login feature.
+
+**Update — account-wide usage shipped:** NaN Builders now exposes a key-authenticated `GET /v1/usage` endpoint, so the deferral above is resolved without cookies or a second login flow. `src/accountUsage.ts` implements it:
+
+- `AccountUsageService` fetches the current-month window with the configured API key, keeps the last successful snapshot, and records `lastError` instead of hiding stale-but-real data when a refresh fails.
+- The status bar headline is the most restricted monthly quota percentage in use (`$(graph) NaN NN%`), never a sum across models; without a snapshot it falls back to the compact local session total.
+- The tooltip and **NaN Builders: Show Usage** render window totals, all-time totals, per-model rows with documented monthly percentages, and the daily API-request cutoff date.
+- Refreshes are throttled client-side (60s between automatic refreshes plus a 30 requests/minute limiter); a 429 surfaces its `Retry-After` hint.
+- Percentages are only shown for models with a documented fixed monthly counter; models without one (`qwen3.6`, `gemma4`) and billing-period quotas (`glm5.3`) show a note instead of a fabricated percentage.
+
+**Still deferred:** reading browser cookies or the `nan-cli` session file, and any second NaN account login flow inside the extension. Account-wide usage stays API-key-only, and local session usage remains the fallback whenever no key is configured or the endpoint fails.
 
 ## AUTONOMOUS-DECISION: Marketplace branding remains community-scoped
 
