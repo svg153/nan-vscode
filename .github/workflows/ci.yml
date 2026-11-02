@@ -23,6 +23,8 @@ jobs:
           path: .vscode-test
           key: vscode-test-insiders-${{ runner.os }}-${{ hashFiles('scripts/run-insiders-integration.cjs', 'package-lock.json') }}
       - run: npm ci
+      - name: Audit dependencies (advisories are non-blocking)
+        run: npm run audit:dependencies
       - run: npm run check
       - run: npm run test:coverage
       - run: npm run package
@@ -33,6 +35,14 @@ jobs:
             coverage/lcov.info
             coverage/coverage-summary.json
           if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: dependency-audit
+          path: |
+            dependency-audit/audit.json
+            dependency-audit/summary.md
+          if-no-files-found: warn
       - uses: actions/upload-artifact@v7
         with:
           name: nan-builders-vscode-vsix

@@ -113,6 +113,7 @@
     "test:coverage": "npm run compile && c8 --all --include \"out/src/**/*.js\" --exclude \"out/test/**/*.js\" --reporter=text --reporter=lcov --reporter=json-summary --reports-dir=coverage node --test out/test/*.test.js",
     "test": "npm run compile && npm run test:unit",
     "test:insiders": "npm run compile && node scripts/run-insiders-integration.cjs",
+    "audit:dependencies": "node scripts/dependency-audit.cjs",
     "lint": "oxlint src test",
     "check": "npm run clean && npm run compile && npm run lint && npm run test:unit && npm run test:insiders",
     "package": "vsce package --no-dependencies",
