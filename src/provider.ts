@@ -3,7 +3,7 @@ import { DEFAULT_API_BASE_URL, SECRET_API_KEY } from "./constants";
 import { diagnostic } from "./diagnostics";
 import { filterDiscoveredModelIds, getKnownModel, reasoningDescription, toDisplayMetadata } from "./modelCatalog";
 import { convertMessages, convertTools, estimateTokens, httpError, isImagePart, reasoningEffort } from "./openai/request";
-import { OpenAIStreamDecoder } from "./openai/stream";
+import { OpenAIStreamDecoder, type StreamEvent } from "./openai/stream";
 import type { OpenAIUsage } from "./openai/types";
 import { sanitizeUpstreamText } from "./text";
 import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
@@ -139,15 +139,11 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       const textDecoder = new TextDecoder();
       const streamDecoder = new OpenAIStreamDecoder();
       let lastUsage: OpenAIUsage | undefined;
-
-      while (!token.isCancellationRequested) {
-        const { done, value } = await reader.read();
-        if (done) {
-          break;
-        }
-        chunkCount += 1;
-        const events = streamDecoder.push(textDecoder.decode(value, { stream: true }));
+      const reportStreamEvents = (events: StreamEvent[]): void => {
         for (const event of events) {
+          if (token.isCancellationRequested) {
+            return;
+          }
           if (event.type === "text") {
             progress.report(new vscode.LanguageModelTextPart(event.text));
           } else if (event.type === "tool") {
@@ -157,17 +153,23 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
             lastUsage = event.usage;
           }
         }
+      };
+
+      while (!token.isCancellationRequested) {
+        const { done, value } = await reader.read();
+        if (token.isCancellationRequested) {
+          break;
+        }
+        if (done) {
+          break;
+        }
+        chunkCount += 1;
+        reportStreamEvents(streamDecoder.push(textDecoder.decode(value, { stream: true })));
       }
 
-      for (const event of streamDecoder.finish()) {
-        if (event.type === "text") {
-          progress.report(new vscode.LanguageModelTextPart(event.text));
-        } else if (event.type === "tool") {
-          const originalName = toolMapping.sanitizedToOriginal.get(event.tool.name) ?? event.tool.name;
-          progress.report(new vscode.LanguageModelToolCallPart(event.tool.id, originalName, event.tool.input));
-        } else {
-          lastUsage = event.usage;
-        }
+      if (!token.isCancellationRequested) {
+        reportStreamEvents(streamDecoder.push(textDecoder.decode()));
+        reportStreamEvents(streamDecoder.finish());
       }
       if (!token.isCancellationRequested) {
         await this.usage.record(model.id, lastUsage);

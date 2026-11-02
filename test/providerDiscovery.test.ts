@@ -15,6 +15,18 @@ class FakeEventEmitter {
   dispose(): void {}
 }
 
+class FakeLanguageModelTextPart {
+  constructor(readonly value: string) {}
+}
+
+class FakeLanguageModelToolCallPart {
+  constructor(
+    readonly callId: string,
+    readonly name: string,
+    readonly input: Record<string, unknown>,
+  ) {}
+}
+
 const moduleRequire = createRequire(__filename);
 const moduleLoader = moduleRequire("node:module") as ModuleLoader;
 const originalLoad = moduleLoader._load;
@@ -22,6 +34,10 @@ const settings = new Map<string, unknown>();
 const vscodeStub = {
   EventEmitter: FakeEventEmitter,
   extensions: { getExtension: () => undefined },
+  LanguageModelChatMessageRole: { User: 1, Assistant: 2 },
+  LanguageModelChatToolMode: { Auto: 1, Required: 2 },
+  LanguageModelTextPart: FakeLanguageModelTextPart,
+  LanguageModelToolCallPart: FakeLanguageModelToolCallPart,
   version: "test",
   window: { showInputBox: async () => undefined },
   workspace: {
@@ -64,6 +80,7 @@ function createHarness(fetcher: typeof fetch) {
   settings.set("includeUnknownModels", false);
   settings.set("modelCacheSeconds", 300);
   const calls: string[] = [];
+  let recordedUsage = 0;
   globalThis.fetch = async (input, init) => {
     calls.push(String(input));
     return fetcher(input, init);
@@ -77,14 +94,37 @@ function createHarness(fetcher: typeof fetch) {
   };
   const provider = new NanChatModelProvider(
     { secrets },
-    { record: async () => undefined },
+    {
+      record: async () => {
+        recordedUsage += 1;
+      },
+    },
     { authorize: async () => undefined },
   );
-  return { provider, calls };
+  return { provider, calls, get recordedUsage() { return recordedUsage; } };
 }
 
 function modelListResponse(body: unknown, init?: ResponseInit): Response {
   return new Response(JSON.stringify(body), init);
+}
+
+async function discoverChatModel(provider: InstanceType<typeof NanChatModelProvider>) {
+  const [model] = await provider.provideLanguageModelChatInformation({ silent: true }, new TestCancellationToken());
+  assert.ok(model);
+  return model;
+}
+
+function findByteSequence(bytes: Uint8Array, sequence: Uint8Array): number {
+  for (let index = 0; index <= bytes.length - sequence.length; index += 1) {
+    if (sequence.every((byte, offset) => bytes[index + offset] === byte)) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function chatProgress(reported: unknown[]): vscode.Progress<vscode.LanguageModelResponsePart> {
+  return { report: (part) => reported.push(part) };
 }
 
 test("model discovery caches results and refresh invalidates them after a setting change", async () => {
@@ -195,6 +235,148 @@ test("cancellation aborts an in-flight model request", async () => {
     assert.equal(harness.calls.length, 1);
   } finally {
     harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("chat finalization emits a multibyte character split across response chunks", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalTextDecoder = globalThis.TextDecoder;
+  let finalFlushCount = 0;
+  class TrackingTextDecoder extends originalTextDecoder {
+    override decode(input?: AllowSharedBufferSource, options?: TextDecodeOptions): string {
+      if (input === undefined) {
+        finalFlushCount += 1;
+      }
+      return super.decode(input, options);
+    }
+  }
+
+  const line = `data: ${JSON.stringify({ choices: [{ delta: { content: "Hello 世界" } }] })}\n`;
+  const encoded = new TextEncoder().encode(line);
+  const characterBytes = new TextEncoder().encode("世");
+  const characterStart = findByteSequence(encoded, characterBytes);
+  assert.ok(characterStart >= 0);
+  const splitAt = characterStart + 1;
+  const responseBody = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoded.slice(0, splitAt));
+      controller.enqueue(encoded.slice(splitAt));
+      controller.close();
+    },
+  });
+  const harness = createHarness(async (input) =>
+    String(input).endsWith("/models")
+      ? modelListResponse({ data: [{ id: "mimo-v2.6-flash" }] })
+      : new Response(responseBody),
+  );
+  const reported: unknown[] = [];
+  try {
+    const model = await discoverChatModel(harness.provider);
+    globalThis.TextDecoder = TrackingTextDecoder;
+    await harness.provider.provideLanguageModelChatResponse(
+      model,
+      [],
+      { toolMode: 1 as vscode.LanguageModelChatToolMode },
+      chatProgress(reported),
+      new TestCancellationToken(),
+    );
+    assert.deepEqual(reported, [new FakeLanguageModelTextPart("Hello 世界")]);
+    assert.equal(finalFlushCount, 1);
+    assert.equal(harness.recordedUsage, 1);
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+    globalThis.TextDecoder = originalTextDecoder;
+  }
+});
+
+test("chat cancellation skips final text and tool events buffered in the SSE decoder", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const cases = [
+    {
+      name: "partial text",
+      payload: { choices: [{ delta: { content: "partial text" } }] },
+    },
+    {
+      name: "partial tool arguments",
+      payload: {
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: "call_1",
+                  function: { name: "read_file", arguments: '{"path":"README.md"}' },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    },
+  ];
+
+  try {
+    for (const testCase of cases) {
+      await t.test(testCase.name, async () => {
+        let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+        let resolveNextRead!: () => void;
+        const nextRead = new Promise<void>((resolve) => {
+          resolveNextRead = resolve;
+        });
+        let pulls = 0;
+        const harness = createHarness(async (input, init) => {
+          if (String(input).endsWith("/models")) {
+            return modelListResponse({ data: [{ id: "mimo-v2.6-flash" }] });
+          }
+
+          const responseBody = new ReadableStream<Uint8Array>(
+            {
+              pull(controller) {
+                streamController = controller;
+                pulls += 1;
+                if (pulls === 1) {
+                  controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(testCase.payload)}`));
+                } else {
+                  resolveNextRead();
+                }
+              },
+            },
+            { highWaterMark: 0 },
+          );
+          init?.signal?.addEventListener(
+            "abort",
+            () => {
+              streamController?.close();
+            },
+            { once: true },
+          );
+          return new Response(responseBody);
+        });
+        const reported: unknown[] = [];
+        try {
+          const model = await discoverChatModel(harness.provider);
+          const token = new TestCancellationToken();
+          const response = harness.provider.provideLanguageModelChatResponse(
+            model,
+            [],
+            { toolMode: 1 as vscode.LanguageModelChatToolMode },
+            chatProgress(reported),
+            token,
+          );
+          await nextRead;
+          token.cancel();
+          await response;
+          assert.deepEqual(reported, []);
+          assert.equal(harness.recordedUsage, 0);
+        } finally {
+          harness.provider.dispose();
+        }
+      });
+    }
+  } finally {
     globalThis.fetch = originalFetch;
   }
 });
