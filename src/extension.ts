@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { NAN_DASHBOARD_URL, NAN_DOCS_URL, PROVIDER_VENDOR, SECRET_API_KEY, DEFAULT_API_BASE_URL } from "./constants";
 import { configureDiagnosticFile, diagnostic } from "./diagnostics";
+import { HttpEndpointGuard } from "./httpEndpointGuard";
 import { NanInlineCompletionProvider } from "./inlineCompletionProvider";
 import { NanChatModelProvider } from "./provider";
 import { AccountUsageService, accountModelRows } from "./accountUsage";
@@ -12,6 +13,9 @@ export function activate(context: vscode.ExtensionContext): {
   setTestApiKey(key: string): Promise<void>;
   clearTestApiKey(): Promise<void>;
   validateModelsTest(): Promise<number>;
+  refreshUsageTest(): Promise<void>;
+  setHttpConsentTest(approved: boolean): void;
+  readHttpConsentPromptsTest(): string[];
   readTestUsageHistory(): unknown;
   clearTestUsageHistory(): Promise<boolean>;
   provideInlineTest(
@@ -32,6 +36,21 @@ export function activate(context: vscode.ExtensionContext): {
     context.subscriptions.push(diagnosticChannel);
   }
   configureDiagnosticFile(context.logUri.fsPath, diagnosticsEnabled, diagnosticChannel);
+  let testHttpConsentApproved = false;
+  const testHttpConsentPrompts: string[] = [];
+  const endpointGuard = new HttpEndpointGuard(async (endpoint) => {
+    if (context.extensionMode === vscode.ExtensionMode.Test) {
+      testHttpConsentPrompts.push(endpoint);
+      return testHttpConsentApproved;
+    }
+
+    const choice = await vscode.window.showWarningMessage(
+      `NaN Builders will send your API key over unencrypted HTTP to ${endpoint}. Anyone able to observe this network traffic could read the key. Continue only if you trust this endpoint and network.`,
+      { modal: true },
+      "Send API key over HTTP",
+    );
+    return choice === "Send API key over HTTP";
+  });
   if (diagnosticsEnabled) {
     diagnostic("activate.begin", {
       version: String(context.extension.packageJSON.version ?? "unknown"),
@@ -56,10 +75,10 @@ export function activate(context: vscode.ExtensionContext): {
         .replace(/\/+$/, ""),
       apiKey,
     };
-  });
+  }, endpointGuard);
   const usage = new UsageTracker(context.globalState, account);
   diagnostic("activate.usageTracker.created");
-  const provider = new NanChatModelProvider(context, usage);
+  const provider = new NanChatModelProvider(context, usage, endpointGuard);
   let inlineStartupGate: (() => Promise<void>) | undefined;
   let inlineTestSource: vscode.CancellationTokenSource | undefined;
   let inlineRegistrationSelector: vscode.DocumentSelector | undefined;
@@ -76,7 +95,7 @@ export function activate(context: vscode.ExtensionContext): {
           onDidChange: (listener) => context.secrets.onDidChange(listener),
         }
       : context.secrets;
-  const inlineCompletions = new NanInlineCompletionProvider(inlineSecrets);
+  const inlineCompletions = new NanInlineCompletionProvider(inlineSecrets, endpointGuard);
   const registerInlineCompletions = (selector: vscode.DocumentSelector): vscode.Disposable => {
     inlineRegistrationSelector = selector;
     return vscode.languages.registerInlineCompletionItemProvider(selector, inlineCompletions);
@@ -106,6 +125,9 @@ export function activate(context: vscode.ExtensionContext): {
     try {
       await account.refresh({ force: options.force ?? false });
     } catch (error) {
+      if (isAbortError(error)) {
+        return;
+      }
       // Background failures stay in diagnostics + tooltip; only manual refreshes toast.
       diagnostic("refreshAccountUsage.error", { errorName: error instanceof Error ? error.name : typeof error });
       if (options.manual) {
@@ -205,6 +227,11 @@ export function activate(context: vscode.ExtensionContext): {
         setTestApiKey: (key) => provider.setApiKey(key),
         clearTestApiKey: () => provider.clearApiKey(),
         validateModelsTest: () => provider.validateConfiguredKey(),
+        refreshUsageTest: () => refreshAccountUsage({ force: true }),
+        setHttpConsentTest: (approved) => {
+          testHttpConsentApproved = approved;
+        },
+        readHttpConsentPromptsTest: () => [...testHttpConsentPrompts],
         readTestUsageHistory: () => context.globalState.get("nanBuilders.localUsageHistory"),
         clearTestUsageHistory: () => usage.clearHistory(),
         provideInlineTest: async (document, position, options) => {
@@ -297,7 +324,9 @@ async function manageProvider(
         vscode.window.showInformationMessage(`NaN Builders API key saved. ${count} model IDs are currently available to this API key.`);
         await onKeyChanged?.();
       } catch (error) {
-        vscode.window.showErrorMessage(errorMessage(error));
+        if (!isAbortError(error)) {
+          vscode.window.showErrorMessage(errorMessage(error));
+        }
       }
       return;
     }
@@ -307,7 +336,9 @@ async function manageProvider(
         provider.refresh();
         vscode.window.showInformationMessage(`NaN Builders API key is valid. ${count} model IDs are currently available to this API key.`);
       } catch (error) {
-        vscode.window.showErrorMessage(errorMessage(error));
+        if (!isAbortError(error)) {
+          vscode.window.showErrorMessage(errorMessage(error));
+        }
       }
       return;
     }
@@ -388,6 +419,10 @@ function percentText(value: number): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }
 
 export function deactivate(): void {}

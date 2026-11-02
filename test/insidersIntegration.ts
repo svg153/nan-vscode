@@ -9,6 +9,8 @@ export async function run(): Promise<void> {
   let chatRequest: Record<string, unknown> | undefined;
   let completionRequest: Record<string, unknown> | undefined;
   let completionRequests = 0;
+  const routedRequests: string[] = [];
+  let originalGlobalFetch: typeof fetch | undefined;
   let cancelResponse: http.ServerResponse | undefined;
   let onCancelRequest: (() => void) | undefined;
   let serverError: Error | undefined;
@@ -20,6 +22,11 @@ export async function run(): Promise<void> {
     if (request.method === "GET" && request.url === "/v1/models") {
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ data: [{ id: "glm5.3-flash" }] }));
+      return;
+    }
+    if (request.method === "GET" && request.url?.startsWith("/v1/usage")) {
+      response.writeHead(404, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "No usage report in integration fixture." } }));
       return;
     }
     if (request.method === "POST" && request.url === "/v1/completions") {
@@ -110,6 +117,9 @@ export async function run(): Promise<void> {
     setTestApiKey(key: string): Promise<void>;
     clearTestApiKey(): Promise<void>;
     validateModelsTest(): Promise<number>;
+    refreshUsageTest(): Promise<void>;
+    setHttpConsentTest(approved: boolean): void;
+    readHttpConsentPromptsTest(): string[];
     readTestUsageHistory(): unknown;
     clearTestUsageHistory(): Promise<boolean>;
     provideInlineTest(
@@ -131,6 +141,9 @@ export async function run(): Promise<void> {
       setTestApiKey(key: string): Promise<void>;
       clearTestApiKey(): Promise<void>;
       validateModelsTest(): Promise<number>;
+      refreshUsageTest(): Promise<void>;
+      setHttpConsentTest(approved: boolean): void;
+      readHttpConsentPromptsTest(): string[];
       readTestUsageHistory(): unknown;
       clearTestUsageHistory(): Promise<boolean>;
       provideInlineTest(
@@ -155,9 +168,29 @@ export async function run(): Promise<void> {
       undefined,
       "Inline provider must not be registered when completionModel is empty.",
     );
-    await config.update("apiBaseUrl", `http://127.0.0.1:${address.port}/v1`, vscode.ConfigurationTarget.Global);
+    originalGlobalFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      const requestUrl = new URL(String(input));
+      if (requestUrl.hostname === "api.example.test") {
+        routedRequests.push(requestUrl.pathname);
+        const localUrl = new URL(`${requestUrl.pathname}${requestUrl.search}`, `http://127.0.0.1:${address.port}`);
+        return originalGlobalFetch!(localUrl, init);
+      }
+      return originalGlobalFetch!(input, init);
+    };
+    const remoteEndpoint = `http://api.example.test:${address.port}/v1`;
+    await config.update("apiBaseUrl", remoteEndpoint, vscode.ConfigurationTarget.Global);
     await testApi.setTestApiKey("integration-test-key");
     assert.equal(await testApi.clearTestUsageHistory(), true);
+
+    await assert.rejects(testApi.validateModelsTest(), (error: unknown) =>
+      error instanceof Error && error.name === "AbortError",
+    );
+    const promptsAfterCancel = testApi.readHttpConsentPromptsTest();
+    assert.ok(promptsAfterCancel.length >= 1);
+    assert.ok(promptsAfterCancel.every((endpoint) => endpoint === remoteEndpoint));
+    assert.equal(routedRequests.length, 0, "Canceling remote HTTP confirmation must prevent network requests.");
+    testApi.setHttpConsentTest(true);
 
     const originalFetch = globalThis.fetch;
     try {
@@ -190,6 +223,9 @@ export async function run(): Promise<void> {
     } finally {
       globalThis.fetch = originalFetch;
     }
+    const promptsAfterApproval = testApi.readHttpConsentPromptsTest();
+    assert.ok(promptsAfterApproval.length > promptsAfterCancel.length);
+    assert.ok(promptsAfterApproval.every((endpoint) => endpoint === remoteEndpoint));
 
     source = new vscode.CancellationTokenSource();
     timeout = setTimeout(() => source?.cancel(), 10_000);
@@ -325,6 +361,16 @@ export async function run(): Promise<void> {
     assert.equal(testApi.getInlineRegistrationTest(), undefined, "Clearing completionModel must dispose the registration.");
     assert.equal(await testApi.provideInlineTest(inlineDoc, cursor), undefined);
     assert.equal(completionRequests, 2, "Disabled feature must not send requests.");
+    await testApi.refreshUsageTest();
+    assert.ok(routedRequests.includes("/v1/models"), "Model discovery must use the authorized remote endpoint.");
+    assert.ok(routedRequests.includes("/v1/chat/completions"), "Chat must use the authorized remote endpoint.");
+    assert.ok(routedRequests.includes("/v1/completions"), "Inline completions must use the authorized remote endpoint.");
+    assert.ok(routedRequests.includes("/v1/usage"), "Account usage must use the authorized remote endpoint.");
+    assert.equal(
+      testApi.readHttpConsentPromptsTest().length,
+      promptsAfterApproval.length,
+      "Approval for an endpoint must be shared across model, chat, usage, and inline requests.",
+    );
     assert.ifError(serverError);
 
     console.log("NaN Builders VS Code integration test passed (mock API; no real key used).");
@@ -337,6 +383,9 @@ export async function run(): Promise<void> {
     if (config) {
       await config.update("apiBaseUrl", previousBaseUrl, vscode.ConfigurationTarget.Global);
       await config.update("completionModel", previousCompletionModel, vscode.ConfigurationTarget.Global);
+    }
+    if (originalGlobalFetch) {
+      globalThis.fetch = originalGlobalFetch;
     }
     if (tempDir) {
       fs.rmSync(tempDir, { recursive: true, force: true });

@@ -248,6 +248,30 @@ test("maps 401 to unauthorized", async () => {
   );
 });
 
+test("does not send usage requests when endpoint authorization is canceled", async () => {
+  let fetchCalls = 0;
+  const abortError = new Error("User canceled endpoint confirmation.");
+  abortError.name = "AbortError";
+
+  await assert.rejects(
+    fetchUsagePage({
+      baseUrl: "http://api.example.test/v1",
+      apiKey: "test-key",
+      endpointAuthorizer: {
+        authorize: async () => {
+          throw abortError;
+        },
+      },
+      fetchImpl: (async () => {
+        fetchCalls += 1;
+        return json({}, { status: 200 });
+      }) as typeof fetch,
+    }),
+    (error: unknown) => error === abortError,
+  );
+  assert.equal(fetchCalls, 0);
+});
+
 test("maps 429 to rate_limited with Retry-After seconds", async () => {
   await assert.rejects(
     fetchUsagePage({

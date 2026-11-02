@@ -8,6 +8,7 @@
 // - Rate limit: 30 requests per minute per member; a 429 carries Retry-After.
 
 import { sanitizeUpstreamText } from "./text";
+import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
 
 export const MAX_USAGE_WINDOW_DAYS = 90;
 export const USAGE_LIMIT_MIN = 1;
@@ -101,6 +102,7 @@ export interface UsagePageOptions {
   readonly userAgent?: string;
   readonly signal?: AbortSignal;
   readonly fetchImpl?: typeof fetch;
+  readonly endpointAuthorizer?: HttpEndpointAuthorizer;
 }
 
 export interface UsageReportOptions extends UsagePageOptions {
@@ -143,6 +145,7 @@ export async function fetchUsagePage(options: UsagePageOptions): Promise<UsageRe
   const authScheme = "Bearer";
   let response: Response;
   try {
+    await options.endpointAuthorizer?.authorize(options.baseUrl, options.signal);
     response = await fetchImpl(url, {
       method: "GET",
       headers: {

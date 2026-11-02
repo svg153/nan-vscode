@@ -6,6 +6,7 @@ import {
   fetchUsageReport,
 } from "./usageApi";
 import { monthlyQuotaProgress, NO_TOKEN_COUNTER_MODELS, nonMonthlyQuotaNote } from "./quotaCatalog";
+import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
 
 export interface AccountUsageConfig {
   readonly baseUrl: string;
@@ -51,7 +52,10 @@ export class AccountUsageService {
   private loadingValue = false;
   private readonly limiter = new UsageRateLimiter();
 
-  constructor(private readonly config: AccountUsageConfigSource) {}
+  constructor(
+    private readonly config: AccountUsageConfigSource,
+    private readonly endpointAuthorizer?: HttpEndpointAuthorizer,
+  ) {}
 
   get snapshot(): AccountUsageSnapshot | undefined {
     return this.snapshotValue;
@@ -101,6 +105,7 @@ export class AccountUsageService {
         endDate: window.endDate,
         signal: options.signal,
         fetchImpl,
+        endpointAuthorizer: this.endpointAuthorizer,
       });
       const snapshot: AccountUsageSnapshot = {
         startDate: report.startDate,

@@ -6,6 +6,7 @@ import { convertMessages, convertTools, estimateTokens, httpError, isImagePart, 
 import { OpenAIStreamDecoder } from "./openai/stream";
 import type { OpenAIUsage } from "./openai/types";
 import { sanitizeUpstreamText } from "./text";
+import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
 import { UsageTracker } from "./usageTracker";
 
 interface ModelListResponse {
@@ -26,6 +27,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly usage: UsageTracker,
+    private readonly endpointAuthorizer: HttpEndpointAuthorizer,
   ) {}
 
   dispose(): void {
@@ -54,7 +56,15 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       return [];
     }
 
-    const ids = await this.fetchModelIds(apiKey, token);
+    let ids: string[];
+    try {
+      ids = await this.fetchModelIds(apiKey, token);
+    } catch (error) {
+      if (isAbortError(error)) {
+        return [];
+      }
+      throw error;
+    }
     const includeUnknown = vscode.workspace
       .getConfiguration("nanBuilders")
       .get<boolean>("includeUnknownModels", false);
@@ -181,7 +191,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
         errorName: error instanceof Error ? error.name : typeof error,
         cancelled: token.isCancellationRequested,
       });
-      if (!token.isCancellationRequested) {
+      if (!token.isCancellationRequested && !isAbortError(error)) {
         throw error;
       }
     } finally {
@@ -271,6 +281,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     let response: Response;
     let body: ModelListResponse;
     try {
+      await this.endpointAuthorizer.authorize(this.apiBaseUrl(), cancellation.signal);
       response = await fetch(`${this.apiBaseUrl()}/models`, {
         method: "GET",
         headers: {
@@ -312,6 +323,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     body: Record<string, unknown>,
     signal: AbortSignal,
   ): Promise<Response> {
+    await this.endpointAuthorizer.authorize(this.apiBaseUrl(), signal);
     const send = async (requestBody: Record<string, unknown>): Promise<Response> =>
       fetch(`${this.apiBaseUrl()}/chat/completions`, {
         method: "POST",
@@ -394,4 +406,8 @@ function cancellationSignal(token: vscode.CancellationToken): { signal: AbortSig
   }
   const listener = token.onCancellationRequested(() => controller.abort());
   return { signal: controller.signal, dispose: () => listener.dispose() };
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }

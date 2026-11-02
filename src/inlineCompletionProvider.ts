@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { DEFAULT_API_BASE_URL, SECRET_API_KEY } from "./constants";
 import { diagnostic } from "./diagnostics";
+import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
 import { buildCompletionRequest, requestInlineCompletion } from "./inlineCompletion";
 
 /**
@@ -9,7 +10,10 @@ import { buildCompletionRequest, requestInlineCompletion } from "./inlineComplet
  * text because every failure returns `undefined`.
  */
 export class NanInlineCompletionProvider implements vscode.InlineCompletionItemProvider {
-  constructor(private readonly secrets: vscode.SecretStorage) {}
+  constructor(
+    private readonly secrets: vscode.SecretStorage,
+    private readonly endpointAuthorizer: HttpEndpointAuthorizer,
+  ) {}
 
   async provideInlineCompletionItems(
     document: vscode.TextDocument,
@@ -55,6 +59,7 @@ export class NanInlineCompletionProvider implements vscode.InlineCompletionItemP
           userAgent: userAgent(),
           request,
           signal: controller.signal,
+          endpointAuthorizer: this.endpointAuthorizer,
         });
         diagnostic(
           "inline.complete",
@@ -74,6 +79,9 @@ export class NanInlineCompletionProvider implements vscode.InlineCompletionItemP
         cancellation.dispose();
       }
     } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        return undefined;
+      }
       diagnostic("inline.error", { errorName: error instanceof Error ? error.name : typeof error });
       return undefined;
     }

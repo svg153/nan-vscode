@@ -157,6 +157,30 @@ test("requestInlineCompletion posts a bounded payload to {base}/completions", as
   });
 });
 
+test("requestInlineCompletion does not send the API key when endpoint authorization is canceled", async () => {
+  let fetchCalls = 0;
+  const outcome = await requestInlineCompletion({
+    baseUrl: "http://api.example.test/v1",
+    apiKey: "test-key",
+    userAgent: "test",
+    request: { model: "m", prompt: "p", max_tokens: 64, temperature: 0 },
+    endpointAuthorizer: {
+      authorize: async () => {
+        const error = new Error("User canceled endpoint confirmation.");
+        error.name = "AbortError";
+        throw error;
+      },
+    },
+    fetchImpl: (async () => {
+      fetchCalls += 1;
+      return jsonResponse({ choices: [{ text: "should not be sent" }] });
+    }) as typeof fetch,
+  });
+
+  assert.deepEqual(outcome, { ok: false, reason: "cancelled" });
+  assert.equal(fetchCalls, 0);
+});
+
 test("requestInlineCompletion maps HTTP failures without throwing", async () => {
   const cases: Array<[number, number]> = [
     [429, 429],

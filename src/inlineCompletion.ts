@@ -5,6 +5,8 @@
  * cancellation, and malformed responses without a VS Code host.
  */
 
+import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
+
 /** Maximum prompt characters sent per request (tail ending at the cursor). */
 export const MAX_PROMPT_CHARS = 4000;
 /** Maximum characters returned as a ghost-text suggestion. */
@@ -93,7 +95,18 @@ export async function requestInlineCompletion(options: {
   request: CompletionRequest;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
+  endpointAuthorizer?: HttpEndpointAuthorizer;
 }): Promise<CompletionOutcome> {
+  if (options.signal?.aborted) {
+    return { ok: false, reason: "cancelled" };
+  }
+  try {
+    await options.endpointAuthorizer?.authorize(options.baseUrl, options.signal);
+  } catch (error) {
+    return options.signal?.aborted || (error instanceof Error && error.name === "AbortError")
+      ? { ok: false, reason: "cancelled" }
+      : { ok: false, reason: "network" };
+  }
   if (options.signal?.aborted) {
     return { ok: false, reason: "cancelled" };
   }
