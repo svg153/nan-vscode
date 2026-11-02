@@ -24,7 +24,15 @@ jobs:
           key: vscode-test-insiders-${{ runner.os }}-${{ hashFiles('scripts/run-insiders-integration.cjs', 'package-lock.json') }}
       - run: npm ci
       - run: npm run check
+      - run: npm run test:coverage
       - run: npm run package
+      - uses: actions/upload-artifact@v7
+        with:
+          name: unit-test-coverage
+          path: |
+            coverage/lcov.info
+            coverage/coverage-summary.json
+          if-no-files-found: error
       - uses: actions/upload-artifact@v7
         with:
           name: nan-builders-vscode-vsix
