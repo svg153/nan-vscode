@@ -141,12 +141,17 @@ export async function run(): Promise<void> {
     }>("svg153.nan-builders-vscode");
     assert.ok(extension, "NaN Builders extension is not loaded in the development host.");
     assert.deepEqual(extension.packageJSON.extensionKind, ["workspace", "ui"]);
-    testApi = await extension.activate();
-    assert.ok(testApi, `Test hook missing (extension path ${extension.extensionPath}).`);
-
     config = vscode.workspace.getConfiguration("nanBuilders");
     previousBaseUrl = config.get<string>("apiBaseUrl");
     previousCompletionModel = config.get<string>("completionModel");
+    await config.update("completionModel", "", vscode.ConfigurationTarget.Global);
+    testApi = await extension.activate();
+    assert.ok(testApi, `Test hook missing (extension path ${extension.extensionPath}).`);
+    assert.equal(
+      testApi.getInlineRegistrationTest(),
+      undefined,
+      "Inline provider must not be registered when completionModel is empty.",
+    );
     await config.update("apiBaseUrl", `http://127.0.0.1:${address.port}/v1`, vscode.ConfigurationTarget.Global);
     await testApi.setTestApiKey("integration-test-key");
     assert.equal(await testApi.clearTestUsageHistory(), true);
@@ -281,6 +286,7 @@ export async function run(): Promise<void> {
 
     // Disabled when the setting is empty: no request, no stale text.
     await config.update("completionModel", "", vscode.ConfigurationTarget.Global);
+    assert.equal(testApi.getInlineRegistrationTest(), undefined, "Clearing completionModel must dispose the registration.");
     assert.equal(await testApi.provideInlineTest(inlineDoc, cursor), undefined);
     assert.equal(completionRequests, 2, "Disabled feature must not send requests.");
     assert.ifError(serverError);

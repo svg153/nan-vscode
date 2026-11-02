@@ -74,6 +74,25 @@ export function activate(context: vscode.ExtensionContext): {
     inlineRegistrationSelector = selector;
     return vscode.languages.registerInlineCompletionItemProvider(selector, inlineCompletions);
   };
+  let inlineRegistration: vscode.Disposable | undefined;
+  const syncInlineCompletions = (): void => {
+    const model = vscode.workspace.getConfiguration("nanBuilders").get<string>("completionModel", "").trim();
+    if (model && !inlineRegistration) {
+      inlineRegistration = registerInlineCompletions([{ scheme: "file" }]);
+    } else if (!model && inlineRegistration) {
+      inlineRegistration.dispose();
+      inlineRegistration = undefined;
+      inlineRegistrationSelector = undefined;
+    }
+  };
+  const inlineRegistrationCleanup: vscode.Disposable = {
+    dispose: () => {
+      inlineRegistration?.dispose();
+      inlineRegistration = undefined;
+      inlineRegistrationSelector = undefined;
+    },
+  };
+  syncInlineCompletions();
   diagnostic("activate.provider.created");
 
   const refreshAccountUsage = async (options: { force?: boolean; manual?: boolean } = {}): Promise<void> => {
@@ -93,7 +112,7 @@ export function activate(context: vscode.ExtensionContext): {
   context.subscriptions.push(
     usage,
     provider,
-    registerInlineCompletions([{ scheme: "file" }]),
+    inlineRegistrationCleanup,
     vscode.lm.registerLanguageModelChatProvider(PROVIDER_VENDOR, provider),
     vscode.commands.registerCommand("nanBuilders.manage", () => manageProvider(context, provider, refreshAccountUsage)),
     vscode.commands.registerCommand("nanBuilders.refreshModels", async () => {
@@ -157,6 +176,9 @@ export function activate(context: vscode.ExtensionContext): {
       if (event.affectsConfiguration("nanBuilders")) {
         provider.refresh();
         usage.refreshVisibility();
+      }
+      if (event.affectsConfiguration("nanBuilders.completionModel")) {
+        syncInlineCompletions();
       }
       if (event.affectsConfiguration("nanBuilders.apiBaseUrl")) {
         void refreshAccountUsage({ force: true });
