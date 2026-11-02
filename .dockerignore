@@ -1,0 +1,30 @@
+# Dependencies
+node_modules
+npm-debug.log*
+
+# Build output
+out
+coverage
+*.vsix
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git
+.gitignore
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Docs
+docs
