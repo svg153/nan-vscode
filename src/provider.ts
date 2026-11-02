@@ -7,7 +7,7 @@ import { OpenAIStreamDecoder } from "./openai/stream";
 import type { OpenAIUsage } from "./openai/types";
 import { sanitizeUpstreamText } from "./text";
 import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
-import { UsageTracker } from "./usageTracker";
+import type { UsageTracker } from "./usageTracker";
 
 interface ModelListResponse {
   data?: Array<{ id?: string }>;
@@ -25,8 +25,8 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   private cache: CachedModels | undefined;
 
   constructor(
-    private readonly context: vscode.ExtensionContext,
-    private readonly usage: UsageTracker,
+    private readonly context: Pick<vscode.ExtensionContext, "secrets">,
+    private readonly usage: Pick<UsageTracker, "record">,
     private readonly endpointAuthorizer: HttpEndpointAuthorizer,
   ) {}
 
