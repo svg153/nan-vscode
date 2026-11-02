@@ -111,7 +111,7 @@
     "compile": "tsc -p .",
     "watch": "tsc -p . -w",
     "test:unit": "node --test out/test/*.test.js",
-    "test:coverage": "npm run compile && c8 --all --include \"out/src/**/*.js\" --exclude \"out/test/**/*.js\" --reporter=text --reporter=lcov --reporter=json-summary --reports-dir=coverage node --test out/test/*.test.js",
+    "test:coverage": "npm run compile && c8 --all --include \"out/src/**/*.js\" --exclude \"out/test/**/*.js\" --reporter=text --reporter=lcov --reporter=json-summary --reports-dir=coverage node --test out/test/*.test.js && node scripts/check-coverage.cjs",
     "test": "npm run compile && npm run test:unit",
     "test:insiders": "npm run compile && node scripts/run-insiders-integration.cjs",
     "audit:dependencies": "node scripts/dependency-audit.cjs",

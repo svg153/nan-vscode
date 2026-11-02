@@ -7,10 +7,17 @@ This is the validation pass for the provider release. Unit tests cover the strea
 ```bash
 npm ci
 npm run check
+npm run test:coverage
 npm run package
 ```
 
 Expected: TypeScript compilation, `oxlint` lint, unit tests, and VSIX packaging all complete successfully. `npm run check` runs `clean → compile → lint → test:unit → test:insiders`.
+
+## Unit-test coverage gate
+
+`npm run test:coverage` measures compiled files under `src/` with c8; tests and generated output are excluded. It enforces a minimum of **58.99% total source line coverage**, the measured round-two baseline. The gate reads c8's `coverage/coverage-summary.json` and reports both measured and required percentages when it fails. Its unit test uses temporary summaries just above and below the floor to exercise both outcomes without changing generated coverage artifacts.
+
+Raise the floor only after a new coverage report establishes a higher baseline and the corresponding test improvements are included. Keep the `src/` include and `test/` exclusion aligned with the documented source-only scope; do not lower the threshold to mask a regression.
 
 ## Automated VS Code integration
 
