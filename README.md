@@ -111,6 +111,7 @@ Account-wide usage details:
 - `api_requests` counts are only meaningful from 2026-09-02, the API's data cutoff.
 - Usage refreshes are throttled client-side (60s between automatic refreshes, plus a 30 requests/minute limiter). A 429 response surfaces its `Retry-After` hint.
 - Errors never clear the last good snapshot; they are reported in the tooltip and command output.
+- The shipped account-usage decision and its remaining deferrals are recorded in [Implementation decisions](https://github.com/svg153/nan-vscode/blob/main/docs/DECISIONS.md); the manual checks live in the [Validation checklist](https://github.com/svg153/nan-vscode/blob/main/docs/VALIDATION.md).
 
 Local usage remains available regardless of the API: **NaN Builders: Show Usage** also shows per-model daily aggregates (UTC days) retained locally for 30 days (up to 1,000 model/day records); use **Clear local history** in that dialog to remove them. Only counts and model IDs are stored in VS Code extension storage—never prompts, completions, API keys, or request payloads.
 
