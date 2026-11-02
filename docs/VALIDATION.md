@@ -62,7 +62,13 @@ Repeat with `glm5.3-flash`.
 
 Successful JSON responses from model discovery, usage, and inline completion are limited to **5 MiB**. JSON error bodies and chat error text are limited to **64 KiB**. Limits count bytes read from the Fetch response stream, and streamed bodies are canceled as soon as they exceed the limit. Oversize failures use a stable message and never include response content.
 
-Unit tests cover an exactly-at-limit body, streamed over-limit bodies, cancellation/release, multibyte decoding across chunks, and each API surface. These caps apply to response bodies only; request payload limits and successful chat SSE buffer limits are separate concerns.
+Unit tests cover an exactly-at-limit body, streamed over-limit bodies, cancellation/release, multibyte decoding across chunks, and each API surface. These caps apply to HTTP response bodies only; request payload limits and successful chat SSE buffers are bounded separately below.
+
+## Chat stream buffer limits
+
+The chat SSE decoder accepts a maximum line of **1,048,576 UTF-16 code units**. Each tool call is limited to **262,144 code units** of accumulated arguments and **256 code units** each for its ID and name; at most **128** tool calls can be buffered at once. Exceeding any cap raises a stable error, clears partial tool-call state, and cancels the upstream stream. A line without a delimiter is rejected as soon as its buffer crosses the line cap.
+
+Unit tests exercise exact and over-limit boundaries, a missing newline across chunks, partial tool-call suppression, and upstream cancellation. Normal SSE text, usage metadata, and tool calls below the limits retain their existing behavior.
 
 ## Agent tool calling
 

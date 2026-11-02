@@ -3,7 +3,7 @@ import { DEFAULT_API_BASE_URL, SECRET_API_KEY } from "./constants";
 import { diagnostic } from "./diagnostics";
 import { filterDiscoveredModelIds, getKnownModel, reasoningDescription, toDisplayMetadata } from "./modelCatalog";
 import { convertMessages, convertTools, estimateTokens, httpError, isImagePart, reasoningEffort } from "./openai/request";
-import { OpenAIStreamDecoder, type StreamEvent } from "./openai/stream";
+import { OpenAIStreamDecoder, StreamLimitError, type StreamEvent } from "./openai/stream";
 import type { OpenAIUsage } from "./openai/types";
 import { sanitizeUpstreamText } from "./text";
 import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
@@ -194,6 +194,16 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
         }
       }
     } catch (error) {
+      if (error instanceof StreamLimitError && reader) {
+        try {
+          await reader.cancel(error);
+        } catch (cancelError) {
+          diagnostic("chat.stream.cancel.error", {
+            modelId: model.id,
+            errorName: cancelError instanceof Error ? cancelError.name : typeof cancelError,
+          });
+        }
+      }
       diagnostic("chat.error", {
         modelId: model.id,
         elapsedMs: Date.now() - startedAt,

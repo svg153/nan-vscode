@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import test from "node:test";
 import type * as vscode from "vscode";
 import { MAX_ERROR_RESPONSE_BYTES, MAX_JSON_RESPONSE_BYTES, ResponseTooLargeError } from "../src/responseBody";
+import { MAX_SSE_LINE_CHARS, StreamLimitError } from "../src/openai/stream";
 
 type ModuleLoader = {
   _load: (request: string, parent: NodeJS.Module | null, isMain: boolean) => unknown;
@@ -439,6 +440,45 @@ test("chat rejects oversized HTTP error text with a stable error and cancels the
         !error.message.includes("A".repeat(32)),
     );
     assert.equal(oversized.wasCancelled(), true);
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("chat cancels the upstream stream when an unterminated SSE line exceeds its limit", async () => {
+  const originalFetch = globalThis.fetch;
+  let cancelled = false;
+  const body = new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        controller.enqueue(new TextEncoder().encode("x".repeat(MAX_SSE_LINE_CHARS + 1)));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  const harness = createHarness(async (input) =>
+    String(input).endsWith("/models") ? modelListResponse({ data: [{ id: "mimo-v2.6-flash" }] }) : new Response(body),
+  );
+  try {
+    const model = await discoverChatModel(harness.provider);
+    await assert.rejects(
+      harness.provider.provideLanguageModelChatResponse(
+        model,
+        [],
+        { toolMode: 1 as vscode.LanguageModelChatToolMode },
+        chatProgress([]),
+        new TestCancellationToken(),
+      ),
+      (error: unknown) =>
+        error instanceof StreamLimitError &&
+        error.kind === "line" &&
+        error.message === "NaN Builders chat stream exceeded the maximum SSE line size.",
+    );
+    assert.equal(cancelled, true);
   } finally {
     harness.provider.dispose();
     globalThis.fetch = originalFetch;
