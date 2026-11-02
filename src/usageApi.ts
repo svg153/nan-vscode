@@ -353,10 +353,14 @@ function sanitizeErrorText(text: string): string {
   return sanitizeUpstreamText(text, 200);
 }
 
-function parseRetryAfter(header: string | null): number | undefined {
+export function parseRetryAfter(header: string | null, now: number = Date.now()): number | undefined {
   if (!header) return undefined;
   const seconds = Number(header);
-  return Number.isFinite(seconds) && seconds >= 0 ? Math.ceil(seconds) : undefined;
+  if (Number.isFinite(seconds)) return seconds >= 0 ? Math.ceil(seconds) : undefined;
+
+  const retryAt = Date.parse(header);
+  if (!Number.isFinite(retryAt) || !Number.isFinite(now) || retryAt <= now) return undefined;
+  return Math.ceil((retryAt - now) / 1_000);
 }
 
 function parseRow(value: unknown, index: number): UsageRow {

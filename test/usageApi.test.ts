@@ -9,6 +9,7 @@ import {
   clampUsageWindow,
   fetchUsagePage,
   fetchUsageReport,
+  parseRetryAfter,
 } from "../src/usageApi";
 
 const authScheme = "Bearer";
@@ -263,6 +264,14 @@ test("maps 429 to rate_limited with Retry-After seconds", async () => {
       error.kind === "rate_limited" &&
       error.retryAfterSeconds === 12,
   );
+});
+
+test("parses Retry-After HTTP dates using the supplied reference time", () => {
+  const now = Date.parse("2026-11-02T18:00:00.000Z");
+  assert.equal(parseRetryAfter("Mon, 02 Nov 2026 18:00:12 GMT", now), 12);
+  assert.equal(parseRetryAfter("Mon, 02 Nov 2026 17:59:59 GMT", now), undefined);
+  assert.equal(parseRetryAfter("not a date", now), undefined);
+  assert.equal(parseRetryAfter("-1", now), undefined);
 });
 
 test("maps 400 to bad_request carrying the server message", async () => {
