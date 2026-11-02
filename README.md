@@ -78,7 +78,7 @@ Available settings:
 | `nanBuilders.includeUnknownModels` | `false` | Expose unknown IDs without tool or vision metadata. |
 | `nanBuilders.completionModel` | `""` | Model ID for opt-in inline ghost-text completions; empty disables the feature and no completion request is sent. |
 
-When `nanBuilders.apiBaseUrl` uses non-loopback `http:`, the extension asks before sending the stored API key. The confirmation is remembered for that endpoint until the extension session ends and covers model discovery, chat, account usage, and inline completions. Canceling prevents the request; HTTPS and loopback HTTP endpoints do not prompt.
+When `nanBuilders.apiBaseUrl` uses non-loopback `http:`, the extension asks before sending the stored API key. The decision is remembered for that endpoint until the extension session ends and covers model discovery, chat, account usage, and inline completions. A declined endpoint stays blocked without repeating the prompt; changing the endpoint clears declined decisions. Canceling prevents the request; HTTPS and loopback HTTP endpoints do not prompt.
 
 ## Remote workspaces
 

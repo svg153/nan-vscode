@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { NAN_DASHBOARD_URL, NAN_DOCS_URL, PROVIDER_VENDOR, SECRET_API_KEY, DEFAULT_API_BASE_URL } from "./constants";
 import { configureDiagnosticFile, diagnostic } from "./diagnostics";
-import { HttpEndpointGuard } from "./httpEndpointGuard";
+import { HttpEndpointConsentDeniedError, HttpEndpointGuard } from "./httpEndpointGuard";
 import { NanInlineCompletionProvider } from "./inlineCompletionProvider";
 import { NanChatModelProvider } from "./provider";
 import { AccountUsageService, accountModelRows } from "./accountUsage";
@@ -210,6 +210,7 @@ export function activate(context: vscode.ExtensionContext): {
         syncInlineCompletions();
       }
       if (event.affectsConfiguration("nanBuilders.apiBaseUrl")) {
+        endpointGuard.resetDenials();
         void refreshAccountUsage({ force: true });
       }
     }),
@@ -230,6 +231,7 @@ export function activate(context: vscode.ExtensionContext): {
         refreshUsageTest: () => refreshAccountUsage({ force: true }),
         setHttpConsentTest: (approved) => {
           testHttpConsentApproved = approved;
+          endpointGuard.resetDenials();
         },
         readHttpConsentPromptsTest: () => [...testHttpConsentPrompts],
         readTestUsageHistory: () => context.globalState.get("nanBuilders.localUsageHistory"),
@@ -324,7 +326,11 @@ async function manageProvider(
         vscode.window.showInformationMessage(`NaN Builders API key saved. ${count} model IDs are currently available to this API key.`);
         await onKeyChanged?.();
       } catch (error) {
-        if (!isAbortError(error)) {
+        if (error instanceof HttpEndpointConsentDeniedError) {
+          vscode.window.showInformationMessage(
+            "The API key was saved, but it was not validated because HTTP endpoint access was declined.",
+          );
+        } else if (!isAbortError(error)) {
           vscode.window.showErrorMessage(errorMessage(error));
         }
       }
@@ -336,7 +342,9 @@ async function manageProvider(
         provider.refresh();
         vscode.window.showInformationMessage(`NaN Builders API key is valid. ${count} model IDs are currently available to this API key.`);
       } catch (error) {
-        if (!isAbortError(error)) {
+        if (error instanceof HttpEndpointConsentDeniedError) {
+          vscode.window.showInformationMessage("Validation was canceled because HTTP endpoint access was declined.");
+        } else if (!isAbortError(error)) {
           vscode.window.showErrorMessage(errorMessage(error));
         }
       }

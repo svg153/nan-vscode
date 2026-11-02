@@ -4,8 +4,16 @@ export interface HttpEndpointAuthorizer {
   authorize(baseUrl: string, signal?: AbortSignal): Promise<void>;
 }
 
+export class HttpEndpointConsentDeniedError extends Error {
+  constructor() {
+    super("The user declined to send the API key to this HTTP endpoint.");
+    this.name = "AbortError";
+  }
+}
+
 export class HttpEndpointGuard implements HttpEndpointAuthorizer {
   private readonly confirmed = new Set<string>();
+  private readonly denied = new Set<string>();
   private readonly pending = new Map<string, Promise<boolean>>();
 
   constructor(private readonly confirmRemoteHttp: (endpoint: string) => Promise<boolean>) {}
@@ -19,11 +27,22 @@ export class HttpEndpointGuard implements HttpEndpointAuthorizer {
     if (!endpoint || this.confirmed.has(endpoint)) {
       return;
     }
+    if (this.denied.has(endpoint)) {
+      throw new HttpEndpointConsentDeniedError();
+    }
 
     const approved = await this.confirmOnce(endpoint);
-    if (signal?.aborted || !approved) {
+    if (signal?.aborted) {
       throw requestAborted();
     }
+    if (!approved) {
+      this.denied.add(endpoint);
+      throw new HttpEndpointConsentDeniedError();
+    }
+  }
+
+  resetDenials(): void {
+    this.denied.clear();
   }
 
   private async confirmOnce(endpoint: string): Promise<boolean> {

@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
-import { HttpEndpointGuard, remoteHttpEndpoint } from "../src/httpEndpointGuard";
+import {
+  HttpEndpointConsentDeniedError,
+  HttpEndpointGuard,
+  remoteHttpEndpoint,
+} from "../src/httpEndpointGuard";
 
 test("API base URL is machine-scoped to prevent workspace endpoint overrides", () => {
   const packageJson = JSON.parse(readFileSync(resolve(__dirname, "../../package.json"), "utf8")) as {
@@ -63,7 +67,7 @@ test("HttpEndpointGuard remembers approval and de-duplicates concurrent prompts"
   assert.equal(promptCount, 1);
 });
 
-test("HttpEndpointGuard rejects canceled confirmation and allows a later retry", async () => {
+test("HttpEndpointGuard remembers a denial until the endpoint setting changes", async () => {
   let promptCount = 0;
   const guard = new HttpEndpointGuard(async () => {
     promptCount += 1;
@@ -71,8 +75,14 @@ test("HttpEndpointGuard rejects canceled confirmation and allows a later retry",
   });
 
   await assert.rejects(guard.authorize("http://api.example.test/v1"), (error: unknown) =>
-    error instanceof Error && error.name === "AbortError",
+    error instanceof HttpEndpointConsentDeniedError && error.name === "AbortError",
   );
+  await assert.rejects(guard.authorize("http://api.example.test/v1"), (error: unknown) =>
+    error instanceof HttpEndpointConsentDeniedError && error.name === "AbortError",
+  );
+  assert.equal(promptCount, 1, "A declined endpoint must not prompt again on every request.");
+
+  guard.resetDenials();
   await guard.authorize("http://api.example.test/v1");
   assert.equal(promptCount, 2);
 });
