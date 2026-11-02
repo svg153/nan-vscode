@@ -13,6 +13,20 @@ export const MAX_PROMPT_CHARS = 4000;
 export const MAX_SUGGESTION_CHARS = 1000;
 /** Conservative generation budget so a suggestion stays interactive. */
 export const MAX_COMPLETION_TOKENS = 64;
+export const INLINE_COMPLETION_DEBOUNCE_MS = 150;
+
+export type InlineCompletionScheduler = (delayMs: number, signal: AbortSignal) => Promise<void>;
+
+export async function waitForInlineCompletionDebounce(
+  signal: AbortSignal,
+  schedule: InlineCompletionScheduler = scheduleDelay,
+): Promise<boolean> {
+  if (signal.aborted) {
+    return false;
+  }
+  await schedule(INLINE_COMPLETION_DEBOUNCE_MS, signal);
+  return !signal.aborted;
+}
 
 export interface CompletionRequest {
   model: string;
@@ -142,4 +156,20 @@ export async function requestInlineCompletion(options: {
   } catch {
     return options.signal?.aborted ? { ok: false, reason: "cancelled" } : { ok: false, reason: "malformed" };
   }
+}
+
+function scheduleDelay(delayMs: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout>;
+    const finish = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    timer = setTimeout(finish, delayMs);
+    signal.addEventListener("abort", finish, { once: true });
+    if (signal.aborted) {
+      finish();
+    }
+  });
 }

@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   MAX_COMPLETION_TOKENS,
+  INLINE_COMPLETION_DEBOUNCE_MS,
   MAX_PROMPT_CHARS,
   MAX_SUGGESTION_CHARS,
   buildCompletionRequest,
   parseCompletionResponse,
   requestInlineCompletion,
+  waitForInlineCompletionDebounce,
 } from "../src/inlineCompletion";
 
 const LONG_TEXT = "x".repeat(MAX_PROMPT_CHARS * 2);
@@ -71,6 +73,34 @@ test("buildCompletionRequest stays within documented bounds and fields", () => {
   assert.equal(request.temperature, 0);
   assert.ok(request.prompt.length <= MAX_PROMPT_CHARS);
   assert.deepEqual(Object.keys(request).sort(), ["max_tokens", "model", "prompt", "temperature"]);
+});
+
+test("inline debounce uses the fixed quiet period and an injectable scheduler", async () => {
+  const controller = new AbortController();
+  const delays: number[] = [];
+  const ready = await waitForInlineCompletionDebounce(controller.signal, async (delayMs, signal) => {
+    assert.equal(signal, controller.signal);
+    delays.push(delayMs);
+  });
+
+  assert.equal(ready, true);
+  assert.deepEqual(delays, [INLINE_COMPLETION_DEBOUNCE_MS]);
+  assert.equal(INLINE_COMPLETION_DEBOUNCE_MS, 150);
+});
+
+test("inline debounce resolves as canceled when its signal aborts", async () => {
+  const controller = new AbortController();
+  let scheduledDelay = 0;
+  const pending = waitForInlineCompletionDebounce(controller.signal, (delayMs, signal) => {
+    scheduledDelay = delayMs;
+    return new Promise<void>((resolve) => {
+      signal.addEventListener("abort", () => resolve(), { once: true });
+    });
+  });
+
+  controller.abort();
+  assert.equal(await pending, false);
+  assert.equal(scheduledDelay, INLINE_COMPLETION_DEBOUNCE_MS);
 });
 
 test("parseCompletionResponse normalizes newlines and strips leading blank lines", () => {

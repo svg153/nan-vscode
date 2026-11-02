@@ -337,6 +337,22 @@ export async function run(): Promise<void> {
     assert.equal(inlineRange.end.line, cursor.line);
     assert.equal(inlineRange.end.character, cursor.character);
 
+    const beforeDebouncedTriggers = completionRequests;
+    const debouncedResults = await Promise.all([
+      testApi.provideInlineTest(inlineDoc, cursor),
+      testApi.provideInlineTest(inlineDoc, cursor),
+    ]);
+    assert.equal(
+      debouncedResults.filter((result) => result !== undefined).length,
+      1,
+      "Only the latest inline trigger may return a suggestion.",
+    );
+    assert.equal(
+      completionRequests,
+      beforeDebouncedTriggers + 1,
+      "Rapid inline triggers must collapse into one billable request.",
+    );
+
     // Cancelación a nivel de proveedor: el token se cancela en cuanto el mock
     // recibe la solicitud (en vuelo) y el proveedor devuelve undefined sin texto.
     const cancelPath = path.join(tempDir, "cancel.js");
@@ -347,20 +363,20 @@ export async function run(): Promise<void> {
       cancelDoc.positionAt(cancelDoc.getText().length),
     );
     assert.equal(cancelItems, undefined, "Cancelled request must not yield items.");
-    assert.equal(completionRequests, 2, "Cancellation must not skip the request itself.");
+    assert.equal(completionRequests, 3, "Cancellation must not skip the request itself.");
 
     // Cancelación durante el arranque: el token se cancela exactamente en el
     // límite de secrets.get, tras la comprobación de entrada y antes de la
     // solicitud, sin depender de temporizadores.
     const earlyCancelItems = await testApi.provideInlineTest(inlineDoc, cursor, { cancelDuringStartup: true });
     assert.equal(earlyCancelItems, undefined, "Token cancelled during startup must not yield items.");
-    assert.equal(completionRequests, 2, "Token cancelled during startup must not send requests.");
+    assert.equal(completionRequests, 3, "Token cancelled during startup must not send requests.");
 
     // Disabled when the setting is empty: no request, no stale text.
     await config.update("completionModel", "", vscode.ConfigurationTarget.Global);
     assert.equal(testApi.getInlineRegistrationTest(), undefined, "Clearing completionModel must dispose the registration.");
     assert.equal(await testApi.provideInlineTest(inlineDoc, cursor), undefined);
-    assert.equal(completionRequests, 2, "Disabled feature must not send requests.");
+    assert.equal(completionRequests, 3, "Disabled feature must not send requests.");
     await testApi.refreshUsageTest();
     assert.ok(routedRequests.includes("/v1/models"), "Model discovery must use the authorized remote endpoint.");
     assert.ok(routedRequests.includes("/v1/chat/completions"), "Chat must use the authorized remote endpoint.");
