@@ -153,6 +153,7 @@ No alternate chat webview is created; the provider uses the built-in VS Code Cha
 
 - API keys are stored with VS Code `SecretStorage`, not in settings JSON or the repository.
 - The extension does not log API keys.
+- `nanBuilders.apiBaseUrl` is machine-scoped so a workspace cannot redirect the stored API key to another endpoint.
 - Changing `nanBuilders.apiBaseUrl` sends the configured key to that endpoint, so only change it to a server you trust.
 
 ## Development and contribution

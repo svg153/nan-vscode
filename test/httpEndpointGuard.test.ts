@@ -1,6 +1,19 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import test from "node:test";
 import { HttpEndpointGuard, remoteHttpEndpoint } from "../src/httpEndpointGuard";
+
+test("API base URL is machine-scoped to prevent workspace endpoint overrides", () => {
+  const packageJson = JSON.parse(readFileSync(resolve(__dirname, "../../package.json"), "utf8")) as {
+    contributes?: {
+      configuration?: {
+        properties?: Record<string, { scope?: string }>;
+      };
+    };
+  };
+  assert.equal(packageJson.contributes?.configuration?.properties?.["nanBuilders.apiBaseUrl"]?.scope, "machine");
+});
 
 test("remoteHttpEndpoint requires confirmation only for non-loopback HTTP", () => {
   for (const endpoint of [
