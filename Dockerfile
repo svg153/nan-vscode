@@ -2,7 +2,7 @@
 # Usage: docker build -t nan-vscode-test .
 #        docker run --rm nan-vscode-test
 
-FROM node:24-bookworm
+FROM node:26-bookworm
 
 # Install VS Code dependencies for testing
 RUN apt-get update && apt-get install -y \
