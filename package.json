@@ -102,7 +102,13 @@
           "type": "string",
           "default": "",
           "description": "Model ID for opt-in inline (ghost-text) completions. Empty disables the feature and no completion request is sent. Requests use POST /completions with the last 4,000 characters before the cursor, are aborted when you keep typing, and never show stale text."
-        }
+                },
+                "nanBuilders.defaultReasoningEffort": {
+                  "type": "string",
+                  "default": "low",
+                  "enum": ["none", "minimal", "low", "medium", "high", "max"],
+                  "markdownDescription": "Reasoning effort sent to NaN when the chat request does not specify one. Models that manage reasoning themselves ignore it."
+                }
       }
     }
   },
