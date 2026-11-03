@@ -73,8 +73,9 @@
         "nanBuilders.apiBaseUrl": {
           "type": "string",
           "default": "https://api.nan.builders/v1",
-          "description": "NaN Builders OpenAI-compatible API base URL. Change only for development or self-hosted compatibility testing."
-        },
+                  "scope": "machine",
+                  "description": "NaN Builders OpenAI-compatible API base URL. Change only for development or self-hosted compatibility testing."
+                },
         "nanBuilders.modelCacheSeconds": {
           "type": "number",
           "default": 300,
