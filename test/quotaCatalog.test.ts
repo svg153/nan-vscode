@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { creditProgress, percentOf, quotaSummaryItems, unmeteredNote } from "../src/quotaCatalog";
+import { creditProgress, percentOf, quotaSummaryItems, roundCredits, sumCredits, unmeteredNote } from "../src/quotaCatalog";
 
 test("shows how each model is billed beside this extension's local-only usage", () => {
   const items = quotaSummaryItems(new Map([["glm5.3", { requests: 2, tokens: 250_000 }]]));
@@ -62,6 +62,15 @@ test("computes each model's share of the plan credit allowance, largest first", 
   assert.ok(kimi);
   assert.equal(kimi.usedCredits, 5_000);
   assert.equal(kimi.allowance, 20_000);
+});
+
+test("sumCredits rounds accumulated credit amounts to the billed precision", () => {
+  assert.equal(sumCredits([0.1, 0.2]), 0.3);
+  assert.equal(sumCredits([6_154.3, 0.1, 0.1]), 6_154.5);
+  assert.equal(sumCredits([]), 0);
+  assert.equal(sumCredits([Number.NaN, 2]), 2);
+  assert.equal(roundCredits(154.06), 154.1);
+  assert.equal(roundCredits(Number.POSITIVE_INFINITY), 0);
 });
 
 test("never fabricates a percentage without a positive allowance", () => {

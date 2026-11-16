@@ -112,6 +112,10 @@ Account-wide usage details:
 - The headline percentage is the plan-credit usage for the current billing period, never a sum across models.
 - Cached input tokens reported by NaN are shown for the window and for each model; they are already part of the prompt count, so they are never added to the token total.
 - While `credits.frozen` is true the subscription is inactive and credit-billed requests are refused, so the tooltip and QuickPick flag the plan credits as frozen instead of implying the allowance is spendable.
+- `credits.pack_expires_at` is rendered as a readable date with the distance in days ("expires 2026-06-01 (in 12 days)", "expires today", "expired on …") instead of a raw timestamp.
+- The QuickPick shows a **Window credits (calendar month)** row: the sum of the per-model credits rows, rounded to one decimal. NaN rounds each row and each model independently, so this figure can differ from the billing-period `used` total by tenths; it is labelled as an approximation and never replaces the headline percentage.
+- **Show Usage** ends with an **Open** section that deep-links to NaN Cloud settings (`#settings-api-keys`, the only route the single-page console serves) and to the model catalogue at `nan.builders/docs/models`.
+- A `402 insufficient_balance` from any endpoint appends which credit reason applies (allowance exhausted, frozen credits, or no active pack) and points at **NaN Builders: Show Usage**, instead of surfacing a bare status code.
 - Credits are billed and reported from 2026-11-10 onward, cached input tokens from 2026-11-11, and `api_requests` counts from 2026-09-02; earlier dates report 0.
 - Usage refreshes are throttled client-side (60s between automatic refreshes, plus a 30 requests/minute limiter). A 429 response surfaces its `Retry-After` hint.
 - Errors never clear the last good snapshot; they are reported in the tooltip and command output.

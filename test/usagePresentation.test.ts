@@ -7,10 +7,12 @@ import { normalizeHistory } from "../src/usageHistory";
 import {
   buildTooltipMarkdown,
   compact,
+  describePackExpiry,
   escapeMarkdown,
   formatCredits,
   formatPercent,
   statusBarText,
+  usageLinks,
 } from "../src/usagePresentation";
 
 function report(overrides: Partial<UsageReport> = {}): UsageReport {
@@ -111,6 +113,33 @@ test("formatCredits keeps whole credits compact and decimals to one place", () =
   assert.equal(formatCredits(0.4), "0.4");
 });
 
+test("describePackExpiry turns pack_expires_at into a readable date with day distance", () => {
+  const now = new Date("2026-05-20T10:30:00.000Z");
+  assert.equal(describePackExpiry("2026-06-01", now), "expires 2026-06-01 (in 12 days)");
+  assert.equal(describePackExpiry("2026-05-21", now), "expires tomorrow (2026-05-21)");
+  assert.equal(describePackExpiry("2026-05-20", now), "expires today (2026-05-20)");
+  assert.equal(describePackExpiry("2026-05-19", now), "expired on 2026-05-19");
+});
+
+test("describePackExpiry accepts ISO timestamps and passes through unparsable values", () => {
+  const now = new Date("2026-05-20T10:30:00.000Z");
+  assert.equal(describePackExpiry("2026-06-01T00:00:00.000Z", now), "expires 2026-06-01 (in 12 days)");
+  assert.equal(describePackExpiry("next billing cycle", now), "next billing cycle");
+  assert.equal(describePackExpiry("", now), "");
+});
+
+test("usageLinks points at the API-keys deep link and the model catalogue", () => {
+  const links = usageLinks();
+  assert.deepEqual(
+    links.map((link) => link.url),
+    ["https://cloud.nan.builders/#settings-api-keys", "https://nan.builders/docs/models"],
+  );
+  assert.deepEqual(
+    links.map((link) => link.label),
+    ["Open API keys", "Open model docs"],
+  );
+});
+
 test("tooltip includes the plan-credit percentage and the reporting period", () => {
   const md = buildTooltipMarkdown({
     snapshot: snapshot(),
@@ -122,7 +151,8 @@ test("tooltip includes the plan-credit percentage and the reporting period", () 
   });
   assert.match(md, /Account usage\*\* — 2026-01-01 → 2026-01-31/);
   assert.match(md, /Plan credits: allowance 7,000 · used 210 · remaining \*\*6,790\*\* · renews 2026-02-01/);
-  assert.match(md, /Credit pack: 1,000 until 2026-06-01/);
+  assert.match(md, /Credit pack: 1,000 credits · (expires|expired on) 2026-06-01/);
+  assert.match(md, /Window credits: \*\*210\*\* — approximate calendar-month sum of the per-model rows/);
   assert.match(md, /deepseek-v4-flash: 3[.,]?000 tokens · 210 credits · \*\*3%\*\* of plan credits/);
   assert.match(md, /Window totals: \*\*3[.,]?000 tokens\*\*/);
   assert.match(md, /Credits are billed and reported from 2026-11-10 onward/);

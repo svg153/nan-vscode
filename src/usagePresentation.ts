@@ -1,4 +1,5 @@
-import { accountModelRows, type AccountUsageError, type AccountUsageSnapshot } from "./accountUsage";
+import { accountModelRows, windowCredits, type AccountUsageError, type AccountUsageSnapshot } from "./accountUsage";
+import { NAN_API_KEYS_URL, NAN_MODELS_DOCS_URL } from "./constants";
 import type { QuotaSummaryItem } from "./quotaCatalog";
 import { sanitizeUpstreamText } from "./text";
 import {
@@ -42,6 +43,56 @@ export function formatCredits(value: number): string {
   return fraction ? `${grouped}.${fraction}` : grouped;
 }
 
+const DAY_MS = 86_400_000;
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Human-readable credit-pack expiry. NaN sends `pack_expires_at` as YYYY-MM-DD
+ * (or a full ISO timestamp); values that do not parse are returned verbatim so
+ * no date is fabricated.
+ */
+export function describePackExpiry(expiresAt: string, now: Date = new Date()): string {
+  const date = expiresAt.slice(0, 10);
+  const target = Date.parse(`${date}T00:00:00Z`);
+  if (!ISO_DATE.test(date) || Number.isNaN(target)) {
+    return expiresAt;
+  }
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const days = Math.round((target - today) / DAY_MS);
+  if (days < 0) {
+    return `expired on ${date}`;
+  }
+  if (days === 0) {
+    return `expires today (${date})`;
+  }
+  if (days === 1) {
+    return `expires tomorrow (${date})`;
+  }
+  return `expires ${date} (in ${days} days)`;
+}
+
+export interface UsageLink {
+  readonly label: string;
+  readonly description: string;
+  readonly url: string;
+}
+
+/** External actions offered from Show Usage, in display order. */
+export function usageLinks(): readonly UsageLink[] {
+  return [
+    {
+      label: "Open API keys",
+      description: "NaN Cloud Settings -> API Keys",
+      url: NAN_API_KEYS_URL,
+    },
+    {
+      label: "Open model docs",
+      description: "Model catalogue, limits and per-1M-token prices",
+      url: NAN_MODELS_DOCS_URL,
+    },
+  ];
+}
+
 /**
  * Plan credits for the current billing period. The field is additive and only
  * present on credit-billed accounts, so it yields no lines when absent.
@@ -79,8 +130,8 @@ function creditsLines(credits: UsageCredits | undefined): string[] {
     lines.push(`- Plan credits: ${parts.join(" · ")}\n`);
   }
   if (credits.packCredits) {
-    const expires = credits.packExpiresAt ? ` until ${escapeMarkdown(credits.packExpiresAt)}` : "";
-    lines.push(`- Credit pack: ${formatCredits(credits.packCredits)}${expires}\n`);
+    const expires = credits.packExpiresAt ? ` · ${escapeMarkdown(describePackExpiry(credits.packExpiresAt))}` : "";
+    lines.push(`- Credit pack: ${formatCredits(credits.packCredits)} credits${expires}\n`);
   }
   return lines;
 }
@@ -119,6 +170,13 @@ export function buildTooltipMarkdown(input: TooltipInput): string {
         `${report.allTime.apiRequests.toLocaleString()} API requests (cached at ${escapeMarkdown(report.allTime.cachedAt)})\n`,
     );
     lines.push(...creditsLines(report.credits));
+    const windowCredit = windowCredits(report);
+    if (windowCredit !== undefined) {
+      lines.push(
+        `- Window credits: **${formatCredits(windowCredit)}** — approximate calendar-month sum of the per-model ` +
+          `rows; the billing-period used total can differ by tenths.\n`,
+      );
+    }
     for (const row of accountModelRows(report)) {
       const credits = row.credits !== undefined ? ` · ${formatCredits(row.credits)} credits` : "";
       const suffix =

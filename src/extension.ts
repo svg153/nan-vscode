@@ -4,11 +4,25 @@ import { configureDiagnosticFile, diagnostic } from "./diagnostics";
 import { HttpEndpointConsentDeniedError, HttpEndpointGuard } from "./httpEndpointGuard";
 import { NanInlineCompletionProvider } from "./inlineCompletionProvider";
 import { NanChatModelProvider } from "./provider";
-import { AccountUsageService, accountModelRows } from "./accountUsage";
+import { AccountUsageService, accountModelRows, windowCredits } from "./accountUsage";
 import { compactTokens } from "./quotaCatalog";
 import { API_REQUESTS_CUTOFF_DATE, CACHED_TOKENS_CUTOFF_DATE, CREDITS_CUTOFF_DATE, type UsageCredits } from "./usageApi";
-import { formatCredits, formatPercent } from "./usagePresentation";
+import { describePackExpiry, formatCredits, formatPercent, usageLinks, type UsageLink } from "./usagePresentation";
 import { UsageTracker } from "./usageTracker";
+
+const USAGE_LINK_ICON = "$(link-external)";
+
+function usageLinkLabel(link: UsageLink): string {
+  return `${USAGE_LINK_ICON} ${link.label}`;
+}
+
+function usageLinkItems(): vscode.QuickPickItem[] {
+  return usageLinks().map((link) => ({
+    label: usageLinkLabel(link),
+    description: link.description,
+    detail: link.url,
+  }));
+}
 
 function buildQuickPickItems(
   account: AccountUsageService,
@@ -20,6 +34,8 @@ function buildQuickPickItems(
     ...usage.quotaItems(),
     { kind: vscode.QuickPickItemKind.Separator, label: "Recent local daily history" },
     ...usage.historyItems(),
+    { kind: vscode.QuickPickItemKind.Separator, label: "Open" },
+    ...usageLinkItems(),
   ];
 }
 
@@ -169,7 +185,7 @@ export function activate(context: vscode.ExtensionContext): {
       picker.matchOnDescription = true;
       picker.matchOnDetail = true;
       picker.items = buildQuickPickItems(account, usage);
-            picker.buttons = [
+      picker.buttons = [
         { iconPath: new vscode.ThemeIcon("refresh"), tooltip: "Refresh account usage" },
         { iconPath: new vscode.ThemeIcon("trash"), tooltip: "Clear local usage history" },
         { iconPath: new vscode.ThemeIcon("gear"), tooltip: "Manage provider (API key)" },
@@ -189,7 +205,7 @@ export function activate(context: vscode.ExtensionContext): {
         }
         if (icon === "trash") {
           if (await usage.clearHistory()) {
-                    picker.items = buildQuickPickItems(account, usage);
+            picker.items = buildQuickPickItems(account, usage);
             vscode.window.showInformationMessage("NaN Builders local usage history cleared.");
           } else {
             vscode.window.showErrorMessage("Could not clear NaN Builders local usage history from VS Code storage.");
@@ -204,6 +220,15 @@ export function activate(context: vscode.ExtensionContext): {
         if (icon === "globe") {
           await vscode.env.openExternal(vscode.Uri.parse(NAN_DASHBOARD_URL));
         }
+      });
+      picker.onDidAccept(async () => {
+        const selected = picker.selectedItems[0]?.label;
+        const link = usageLinks().find((entry) => usageLinkLabel(entry) === selected);
+        if (!link) {
+          return;
+        }
+        picker.hide();
+        await vscode.env.openExternal(vscode.Uri.parse(link.url));
       });
       picker.onDidHide(() => picker.dispose());
       picker.show();
@@ -424,6 +449,19 @@ function accountItems(account: AccountUsageService): vscode.QuickPickItem[] {
     };
   });
   const creditRows = creditsItems(report.credits);
+  const windowCredit = windowCredits(report);
+  const windowRow: vscode.QuickPickItem[] =
+    windowCredit === undefined
+      ? []
+      : [
+          {
+            label: "$(credit-card) Window credits (calendar month)",
+            description: `${formatCredits(windowCredit)} credits`,
+            detail:
+              `Approximate sum of the per-model rows in ${snapshot.startDate} to ${snapshot.endDate}; ` +
+              `the billing-period used total can differ by tenths.`,
+          },
+        ];
   const cutoff: vscode.QuickPickItem = {
     label: "Daily API-request counts start",
     description: API_REQUESTS_CUTOFF_DATE,
@@ -434,7 +472,7 @@ function accountItems(account: AccountUsageService): vscode.QuickPickItem[] {
     description: CREDITS_CUTOFF_DATE,
     detail: `Per-model credits are reported from this date; cached input tokens from ${CACHED_TOKENS_CUTOFF_DATE}.`,
   };
-  return [header, allTime, ...creditRows, ...rows, cutoff, creditsCutoff, ...errorRow];
+  return [header, allTime, ...creditRows, ...windowRow, ...rows, cutoff, creditsCutoff, ...errorRow];
 }
 
 /** Plan-credit rows for the account QuickPick; empty on accounts not billed in credits. */
@@ -467,7 +505,7 @@ function creditsItems(credits: UsageCredits | undefined): vscode.QuickPickItem[]
   if (credits.packCredits && credits.packExpiresAt) {
     items.push({
       label: "Credit pack expiry",
-      description: credits.packExpiresAt,
+      description: describePackExpiry(credits.packExpiresAt),
       detail: "Pack credits are consumed after the plan allowance runs out.",
     });
   }

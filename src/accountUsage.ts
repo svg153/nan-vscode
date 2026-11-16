@@ -5,7 +5,7 @@ import {
   clampUsageWindow,
   fetchUsageReport,
 } from "./usageApi";
-import { creditProgress, percentOf, unmeteredNote } from "./quotaCatalog";
+import { creditProgress, percentOf, sumCredits, unmeteredNote } from "./quotaCatalog";
 import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
 
 export interface AccountUsageConfig {
@@ -209,6 +209,21 @@ export function accountModelRows(report: UsageReport): AccountModelRow[] {
         note: percent === undefined ? creditsNote(entry.model, entry.credits) : undefined,
       };
     });
+}
+
+/**
+ * Credits billed across the window's per-model rows.
+ *
+ * NaN rounds each model independently, so this calendar-month sum is
+ * approximate: it can differ by tenths from `credits.used`, which covers the
+ * billing period rather than the window. Both are labelled as such instead of
+ * presenting the sum as the period total.
+ */
+export function windowCredits(report: UsageReport): number | undefined {
+  const billed = report.totals.byModel
+    .map((entry) => entry.credits ?? 0)
+    .filter((value) => value > 0);
+  return billed.length === 0 ? undefined : sumCredits(billed);
 }
 
 /** Plan-credits headline: the share of the allowance used this period, or undefined when not billed in credits. */

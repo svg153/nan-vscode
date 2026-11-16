@@ -121,6 +121,9 @@ Expected:
 - The tooltip shows the served window (`start_date → end_date`), window totals, all-time totals with their cache timestamp, per-model rows, the plan-credit and credit-pack lines, and the API cutoff dates.
 - Window totals and per-model rows show the cached input tokens NaN reports (from 2026-11-11 onward) as a share of the prompt count, never added to the token total.
 - The plan-credit line ends with the billing period range (`period_start → period_end`) when the API reports one, or `renews <date>` otherwise; a frozen plan shows the frozen warning and the QuickPick label `$(warning) Plan credits (frozen)`.
+- The credit-pack line renders `pack_expires_at` as a readable date with the distance in days ("expires 2026-06-01 (in 12 days)", "expires today", "expired on 2026-05-01"), never as a raw ISO timestamp.
+- The QuickPick includes a `$(credit-card) Window credits (calendar month)` row whose detail states that the sum of the rounded per-model rows is approximate and can differ from the billing-period used total by tenths.
+- The QuickPick ends with an **Open** section: `Open API keys` goes to `https://cloud.nan.builders/#settings-api-keys` and `Open model docs` to `https://nan.builders/docs/models`; both open in the external browser, not inside VS Code.
 - Percentages appear only when the API reports a plan allowance and the model billed credits in the window. `qwen3.6` and `gemma4` say "Does not draw credits"; no percentage is fabricated.
 - A failed refresh keeps the previous snapshot and adds a "Last refresh failed" line; a 429 shows its `Retry-After` hint.
 - Automatic refreshes are throttled (60s between refreshes, 30 requests/minute limiter); a manual refresh bypasses the throttle.
@@ -160,6 +163,12 @@ Expected:
 - HTTP errors, network failures, and empty or malformed responses never surface stale text.
 - With `nanBuilders.completionModel` unset, no inline provider is registered and no extra requests are sent.
 - Note: while enabled, each pause can send an extra billed request that local usage history does not count yet (see [issue #7](https://github.com/svg153/nan-vscode/issues/7)).
+
+## Credits refused (HTTP 402)
+
+Exhaust the plan allowance (or freeze the subscription) and send a chat turn.
+
+Expected: the error reads `NaN Builders API error 402 … — <reason>` where the reason names the single credits pool, frozen credits, or the missing pack, and points at **NaN Builders: Show Usage**. The body never echoes the API key, and non-402 errors keep their previous wording.
 
 ## Remote and WSL behavior
 

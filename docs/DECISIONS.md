@@ -67,6 +67,28 @@ The marker `AUTONOMOUS-DECISION` is used for decisions made during implementatio
 
 **Still deferred:** reading browser cookies or the `nan-cli` session file, and any second NaN account login flow inside the extension. Account-wide usage stays API-key-only, and local session usage remains the fallback whenever no key is configured or the endpoint fails.
 
+## AUTONOMOUS-DECISION: credits UI parity items from a sibling project
+
+**Question:** A review of `SrScorpio/nan-bridge` (a competing client for the same credits API) listed five gaps in this extension's usage surface. Which should be adopted, and how far?
+
+**Options:**
+
+- Copy the competitor's presentation wholesale, including its own account UI.
+- Adopt only the parts that make the API's own fields readable, staying inside VS Code's native surfaces.
+
+**Research:** The gaps were: `credits.frozen` not surfaced, `pack_expires_at` shown as a raw timestamp, summed credit totals drifting by float error, no calendar-month breakdown, and no way to reach the console or the model catalogue from the dialog.
+
+**Decision:** Adopt them natively; no second account UI.
+
+- `frozen` is surfaced in the tooltip and QuickPick (shipped earlier in `41d8c4a`).
+- `pack_expires_at` renders as a date plus distance in days, with today/tomorrow/expired wording; unparsable values pass through instead of being dropped.
+- Credit sums go through `sumCredits`, which filters non-finite values and rounds once to one decimal, matching NaN's own precision.
+- The calendar-month breakdown is exposed as a separate **Window credits (calendar month)** row, explicitly labelled approximate. It never replaces the headline, because NaN rounds rows and model aggregates independently, so the sum can differ from `credits.used` by tenths.
+- **Show Usage** ends with an **Open** section deep-linking to `#settings-api-keys` on NaN Cloud and to the model catalogue, using `vscode.env.openExternal` rather than embedding a webview.
+- A 402 from any endpoint appends the applicable credit reason and points at **Show Usage**, so an exhausted allowance is not reported as an opaque status code.
+
+**Non-goal:** mirroring the competitor's standalone dashboard, its own billing charts, or any flow that would need NaN credentials beyond the stored API key.
+
 ## AUTONOMOUS-DECISION: Marketplace branding remains community-scoped
 
 **Question:** Should the first package present itself as an official NaN Builders extension?

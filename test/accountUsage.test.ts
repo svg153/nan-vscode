@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AccountUsageService, accountHeadline, accountModelRows } from "../src/accountUsage";
+import { AccountUsageService, accountHeadline, accountModelRows, windowCredits } from "../src/accountUsage";
 import { UsageApiError, parseUsageReport, type UsageReport } from "../src/usageApi";
 
 const TODAY = "2026-09-18";
@@ -268,6 +268,20 @@ test("accountModelRows passes reported cached input tokens through and leaves th
       ["deepseek-v4-flash", undefined],
     ],
   );
+});
+
+test("windowCredits sums per-model credits without float drift", () => {
+  const report = reportWith([
+    { model: "deepseek-v4-flash", totalTokens: 10, credits: 0.1 },
+    { model: "kimi-k3.1-pro", totalTokens: 10, credits: 0.2 },
+    { model: "hy4", totalTokens: 10, credits: 6_154.3 },
+  ]);
+  assert.equal(windowCredits(report), 6_154.6);
+});
+
+test("windowCredits stays undefined when no model billed credits", () => {
+  assert.equal(windowCredits(reportWith([{ model: "gemma4", totalTokens: 10 }])), undefined);
+  assert.equal(windowCredits(reportWith([{ model: "gemma4", totalTokens: 10, credits: 0 }])), undefined);
 });
 
 test("accountHeadline reports plan-credit usage and never fabricates one", () => {

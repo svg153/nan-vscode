@@ -68,6 +68,20 @@ export function percentOf(part: number, whole: number): number {
   return Math.round((part / whole) * 1000) / 10;
 }
 
+/** Credits are billed with one decimal, so any computed amount is re-rounded to that precision. */
+export function roundCredits(value: number): number {
+  return Number.isFinite(value) ? Math.round(value * 10) / 10 : 0;
+}
+
+/**
+ * Sums credit amounts to the billed precision. Per-model rows arrive rounded, so
+ * adding them as floats drifts (0.1 + 0.2 = 0.30000000000000004) and would show
+ * up as noise in totals.
+ */
+export function sumCredits(values: readonly number[]): number {
+  return roundCredits(values.reduce((total, value) => total + (Number.isFinite(value) ? value : 0), 0));
+}
+
 /**
  * Percentage of the plan's credit allowance used by each model.
  * NaN bills every metered model from one credits pool (7,000 on Inference,
