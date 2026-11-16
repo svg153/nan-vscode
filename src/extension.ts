@@ -4,6 +4,7 @@ import { configureDiagnosticFile, diagnostic } from "./diagnostics";
 import { HttpEndpointConsentDeniedError, HttpEndpointGuard } from "./httpEndpointGuard";
 import { NanInlineCompletionProvider } from "./inlineCompletionProvider";
 import { NanChatModelProvider } from "./provider";
+import { getKnownModel, resolveReasoningEffort } from "./modelCatalog";
 import { AccountUsageService, accountModelRows } from "./accountUsage";
 import { compactTokens } from "./quotaCatalog";
 import { API_REQUESTS_CUTOFF_DATE } from "./usageApi";
@@ -161,6 +162,7 @@ export function activate(context: vscode.ExtensionContext): {
       provider.refresh();
       vscode.window.showInformationMessage("NaN Builders model list refreshed.");
     }),
+    vscode.commands.registerCommand("nanBuilders.setReasoningEffort", () => setModelReasoningEffort(provider)),
     vscode.commands.registerCommand("nanBuilders.showUsage", () => {
       const picker = vscode.window.createQuickPick<vscode.QuickPickItem>();
       picker.title = "NaN Builders usage";
@@ -267,6 +269,76 @@ export function activate(context: vscode.ExtensionContext): {
         getInlineRegistrationTest: () => inlineRegistrationSelector,
       }
     : undefined;
+}
+
+/**
+ * Per-model reasoning effort selector: picks a model that documents effort
+ * levels, then one of that model's real levels (or resets it to auto).
+ * Overrides land in `nanBuilders.reasoningEffortByModel`.
+ */
+async function setModelReasoningEffort(provider: NanChatModelProvider): Promise<void> {
+  const cancellation = new vscode.CancellationTokenSource();
+  let models: vscode.LanguageModelChatInformation[];
+  try {
+    models = await provider.provideLanguageModelChatInformation({ silent: false }, cancellation.token);
+  } finally {
+    cancellation.dispose();
+  }
+  const selectable = models
+    .map((model) => ({ model, ladder: getKnownModel(model.id)?.reasoningEffortValues ?? [] }))
+    .filter((entry) => entry.ladder.length > 0);
+  if (selectable.length === 0) {
+    vscode.window.showInformationMessage("No NaN Builders models with selectable reasoning effort are available (configure an API key first).");
+    return;
+  }
+  const modelPick = await vscode.window.showQuickPick(
+    selectable.map(({ model, ladder }) => ({
+      id: model.id,
+      label: model.name,
+      description: ladder.join(" < "),
+    })),
+    { title: "NaN Builders: Set Model Reasoning Effort", placeHolder: "Choose a model" },
+  );
+  if (!modelPick) {
+    return;
+  }
+  const selected = selectable.find((candidate) => candidate.model.id === modelPick.id)!;
+  const entry = { id: selected.model.id, ladder: selected.ladder };
+  const configuration = vscode.workspace.getConfiguration("nanBuilders");
+  const overrides = configuration.get<Record<string, unknown>>("reasoningEffortByModel", {});
+  const perModel = typeof overrides?.[entry.id] === "string" ? (overrides[entry.id] as string) : undefined;
+  const current = resolveReasoningEffort({
+    perModelOverride: perModel,
+    globalDefault: configuration.get<string>("defaultReasoningEffort", "auto"),
+    ladder: entry.ladder,
+  });
+  const levelPick = await vscode.window.showQuickPick(
+    [
+      ...entry.ladder.map((level) => ({
+        label: level,
+        description: level === current ? "$(checkmark) current" : undefined,
+        detail: level === current ? (perModel ? "per-model override" : "effective default") : undefined,
+      })),
+      { label: "Reset to auto", description: perModel ? "clears the per-model override" : "no override set", detail: "Use the global default / model default." },
+    ],
+    { title: `${modelPick.label}: reasoning effort`, placeHolder: "Choose a level (values outside the model ladder are remapped to the closest one)" },
+  );
+  if (!levelPick) {
+    return;
+  }
+  const next: Record<string, unknown> = { ...overrides };
+  if (levelPick.label === "Reset to auto") {
+    delete next[entry.id];
+  } else {
+    next[entry.id] = levelPick.label;
+  }
+  await configuration.update("reasoningEffortByModel", next, vscode.ConfigurationTarget.Global);
+  provider.refresh();
+  vscode.window.showInformationMessage(
+    levelPick.label === "Reset to auto"
+      ? `NaN Builders: ${modelPick.label} reasoning effort reset to auto.`
+      : `NaN Builders: ${modelPick.label} reasoning effort set to ${levelPick.label}.`,
+  );
 }
 
 async function manageProvider(

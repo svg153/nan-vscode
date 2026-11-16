@@ -153,17 +153,107 @@ export function getKnownModel(id: string): ModelMetadata | undefined {
 
 export function reasoningDescription(model: ModelMetadata): string {
   const values = model.reasoningEffortValues;
+  const note = reasoningLevelNotes(model.id);
   if (values === undefined) {
     return "Reasoning support is unknown.";
   }
   if (values.length === 0) {
-    return "Reasoning depth is model-managed; effort levels are not user-adjustable.";
+    return `Reasoning depth is model-managed; effort levels are not user-adjustable.${note ? ` Note: ${note}` : ""}`;
   }
-  return `Documented reasoning effort levels: ${values.join(", ")}. Configurable via the nanBuilders.defaultReasoningEffort setting.`;
+  return [
+    `Documented reasoning effort levels: ${values.join(", ")}.`,
+    `Defaults to '${defaultReasoningEffortForModel(values)}' under nanBuilders.defaultReasoningEffort = auto; pick a per-model level with 'NaN Builders: Set Model Reasoning Effort'.`,
+    ...(note ? [`Note: ${note}`] : []),
+  ].join(" ");
 }
 
 export function isKnownNonChatModel(id: string): boolean {
   return KNOWN_NON_CHAT_IDS.has(id);
+}
+
+/** Canonical low-to-high order used to find the nearest documented level. */
+const REASONING_ORDER = ["none", "minimal", "low", "medium", "high", "max"] as const;
+
+/** Levels accepted from requests/settings; "xhigh" clamps down to "max". */
+const REASONING_WORDS = /^(none|minimal|low|medium|high|max|xhigh)$/;
+
+export interface ResolveReasoningEffortInput {
+  /** Effort coming from the chat request (`modelOptions.reasoning_effort`). */
+  readonly requested?: string;
+  /** Per-model override chosen with the Set Model Reasoning Effort command. */
+  readonly perModelOverride?: string;
+  /** `nanBuilders.defaultReasoningEffort`; "auto" defers to the model default. */
+  readonly globalDefault?: string;
+  /** Documented ladder. `undefined` = unknown model, `[]` = model-managed. */
+  readonly ladder?: readonly string[];
+}
+
+function effortRank(level: string): number {
+  const index = (REASONING_ORDER as readonly string[]).indexOf(level);
+  // "xhigh" (or any above-max word) sorts after "max".
+  return index >= 0 ? index : REASONING_ORDER.length;
+}
+
+/**
+ * Map a valid effort word to the closest level of `ladder`. Unknown levels are
+ * elevated to the nearest real one instead of being rejected or ignored
+ * (e.g. with a low..max ladder: none/minimal -> low, xhigh -> max).
+ * Ties prefer the higher level.
+ */
+export function remapReasoningEffort(level: string, ladder: readonly string[]): string {
+  if (ladder.length === 0 || ladder.includes(level)) {
+    return level;
+  }
+  const rank = effortRank(level);
+  let best = ladder[0];
+  let bestDistance = Math.abs(effortRank(best) - rank);
+  for (const candidate of ladder) {
+    const distance = Math.abs(effortRank(candidate) - rank);
+    if (distance < bestDistance || (distance === bestDistance && effortRank(candidate) > effortRank(best))) {
+      best = candidate;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+/**
+ * Per-model default: "medium" when the model documents it, otherwise the
+ * central level of its documented ladder. Falls back to "low" for
+ * model-managed or unknown models.
+ */
+export function defaultReasoningEffortForModel(ladder: readonly string[] | undefined): string {
+  if (!ladder || ladder.length === 0) {
+    return "low";
+  }
+  if (ladder.includes("medium")) {
+    return "medium";
+  }
+  return ladder[Math.floor((ladder.length - 1) / 2)];
+}
+
+/**
+ * Resolve the effort to send: request override > per-model override >
+ * explicit global default > model default. The result is always remapped to
+ * the model's documented ladder (canonical levels for unknown or
+ * model-managed models).
+ */
+export function resolveReasoningEffort(input: ResolveReasoningEffortInput): string {
+  const word = (value: string | undefined): string | undefined =>
+    value !== undefined && REASONING_WORDS.test(value) ? value : undefined;
+  const globalDefault = input.globalDefault === "auto" ? undefined : word(input.globalDefault);
+  const candidate = word(input.requested) ?? word(input.perModelOverride) ?? globalDefault
+    ?? defaultReasoningEffortForModel(input.ladder);
+  return remapReasoningEffort(candidate, input.ladder && input.ladder.length > 0 ? input.ladder : [...REASONING_ORDER]);
+}
+
+const REASONING_LEVEL_NOTES: readonly (readonly [string, string])[] = [
+  ["mimo-v2.6-flash", "MiMo counts reasoning tokens inside max_tokens."],
+  ["gemma4", "Gemma: 'minimal' disables reasoning."],
+];
+
+export function reasoningLevelNotes(id: string): string | undefined {
+  return REASONING_LEVEL_NOTES.find(([modelId]) => modelId === id)?.[1];
 }
 
 /**

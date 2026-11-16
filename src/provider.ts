@@ -5,10 +5,11 @@ import {
   filterDiscoveredModels,
   getKnownModel,
   reasoningDescription,
+  resolveReasoningEffort,
   toDisplayMetadata,
   type DiscoveredModel,
 } from "./modelCatalog";
-import { convertMessages, convertTools, estimateTokens, httpError, isImagePart, reasoningEffort } from "./openai/request";
+import { convertMessages, convertTools, estimateTokens, httpError, isImagePart } from "./openai/request";
 import { OpenAIStreamDecoder, StreamLimitError, type StreamEvent } from "./openai/stream";
 import type { OpenAIUsage } from "./openai/types";
 import { sanitizeUpstreamText } from "./text";
@@ -151,10 +152,8 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       stream_options: { include_usage: true },
       max_tokens: model.maxOutputTokens || 4096,
       // NaN can spend several minutes in silent reasoning unless this is bounded.
-            reasoning_effort: reasoningEffort(
-              options.modelOptions,
-              vscode.workspace.getConfiguration("nanBuilders").get<string>("defaultReasoningEffort", "low"),
-            ),
+      // The effort is remapped to the closest level the model actually documents.
+      reasoning_effort: this.resolveEffort(model.id, options.modelOptions),
     };
 
     if (toolMapping.definitions.length > 0) {
@@ -426,6 +425,20 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     return `nan-vscode/${version} VSCode/${vscode.version}`;
   }
 
+  /** Effective reasoning effort for a model, honoring per-model overrides. */
+  private resolveEffort(modelId: string, modelOptions: { readonly [name: string]: unknown } | undefined): string {
+    const configuration = vscode.workspace.getConfiguration("nanBuilders");
+    const overrides = configuration.get<Record<string, unknown>>("reasoningEffortByModel", {});
+    const perModel = typeof overrides?.[modelId] === "string" ? (overrides[modelId] as string) : undefined;
+    const requested = typeof modelOptions?.reasoning_effort === "string" ? modelOptions.reasoning_effort : undefined;
+    return resolveReasoningEffort({
+      requested,
+      perModelOverride: perModel,
+      globalDefault: configuration.get<string>("defaultReasoningEffort", "auto"),
+      ladder: getKnownModel(modelId)?.reasoningEffortValues,
+    });
+  }
+
   private toVsCodeModel(discovered: DiscoveredModel): vscode.LanguageModelChatInformation {
       const metadata = toDisplayMetadata(discovered.id, discovered);
       const known = getKnownModel(discovered.id);
@@ -442,6 +455,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
           ? `NaN Builders hosted ${metadata.name}`
           : "Discovered from NaN Builders. Tool calling is disabled until metadata is known.",
         reasoningDescription(metadata),
+        ...(known?.reasoningEffortValues?.length ? [`Current effort: ${this.resolveEffort(metadata.id, undefined)}.`] : []),
       ].join("\n"),
       capabilities: {
         imageInput: metadata.imageInput,

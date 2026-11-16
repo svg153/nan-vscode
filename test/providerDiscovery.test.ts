@@ -409,6 +409,52 @@ test("provider configuration changes invalidate the model cache", async () => {
   }
 });
 
+test("reasoning effort resolves request > per-model override > global default > model default with closest-level remapping", async () => {
+  const originalFetch = globalThis.fetch;
+  const bodies: Record<string, unknown>[] = [];
+  const harness = createHarness(async (input, init) => {
+    if (String(input).endsWith("/models")) {
+      return modelListResponse({ data: [{ id: "glm5.3-flash" }] });
+    }
+    bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    return new Response(JSON.stringify({ choices: [{ delta: { content: "ok" } }] }));
+  });
+  try {
+    const token = new TestCancellationToken();
+    const model = await discoverChatModel(harness.provider);
+    const send = (options: Partial<vscode.ProvideLanguageModelChatResponseOptions>) =>
+      harness.provider.provideLanguageModelChatResponse(
+        model,
+        [],
+        options as vscode.ProvideLanguageModelChatResponseOptions,
+        chatProgress([]),
+        token,
+      );
+
+    // auto default: "medium" exists in the GLM ladder.
+    await send({});
+    assert.equal(bodies[0]?.reasoning_effort, "medium");
+
+    // Per-model override outside the documented ladder is remapped upward.
+    settings.set("reasoningEffortByModel", { "glm5.3-flash": "none" });
+    await send({});
+    assert.equal(bodies[1]?.reasoning_effort, "low");
+
+    // The chat request wins over everything and "xhigh" clamps to the model's max.
+    await send({ modelOptions: { reasoning_effort: "xhigh" } });
+    assert.equal(bodies[2]?.reasoning_effort, "max");
+
+    // Explicit global default applies when no override exists, remapped to the ladder.
+    settings.set("reasoningEffortByModel", {});
+    settings.set("defaultReasoningEffort", "minimal");
+    await send({});
+    assert.equal(bodies[3]?.reasoning_effort, "low");
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("chat cancellation skips final text and tool events buffered in the SSE decoder", async (t) => {
   const originalFetch = globalThis.fetch;
   const cases = [
