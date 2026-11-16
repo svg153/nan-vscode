@@ -169,6 +169,8 @@ export function activate(context: vscode.ExtensionContext): {
     }
   };
 
+  // Recorded once so the vendor id in use is visible in diagnostics (#118).
+  diagnostic("activate.provider.vendor", { vendor: PROVIDER_VENDOR });
   context.subscriptions.push(
     usage,
     provider,
