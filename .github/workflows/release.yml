@@ -9,8 +9,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    outputs:
-      vsix_produced: ${{ steps.detect-vsix.outputs.produced }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -23,33 +21,15 @@ jobs:
       - run: npm run release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Detect release VSIX
-        id: detect-vsix
-        shell: bash
-        run: |
-          if compgen -G "nan-builders-vscode-*.vsix" > /dev/null; then
-            echo "produced=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "produced=false" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Upload VSIX for Marketplace publishing
-        if: steps.detect-vsix.outputs.produced == 'true'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: marketplace-vsix
-          path: nan-builders-vscode-*.vsix
-          if-no-files-found: error
-          retention-days: 7
 
-  publish-marketplace:
-    if: ${{ needs.release.outputs.vsix_produced == 'true' && vars.MARKETPLACE_PUBLISH_ENABLED == 'true' }}
-    needs: release
+  # Rolling preview channel: every merge to main publishes an installable
+  # prerelease VSIX to the fixed `preview` GitHub release. Validate it with
+  # "Install from VSIX"; promotion to the Marketplace stays manual
+  # (see publish-stable.yml).
+  preview:
     runs-on: ubuntu-latest
-    environment:
-      name: marketplace
     permissions:
-      actions: read
-      contents: read
+      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -57,24 +37,40 @@ jobs:
           node-version: 26
           cache: npm
       - run: npm ci
-      - name: Download VSIX
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: marketplace-vsix
-          path: marketplace-vsix
-      - name: Publish to the VS Code Marketplace
+      - run: npm run compile
+      - name: Stamp preview version
+        shell: bash
+        run: |
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json"));
+            pkg.version = `${pkg.version}-preview.${process.env.GITHUB_RUN_ID}.${process.env.GITHUB_RUN_ATTEMPT}`;
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+            console.log(pkg.version);
+          ' > preview-version.txt
+          cat preview-version.txt
+      - name: Package preview VSIX
+        # Fixed asset name so --clobber replaces the previous preview build
+        # instead of accumulating stale VSIXes on the rolling release.
+        run: npx vsce package --no-dependencies --pre-release --out nan-builders-vscode-preview.vsix
+      - name: Attach to rolling preview release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           shopt -s nullglob
-          vsix=(marketplace-vsix/nan-builders-vscode-*.vsix)
+          vsix=(nan-builders-vscode-*.vsix)
           if [ ${#vsix[@]} -ne 1 ]; then
-            echo "::error::Expected exactly one VSIX artifact, found ${#vsix[@]}."
+            echo "::error::Expected exactly one preview VSIX, found ${#vsix[@]}."
             exit 1
           fi
-          if [ -z "$VSCE_PAT" ]; then
-            echo "::error::The VSCE_PAT secret is not configured. The GitHub Release already contains the VSIX for recovery, but Marketplace publishing failed."
-            exit 1
+          if ! gh release view preview --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create preview \
+              --repo "$GITHUB_REPOSITORY" \
+              --prerelease \
+              --title "Preview builds" \
+              --notes "Rolling preview VSIX from the latest merge to main. Not published to the Marketplace; install via 'Extensions: Install from VSIX' to validate before promotion." \
+              "${vsix[0]}"
+          else
+            gh release upload preview --repo "$GITHUB_REPOSITORY" --clobber "${vsix[0]}"
           fi
-          npx vsce verify-pat svg153
-          npx vsce publish --packagePath "${vsix[0]}" --no-dependencies
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}

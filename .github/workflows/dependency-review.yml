@@ -1,0 +1,25 @@
+name: Dependency review
+
+# Advisory gate: fails any PR whose diff introduces a package version with a
+# known GitHub Advisory (direct or transitive, npm + Actions). Complements the
+# Renovate cooldowns and the npm min-release-age guard: a malicious release
+# that has an advisory published within the cooldown window never merges.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  dependency-review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate
+          # Dependabot/Renovate security fast-lane: advisory PRs still get
+          # flagged (they fix older advisories), humans merge them first.
+          retry-on-error: true

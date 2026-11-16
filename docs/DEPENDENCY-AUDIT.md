@@ -7,6 +7,8 @@ CI runs `npm audit --json --package-lock-only` against `package-lock.json` and p
 
 The audit includes production and development dependencies. It does not update dependencies or fail the workflow for reported advisories. A failure to run the audit or parse its response remains a CI error so a missing report is not presented as a clean audit.
 
+Since 2026-11-16 a separate **blocking** gate exists for *new* advisories only: `.github/workflows/dependency-review.yml` fails any PR that introduces a vulnerable package version (GitHub Advisory Database, severity >= moderate). This respects the policy below — the pre-existing baseline described here does not fail PRs.
+
 ## Baseline triage
 
 Review the artifact on each CI run. For each advisory, confirm whether the affected package is used in the extension's runtime or only in development tooling, inspect the listed dependency path and advisory, then assign an owner and remediation issue or document a reasoned exception with an expiry/review date. Prefer updating the narrowest responsible direct dependency and verify the resulting lockfile with the project checks.

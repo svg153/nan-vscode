@@ -1,4 +1,5 @@
 .github/**
+.vscode/**
 .codex/**
 .commitlintrc.json
 .husky/**
