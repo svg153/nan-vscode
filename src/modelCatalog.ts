@@ -106,16 +106,59 @@ const KNOWN_NON_CHAT_IDS = new Set([
   "qwen-image-2.1",
 ]);
 
+/**
+ * Name tokens used by `auto` discovery to drop obvious non-chat endpoints
+ * (embeddings, rerankers, speech, image generation) from generic
+ * OpenAI-compatible servers that do not declare `model_type` or `is_chat`.
+ */
+const NON_CHAT_NAME_TOKENS = new Set([
+  "embed",
+  "embedding",
+  "embeddings",
+  "rerank",
+  "reranker",
+  "moderation",
+  "whisper",
+  "transcribe",
+  "transcription",
+  "asr",
+  "tts",
+  "speech",
+  "audio",
+  "kokoro",
+  "dall",
+  "flux",
+  "image",
+  "images",
+  "imagen",
+  "diffusion",
+]);
+
+/** Discovery filter policy: curated keeps the catalog-first NaN behavior; auto mirrors Copilot-style raw discovery. */
+export type DiscoveryMode = "curated" | "auto";
+
 const CHAT_MODEL_TYPES = new Set(["chat", "llm", "text"]);
+
+function looksNonChatById(id: string): boolean {
+  return id
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .some((token) => NON_CHAT_NAME_TOKENS.has(token));
+}
 
 /**
  * Determine whether a discovered model should be treated as a chat model.
  * Uses documented metadata when available, falls back to the local catalog
- * and the denylist for older/partial responses.
+ * and the denylist for older/partial responses. In `auto` mode, IDs with no
+ * metadata are kept unless their name matches a non-chat pattern.
  */
-function isChatModel(model: DiscoveredModel, includeUnknown: boolean): boolean {
+function isChatModel(model: DiscoveredModel, includeUnknown: boolean, mode: DiscoveryMode = "curated"): boolean {
   const id = model.id.trim();
   if (!id || isKnownNonChatModel(id)) {
+    return false;
+  }
+
+  if (mode === "auto" && looksNonChatById(id)) {
     return false;
   }
 
@@ -134,7 +177,10 @@ function isChatModel(model: DiscoveredModel, includeUnknown: boolean): boolean {
     return false;
   }
 
-  // No metadata: fall back to the local catalog or the denylist.
+  // No metadata: auto keeps the ID; curated falls back to the local catalog or the denylist.
+  if (mode === "auto") {
+    return true;
+  }
   if (getKnownModel(id)) {
     return true;
   }
@@ -215,11 +261,14 @@ export function parseDiscoveredModel(raw: unknown): DiscoveredModel | undefined 
 /**
  * Filter discovered models, keeping only chat models.
  * Uses documented metadata when available, falls back to the local catalog
- * and the denylist for older/partial responses.
+ * and the denylist for older/partial responses. In `auto` mode every ID
+ * that is not explicitly non-chat passes, so third-party OpenAI-compatible
+ * endpoints can be used without the local catalog.
  */
 export function filterDiscoveredModels(
   rawModels: readonly unknown[],
   includeUnknown: boolean,
+  mode: DiscoveryMode = "curated",
 ): DiscoveredModel[] {
   const unique = new Map<string, DiscoveredModel>();
 
@@ -228,7 +277,7 @@ export function filterDiscoveredModels(
     if (!model || unique.has(model.id)) {
       continue;
     }
-    if (isChatModel(model, includeUnknown)) {
+    if (isChatModel(model, includeUnknown, mode)) {
       unique.set(model.id, model);
     }
   }

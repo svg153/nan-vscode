@@ -150,6 +150,40 @@ test("filterDiscoveredModels deduplicates and preserves first-seen", () => {
   assert.equal(result[0]!.id, "glm5.3-flash");
 });
 
+test("filterDiscoveredModels auto mode keeps bare IDs and drops obvious non-chat endpoints", () => {
+  const rawModels: readonly unknown[] = [
+    { id: "my-local-llama" },
+    { id: "bge-m3-embedding" },
+    { id: "qwen3-embedding" },
+    { id: "some-reranker", model_type: "reranker" },
+    { id: "vision-chat", model_type: "chat" },
+    { id: "flux-dev" },
+    { id: "audio-transcribe" },
+    { id: "speak-tts" },
+    { id: "explicitly-not-chat", is_chat: false },
+  ];
+
+  const auto = filterDiscoveredModels(rawModels, false, "auto");
+  assert.deepEqual(auto.map((m) => m.id).sort(), ["my-local-llama", "vision-chat"]);
+
+  // Curated mode stays unchanged for the same input: only explicit chat metadata passes.
+  const curated = filterDiscoveredModels(rawModels, false, "curated");
+  assert.deepEqual(curated.map((m) => m.id), ["vision-chat"]);
+});
+
+test("auto-discovered unknown models keep API capability metadata", () => {
+  const rawModels: readonly unknown[] = [
+    { id: "third-party-chat", tool_calling: true, image_support: true, context_window: 200_000 },
+  ];
+  const [model] = filterDiscoveredModels(rawModels, false, "auto");
+  assert.ok(model);
+  const metadata = toDisplayMetadata(model.id, model);
+  assert.equal(metadata.toolCalling, true);
+  assert.equal(metadata.imageInput, true);
+  assert.equal(metadata.contextWindow, 200_000);
+  assert.equal(metadata.name, "third-party-chat");
+});
+
 test("toDisplayMetadata merges API metadata with catalog defaults", () => {
   const api: DiscoveredModel = {
     id: "future-model",

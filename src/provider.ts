@@ -81,12 +81,15 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     const includeUnknown = vscode.workspace
       .getConfiguration("nanBuilders")
       .get<boolean>("includeUnknownModels", false);
+    const discoveryMode = vscode.workspace
+      .getConfiguration("nanBuilders")
+      .get<string>("discoveryMode", "curated") === "auto" ? "auto" : "curated";
 
     // NaN documents /v1/models as the definitive, API-key-filtered list.
     // Only expose model IDs returned for this key. Known non-chat endpoints are
     // filtered out; unknown IDs are opt-in because a future non-chat endpoint
     // must not accidentally be advertised to VS Code as a chat model.
-        const chatModels = filterDiscoveredModels(models, includeUnknown);
+        const chatModels = filterDiscoveredModels(models, includeUnknown, discoveryMode);
         const vsCodeModels = chatModels.map((m) => this.toVsCodeModel(m));
     const cacheSeconds = vscode.workspace
       .getConfiguration("nanBuilders")
@@ -417,7 +420,9 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       tooltip: [
         known
           ? `NaN Builders hosted ${metadata.name}`
-          : "Discovered from NaN Builders. Tool calling is disabled until metadata is known.",
+          : metadata.toolCalling
+            ? "Auto-discovered from the configured endpoint. Capabilities come from endpoint metadata."
+            : "Auto-discovered from the configured endpoint. Tool calling is disabled until metadata is known.",
         reasoningDescription(metadata),
       ].join("\n"),
       capabilities: {

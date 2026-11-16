@@ -169,6 +169,30 @@ test("model discovery caches results and refresh invalidates them after a settin
   }
 });
 
+test("discoveryMode auto exposes bare third-party IDs and hides non-chat endpoints", async () => {
+  const originalFetch = globalThis.fetch;
+  const harness = createHarness(async () =>
+    modelListResponse({
+      data: [{ id: "mimo-v2.6-flash" }, { id: "future-chat-model" }, { id: "bge-m3-embedding" }],
+    }),
+  );
+  try {
+    settings.set("discoveryMode", "auto");
+    const models = await harness.provider.provideLanguageModelChatInformation(
+      { silent: true },
+      new TestCancellationToken(),
+    );
+    assert.deepEqual(models.map((model) => model.id).sort(), ["future-chat-model", "mimo-v2.6-flash"]);
+    const discovered = models.find((model) => model.id === "future-chat-model");
+    assert.ok(discovered);
+    assert.equal(discovered.capabilities?.toolCalling, false);
+    assert.match(String(discovered.tooltip), /Auto-discovered from the configured endpoint/);
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("malformed and unsuccessful model responses reject discovery with useful errors", async (t) => {
   const originalFetch = globalThis.fetch;
   const cases: Array<{ name: string; response: () => Response; message: RegExp }> = [

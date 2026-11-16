@@ -98,6 +98,16 @@
           "default": false,
           "description": "Also show model IDs returned by NaN that are not yet in this extension's metadata catalog. Disabled by default because an unknown ID may be a non-chat endpoint; when enabled, unknown models are exposed without Agent tool-calling or vision capability."
         },
+        "nanBuilders.discoveryMode": {
+          "type": "string",
+          "enum": ["curated", "auto"],
+          "default": "curated",
+          "enumDescriptions": [
+            "Only show models from the local catalog, models the endpoint explicitly marks as chat, and (with includeUnknownModels) unmarked IDs.",
+            "Show every ID returned by GET /models except obvious non-chat endpoints (embeddings, rerank, transcription, image generation). Capability fields from the endpoint take precedence over defaults."
+          ],
+          "markdownDescription": "How the model list from `GET /models` is filtered. `auto` enables Copilot-style auto-discovery for trusted OpenAI-compatible endpoints: unknown chat models appear with capabilities declared by the endpoint, or conservative defaults when none are declared. Use only with endpoints you trust."
+        },
         "nanBuilders.completionModel": {
           "type": "string",
           "default": "",

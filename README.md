@@ -24,6 +24,7 @@ Use [NaN Builders](https://nan.builders/) models in VS Code Chat and Agent mode 
 - Local status-bar usage when the API returns OpenAI-compatible streaming usage metadata.
 - Account-wide monthly quota in the status bar via `GET /v1/usage` when an API key is configured, with local-session usage as fallback.
 - Conservative handling of newly discovered model IDs that are not yet in the local metadata catalog.
+- Opt-in `nanBuilders.discoveryMode: auto` for Copilot-style auto-discovery from trusted OpenAI-compatible endpoints: every non-chat-filtered ID returned by `GET /models` appears in the picker with endpoint-declared capabilities ([issue #100](https://github.com/svg153/nan-vscode/issues/100)).
 - Remote-workspace support: the provider prefers the workspace extension host and falls back to the local UI host.
 
 ## Install
@@ -76,6 +77,7 @@ Available settings:
 | `nanBuilders.modelCacheSeconds` | `300` | Model discovery cache duration. |
 | `nanBuilders.showStatusBar` | `true` | Show usage in the status bar: account-wide monthly quota % when an API key is configured, otherwise local session usage. |
 | `nanBuilders.includeUnknownModels` | `false` | Expose unknown IDs without tool or vision metadata. |
+| `nanBuilders.discoveryMode` | `"curated"` | `auto` lists every chat ID returned by `GET /models` from a trusted custom endpoint, except obvious non-chat names (embeddings, rerank, speech, image generation). Endpoint-declared capability fields take precedence; models without metadata get conservative defaults. |
 | `nanBuilders.completionModel` | `""` | Model ID for opt-in inline ghost-text completions; empty disables the feature and no completion request is sent. |
 
 When `nanBuilders.apiBaseUrl` uses non-loopback `http:`, the extension asks before sending the stored API key. The decision is remembered for that endpoint until the extension session ends and covers model discovery, chat, account usage, and inline completions. A declined endpoint stays blocked without repeating the prompt; changing the endpoint clears declined decisions. Canceling prevents the request; HTTPS and loopback HTTP endpoints do not prompt.
