@@ -86,7 +86,7 @@
         "nanBuilders.showStatusBar": {
           "type": "boolean",
           "default": true,
-          "description": "Show NaN usage in the VS Code status bar: account-wide monthly quota % when an API key is configured, otherwise local session usage."
+          "description": "Show NaN usage in the VS Code status bar: plan-credit usage % when an API key is configured, otherwise local session usage."
         },
         "nanBuilders.diagnostics.enabled": {
           "type": "boolean",
