@@ -130,8 +130,8 @@
                 "nanBuilders.defaultReasoningEffort": {
                   "type": "string",
                   "default": "auto",
-                  "enum": ["auto", "none", "minimal", "low", "medium", "high", "max"],
-                  "markdownDescription": "Reasoning effort sent to NaN when the chat request does not specify one. `auto` uses a per-model default (medium when the model documents it, otherwise the central documented level). Explicit levels are remapped to the closest level the model documents. Models that manage reasoning themselves ignore it."
+                  "enum": ["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"],
+                  "markdownDescription": "Reasoning effort sent to NaN when the chat request does not specify one. `auto` uses a per-model default (medium when the model documents it, otherwise the central documented level). Explicit levels are remapped to the closest level the model documents in https://nan.builders/docs/models."
                 },
                 "nanBuilders.reasoningEffortByModel": {
                   "type": "object",
@@ -139,7 +139,7 @@
                   "markdownDescription": "Per-model reasoning effort overrides set by the `NaN Builders: Set Model Reasoning Effort` command. Keys are model IDs, values are effort levels; each value is remapped to the closest level the model documents.",
                   "additionalProperties": {
                     "type": "string",
-                    "enum": ["none", "minimal", "low", "medium", "high", "max"]
+                    "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
                   }
                 }
       }

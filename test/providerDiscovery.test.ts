@@ -435,20 +435,21 @@ test("reasoning effort resolves request > per-model override > global default > 
     await send({});
     assert.equal(bodies[0]?.reasoning_effort, "medium");
 
-    // Per-model override outside the documented ladder is remapped upward.
+    // Per-model override outside the documented ladder is remapped: GLM has
+    // no off switch, so "none" lands on its lowest documented level.
     settings.set("reasoningEffortByModel", { "glm5.3-flash": "none" });
     await send({});
-    assert.equal(bodies[1]?.reasoning_effort, "low");
+    assert.equal(bodies[1]?.reasoning_effort, "minimal");
 
-    // The chat request wins over everything and "xhigh" clamps to the model's max.
+    // The chat request wins over everything; "xhigh" is documented on GLM.
     await send({ modelOptions: { reasoning_effort: "xhigh" } });
-    assert.equal(bodies[2]?.reasoning_effort, "max");
+    assert.equal(bodies[2]?.reasoning_effort, "xhigh");
 
     // Explicit global default applies when no override exists, remapped to the ladder.
     settings.set("reasoningEffortByModel", {});
     settings.set("defaultReasoningEffort", "minimal");
     await send({});
-    assert.equal(bodies[3]?.reasoning_effort, "low");
+    assert.equal(bodies[3]?.reasoning_effort, "minimal");
   } finally {
     harness.provider.dispose();
     globalThis.fetch = originalFetch;

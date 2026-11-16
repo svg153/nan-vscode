@@ -249,7 +249,7 @@ export async function run(): Promise<void> {
     assert.ifError(serverError);
     assert.equal(chatRequest?.model, "glm5.3-flash");
     assert.equal(chatRequest?.stream, true);
-    // defaultReasoningEffort = auto: GLM documents low..max, so the per-model default is medium.
+    // defaultReasoningEffort = auto: GLM documents minimal..max, so the per-model default is medium.
     assert.equal(chatRequest?.reasoning_effort, "medium");
     assert.deepEqual(testApi.readTestUsageHistory(), [{
       date: new Date().toISOString().slice(0, 10),
