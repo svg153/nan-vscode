@@ -2,11 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   billingDescription,
+  defaultReasoningEffortForModel,
   filterDiscoveredModelIds,
   filterDiscoveredModels,
   knownChatModelIds,
   parseDiscoveredModel,
   reasoningDescription,
+  reasoningLevelNotes,
+  remapReasoningEffort,
+  resolveReasoningEffort,
   toDisplayMetadata,
   type DiscoveredModel,
 } from "../src/modelCatalog";
@@ -82,16 +86,62 @@ test("Mimo V2.6 Flash uses documented limits and supported chat capabilities", (
   assert.equal(model.maxOutputTokens, 32_768);
   assert.equal(model.imageInput, true);
   assert.equal(model.toolCalling, true);
-  assert.deepEqual(model.reasoningEffortValues, []);
-  assert.match(reasoningDescription(model), /model-managed/);
+  assert.deepEqual(model.reasoningEffortValues, ["none", "low", "medium", "high", "max"]);
+  assert.match(reasoningDescription(model), /none, low, medium, high, max/);
 });
 
-test("reasoning metadata distinguishes adjustable, model-managed, and unknown models", () => {
-  assert.match(reasoningDescription(toDisplayMetadata("glm5.3-flash")), /low, medium, high, max/);
-  assert.match(reasoningDescription(toDisplayMetadata("qwen3.6")), /none, minimal, low, medium, high, max/);
-  assert.match(reasoningDescription(toDisplayMetadata("deepseek-v4-flash")), /model-managed/);
+test("reasoning metadata distinguishes adjustable and unknown models", () => {
+  assert.match(reasoningDescription(toDisplayMetadata("glm5.3-flash")), /minimal, low, medium, high, xhigh, max/);
+  assert.match(reasoningDescription(toDisplayMetadata("qwen3.6")), /none, minimal, low, medium, high, xhigh, max/);
+  assert.match(reasoningDescription(toDisplayMetadata("deepseek-v4-flash")), /none, minimal, low, medium, high, xhigh, max/);
   assert.match(reasoningDescription(toDisplayMetadata("future-model")), /unknown/);
   assert.match(reasoningDescription(toDisplayMetadata("glm5.3-flash")), /nanBuilders\.defaultReasoningEffort/);
+  assert.match(reasoningDescription(toDisplayMetadata("glm5.3-flash")), /Set Model Reasoning Effort/);
+  assert.match(reasoningDescription(toDisplayMetadata("mimo-v2.6-flash")), /max_tokens/);
+  assert.match(reasoningDescription(toDisplayMetadata("gemma4")), /minimal.*disable reasoning/);
+});
+
+test("remapReasoningEffort elevates undocumented levels to the closest real one", () => {
+  // Models whose documented ladder omits levels (e.g. mimo) still remap.
+  const capped = ["low", "medium", "high", "max"];
+  assert.equal(remapReasoningEffort("none", capped), "low");
+  assert.equal(remapReasoningEffort("minimal", capped), "low");
+  assert.equal(remapReasoningEffort("xhigh", capped), "max");
+  assert.equal(remapReasoningEffort("high", capped), "high");
+  // GLM documents minimal, so "none" lands on "minimal" instead of being rejected.
+  assert.equal(remapReasoningEffort("none", ["minimal", "low", "medium", "high", "xhigh", "max"]), "minimal");
+  // Tie between low (dist 1) and high (dist 1) resolves upward.
+  assert.equal(remapReasoningEffort("medium", ["low", "high"]), "high");
+  assert.equal(remapReasoningEffort("low", []), "low");
+});
+
+test("defaultReasoningEffortForModel prefers medium, else the central documented level", () => {
+  assert.equal(defaultReasoningEffortForModel(["low", "medium", "high", "max"]), "medium");
+  assert.equal(defaultReasoningEffortForModel(["low", "max"]), "low");
+  assert.equal(defaultReasoningEffortForModel(["none", "minimal", "low"]), "minimal");
+  assert.equal(defaultReasoningEffortForModel(["minimal", "low", "medium", "high", "xhigh", "max"]), "medium");
+  assert.equal(defaultReasoningEffortForModel([]), "low");
+  assert.equal(defaultReasoningEffortForModel(undefined), "low");
+});
+
+test("resolveReasoningEffort honors request > per-model > global > model default", () => {
+  const glm = ["minimal", "low", "medium", "high", "xhigh", "max"];
+  assert.equal(resolveReasoningEffort({ ladder: glm }), "medium");
+  assert.equal(resolveReasoningEffort({ globalDefault: "auto", ladder: glm }), "medium");
+  assert.equal(resolveReasoningEffort({ globalDefault: "max", ladder: glm }), "max");
+  assert.equal(resolveReasoningEffort({ globalDefault: "minimal", ladder: glm }), "minimal");
+  assert.equal(resolveReasoningEffort({ perModelOverride: "high", globalDefault: "minimal", ladder: glm }), "high");
+  assert.equal(resolveReasoningEffort({ requested: "xhigh", perModelOverride: "high", ladder: glm }), "xhigh");
+  // Unknown models keep canonical levels; bad words are ignored.
+  assert.equal(resolveReasoningEffort({ globalDefault: "extreme" }), "low");
+  assert.equal(resolveReasoningEffort({ requested: "xhigh", ladder: [] }), "xhigh");
+  assert.equal(resolveReasoningEffort({ requested: "3", ladder: glm }), "medium");
+});
+
+test("reasoningLevelNotes documents per-model quirks", () => {
+  assert.match(reasoningLevelNotes("mimo-v2.6-flash") ?? "", /max_tokens/);
+  assert.match(reasoningLevelNotes("gemma4") ?? "", /minimal/);
+  assert.match(reasoningLevelNotes("glm5.3") ?? "", /always reasons/);
 });
 
 test("parseDiscoveredModel extracts metadata from raw API response", () => {

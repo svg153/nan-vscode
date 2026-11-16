@@ -24,19 +24,6 @@ export interface PlainTool {
   readonly inputSchema?: unknown;
 }
 
-const REASONING_EFFORTS = /^(none|minimal|low|medium|high|max)$/;
-
-export function reasoningEffort(
-  options: { readonly [name: string]: unknown } | undefined,
-  fallback = "low",
-): string {
-  const requested = options?.reasoning_effort;
-  if (typeof requested === "string" && REASONING_EFFORTS.test(requested)) {
-    return requested;
-  }
-  return REASONING_EFFORTS.test(fallback) ? fallback : "low";
-}
-
 export function estimateTokens(text: string): number {
   return Math.max(1, Math.ceil(text.length / 4));
 }

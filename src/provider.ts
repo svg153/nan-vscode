@@ -7,11 +7,12 @@ import {
   getKnownModel,
   knownChatModelIds,
   reasoningDescription,
+  resolveReasoningEffort,
   toDisplayMetadata,
   type DiscoveredModel,
   type ModelMetadata,
 } from "./modelCatalog";
-import { convertMessages, convertTools, estimateTokens, httpError, isImagePart, reasoningEffort } from "./openai/request";
+import { convertMessages, convertTools, estimateTokens, httpError, isImagePart } from "./openai/request";
 import { OpenAIStreamDecoder, StreamLimitError, type StreamEvent } from "./openai/stream";
 import type { OpenAIUsage } from "./openai/types";
 import { sanitizeUpstreamText } from "./text";
@@ -39,6 +40,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   readonly onDidChangeLanguageModelChatInformation = this.changedEmitter.event;
 
   private cache: CachedModels | undefined;
+  private nativeBaseUrl: string | undefined;
 
   constructor(
     private readonly context: Pick<vscode.ExtensionContext, "secrets">,
@@ -51,13 +53,32 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   }
 
   async provideLanguageModelChatInformation(
-    options: { silent: boolean },
+    options: { silent: boolean; configuration?: Record<string, unknown> },
     token: vscode.CancellationToken,
   ): Promise<vscode.LanguageModelChatInformation[]> {
-    diagnostic("models.provide.begin", { silent: options.silent, cancelled: token.isCancellationRequested });
+    diagnostic("models.provide.begin", {
+      silent: options.silent,
+      cancelled: token.isCancellationRequested,
+      hasProviderConfiguration: options.configuration !== undefined,
+    });
     if (token.isCancellationRequested) {
       diagnostic("models.provide.cancelled");
       return [];
+    }
+
+    // VS Code >= 1.146 passes the native "Manage Models" provider configuration
+    // (declared in contributes.languageModelChatProviders.configuration) on every
+    // call. Adopt it into the storage the rest of the extension already reads.
+    const nativeApiKey = providerConfigString(options.configuration, "apiKey");
+    const nativeBaseUrl = providerConfigString(options.configuration, "apiBaseUrl");
+    if (nativeBaseUrl !== this.nativeBaseUrl) {
+      this.nativeBaseUrl = nativeBaseUrl;
+      this.cache = undefined;
+    }
+    if (nativeApiKey && nativeApiKey !== (await this.context.secrets.get(SECRET_API_KEY))) {
+      await this.context.secrets.store(SECRET_API_KEY, nativeApiKey);
+      this.cache = undefined;
+      this.changedEmitter.fire();
     }
 
     const cached = this.cache;
@@ -66,7 +87,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       return cached.models;
     }
 
-    const apiKey = await this.getApiKey(options.silent);
+    const apiKey = nativeApiKey ?? (await this.getApiKey(options.silent));
     if (!apiKey) {
       diagnostic("models.provide.noKey", { silent: options.silent });
       return [];
@@ -132,7 +153,8 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   ): Promise<void> {
     const startedAt = Date.now();
     diagnostic("chat.begin", { modelId: model.id, messageCount: messages.length, toolCount: options.tools?.length ?? 0 });
-    const apiKey = await this.getApiKey(false);
+    const modelConfiguration = (options as { modelConfiguration?: Record<string, unknown> }).modelConfiguration;
+    const apiKey = providerConfigString(modelConfiguration, "apiKey") ?? (await this.getApiKey(false));
     if (!apiKey) {
       diagnostic("chat.noKey", { modelId: model.id });
       throw new Error("NaN Builders API key is not configured. Run 'NaN Builders: Manage Provider'.");
@@ -153,10 +175,8 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       stream_options: { include_usage: true },
       max_tokens: model.maxOutputTokens || 4096,
       // NaN can spend several minutes in silent reasoning unless this is bounded.
-            reasoning_effort: reasoningEffort(
-              options.modelOptions,
-              vscode.workspace.getConfiguration("nanBuilders").get<string>("defaultReasoningEffort", "low"),
-            ),
+      // The effort is remapped to the closest level the model actually documents.
+      reasoning_effort: this.resolveEffort(model.id, options.modelOptions),
     };
 
     if (toolMapping.definitions.length > 0) {
@@ -414,16 +434,32 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   }
 
   private apiBaseUrl(): string {
-    return vscode.workspace
-      .getConfiguration("nanBuilders")
-      .get<string>("apiBaseUrl", DEFAULT_API_BASE_URL)
-      .replace(/\/+$/, "");
+    return (
+      this.nativeBaseUrl ??
+      vscode.workspace
+        .getConfiguration("nanBuilders")
+        .get<string>("apiBaseUrl", DEFAULT_API_BASE_URL)
+    ).replace(/\/+$/, "");
   }
 
   private userAgent(): string {
     const extension = vscode.extensions.getExtension("svg153.nan-builders-vscode");
     const version = extension?.packageJSON?.version ?? "dev";
     return `nan-vscode/${version} VSCode/${vscode.version}`;
+  }
+
+  /** Effective reasoning effort for a model, honoring per-model overrides. */
+  private resolveEffort(modelId: string, modelOptions: { readonly [name: string]: unknown } | undefined): string {
+    const configuration = vscode.workspace.getConfiguration("nanBuilders");
+    const overrides = configuration.get<Record<string, unknown>>("reasoningEffortByModel", {});
+    const perModel = typeof overrides?.[modelId] === "string" ? (overrides[modelId] as string) : undefined;
+    const requested = typeof modelOptions?.reasoning_effort === "string" ? modelOptions.reasoning_effort : undefined;
+    return resolveReasoningEffort({
+      requested,
+      perModelOverride: perModel,
+      globalDefault: configuration.get<string>("defaultReasoningEffort", "auto"),
+      ladder: getKnownModel(modelId)?.reasoningEffortValues,
+    });
   }
 
   private toVsCodeModel(discovered: DiscoveredModel): vscode.LanguageModelChatInformation {
@@ -461,6 +497,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
               : "Auto-discovered from the configured endpoint. Tool calling is disabled until metadata is known.",
         billingDescription(metadata),
         reasoningDescription(metadata),
+        ...(known?.reasoningEffortValues?.length ? [`Current effort: ${this.resolveEffort(metadata.id, undefined)}.`] : []),
       ].join("\n"),
       capabilities: {
         imageInput: metadata.imageInput,
@@ -468,6 +505,16 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       },
     };
   }
+}
+
+/** Reads a non-empty trimmed string from the native provider `configuration` payload. */
+function providerConfigString(configuration: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = configuration?.[key];
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 function cancellationSignal(token: vscode.CancellationToken): { signal: AbortSignal; dispose: () => void } {

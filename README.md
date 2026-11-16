@@ -24,6 +24,7 @@ Use [NaN Builders](https://nan.builders/) models in VS Code Chat and Agent mode 
 - Local status-bar usage when the API returns OpenAI-compatible streaming usage metadata.
 - Account-wide credit usage in the status bar via `GET /v1/usage` when an API key is configured, with local-session usage as fallback.
 - Conservative handling of newly discovered model IDs that are not yet in the local metadata catalog.
+- Per-model reasoning effort: choose a level with **NaN Builders: Set Model Reasoning Effort**, send per-request levels through `modelOptions`, or leave everything on `auto`, which uses a documented default per model.
 - Opt-in `nanBuilders.discoveryMode: auto` for Copilot-style auto-discovery from trusted OpenAI-compatible endpoints: every non-chat-filtered ID returned by `GET /models` appears in the picker with endpoint-declared capabilities ([issue #100](https://github.com/svg153/nan-vscode/issues/100)).
 - Remote-workspace support: the provider prefers the workspace extension host and falls back to the local UI host.
 
@@ -63,6 +64,8 @@ Install the generated `nan-builders-vscode-*.vsix` with **Extensions: Install fr
 4. Choose **Validate API key and refresh models**.
 5. In Chat or Agent mode, select a model under the **NaN Builders** provider.
 
+On recent VS Code builds the provider also shows its logo in the chat model picker and exposes native configuration: open **Manage Models**, expand **NaN Builders**, and set **API Key** (stored securely by VS Code) and **API Base URL** directly there. Values entered in Manage Models take precedence for chat and model discovery and the key is adopted into the extension's own SecretStorage; **NaN Builders: Manage Provider** keeps working on older VS Code versions and for the remaining commands.
+
 The model picker is intentionally limited to IDs returned by the key's `/v1/models` response. Run **NaN Builders: Refresh Models** after access changes. Provider extensions can also be found with the VS Code Marketplace filter:
 
 ```text
@@ -77,8 +80,23 @@ Available settings:
 | `nanBuilders.modelCacheSeconds` | `300` | Model discovery cache duration. |
 | `nanBuilders.showStatusBar` | `true` | Show usage in the status bar: plan-credit usage % when an API key is configured, otherwise local session usage. |
 | `nanBuilders.includeUnknownModels` | `false` | Expose unknown IDs without tool or vision metadata. |
+| `nanBuilders.defaultReasoningEffort` | `auto` | Fallback reasoning level for models that expose adjustable effort. `auto` uses each model's documented default (medium when supported, otherwise the central documented level); explicit levels act as the global fallback. |
+| `nanBuilders.reasoningEffortByModel` | `{}` | Per-model reasoning overrides set by **NaN Builders: Set Model Reasoning Effort** (for example `"glm-5.3-flash": "high"`). Overrides win over the global setting; removing an entry resets that model to `auto`. |
 | `nanBuilders.discoveryMode` | `"curated"` | `auto` lists every chat ID returned by `GET /models` from a trusted custom endpoint, except obvious non-chat names (embeddings, rerank, speech, transcription, moderation/guard, image/video generation, minimax-only endpoints). Endpoint-declared capability fields take precedence; models without metadata get conservative defaults. In `curated` mode, if `GET /models` fails or returns no chat IDs, the picker falls back to the static catalog marked "not live-verified". |
 | `nanBuilders.completionModel` | `""` | Model ID for opt-in inline ghost-text completions; empty disables the feature and no completion request is sent. |
+
+## Reasoning effort per model
+
+Models differ in which reasoning levels the API documents for them. Resolution happens per request, in this order:
+
+1. `modelOptions.reasoning_effort` supplied with the request.
+2. `nanBuilders.reasoningEffortByModel[model]` (set through the picker command).
+3. `nanBuilders.defaultReasoningEffort`, unless it is `auto`.
+4. The model's documented default: `medium` when the model supports it, otherwise the central documented level.
+
+Whatever level is chosen is remapped to the closest documented level for that model (ties move upward), so selecting an unsupported deep-thinking level on a shallow model never sends a value the API rejects. The ladders are curated from the "Controlling reasoning" table at <https://nan.builders/docs/models> (checked 2026-11-16): `/v1/models` does not publish per-model effort levels, so the table must be re-checked when the docs change. Model-specific quirks are stated in each model description: GLM always reasons (`none` is applied as `minimal`); Gemma 4 and Qwen 3.6 treat both `none` and `minimal` as off, with levels capping the reasoning phase between 2,048 and 32,768 tokens; MiMo documents only `low`–`max` and counts reasoning tokens inside `max_tokens`; `deepseek-v4-flash` and `qwen3.8-flash` treat effort values as hints rather than caps.
+
+Run **NaN Builders: Set Model Reasoning Effort** from the Command Palette, pick a model, then pick a level (or reset it to `auto`). The current level is shown in the model tooltip and in the selection UI description.
 
 When `nanBuilders.apiBaseUrl` uses non-loopback `http:`, the extension asks before sending the stored API key. The decision is remembered for that endpoint until the extension session ends and covers model discovery, chat, account usage, and inline completions. A declined endpoint stays blocked without repeating the prompt; changing the endpoint clears declined decisions. Canceling prevents the request; HTTPS and loopback HTTP endpoints do not prompt.
 

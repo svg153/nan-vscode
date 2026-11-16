@@ -6,7 +6,6 @@ import {
   estimateTokens,
   httpError,
   isImagePart,
-  reasoningEffort,
 } from "../src/openai/request";
 
 const noMapping = new Map<string, string>();
@@ -129,16 +128,6 @@ test("leaves tool choice undefined when no tools are provided", () => {
   const mapping = convertTools([], false);
   assert.equal(mapping.definitions.length, 0);
   assert.equal(mapping.toolChoice, undefined);
-});
-
-test("accepts supported reasoning efforts and defaults to low", () => {
-  for (const effort of ["none", "minimal", "low", "medium", "high", "max"]) {
-    assert.equal(reasoningEffort({ reasoning_effort: effort }), effort);
-  }
-  assert.equal(reasoningEffort({ reasoning_effort: "extreme" }), "low");
-  assert.equal(reasoningEffort({ reasoning_effort: 3 }), "low");
-  assert.equal(reasoningEffort({}), "low");
-  assert.equal(reasoningEffort(undefined), "low");
 });
 
 test("estimates tokens with a floor of one", () => {

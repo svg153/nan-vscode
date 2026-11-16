@@ -7,7 +7,15 @@ export interface ModelMetadata {
   readonly toolCalling: boolean;
   /** NaN's "larger model" tier: paid from the same credits pool but costing more per token. */
   readonly largerModel?: boolean;
-  /** Empty means the model accepts the parameter but manages reasoning depth itself. */
+  /**
+   * Documented reasoning levels for chat completions. Empty means the model
+   * accepts the parameter but manages reasoning depth itself; `undefined`
+   * means the model is not in the curated catalog. The ladders below were
+   * copied from the "Controlling reasoning" table at
+   * https://nan.builders/docs/models on 2026-11-16. `/v1/models` does not
+   * publish per-model effort levels today, so this table is the source of
+   * truth and must be re-checked when the docs change.
+   */
   readonly reasoningEffortValues?: readonly string[];
 }
 
@@ -38,7 +46,8 @@ const CHAT_MODELS: readonly ModelMetadata[] = [
     maxOutputTokens: 32_768,
     imageInput: true,
     toolCalling: true,
-    reasoningEffortValues: [],
+    // Docs: none turns reasoning off; minimal..max steer depth as hints, not caps.
+    reasoningEffortValues: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
   },
   {
     id: "glm5.3-flash",
@@ -47,7 +56,8 @@ const CHAT_MODELS: readonly ModelMetadata[] = [
     maxOutputTokens: 32_768,
     imageInput: true,
     toolCalling: true,
-    reasoningEffortValues: ["low", "medium", "high", "max"],
+    // Docs: GLM always reasons; there is no off switch and "none" is applied as "minimal".
+    reasoningEffortValues: ["minimal", "low", "medium", "high", "xhigh", "max"],
   },
   {
     id: "qwen3.8-flash",
@@ -57,7 +67,8 @@ const CHAT_MODELS: readonly ModelMetadata[] = [
     imageInput: true,
     // NaN documents XML tool calls; this provider currently only handles OpenAI tool_calls.
     toolCalling: false,
-    reasoningEffortValues: [],
+    // Docs: reasoning is on by default, "none" turns it off, minimal..max are hints, not caps.
+    reasoningEffortValues: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
   },
   {
     id: "mimo-v2.6-flash",
@@ -66,7 +77,8 @@ const CHAT_MODELS: readonly ModelMetadata[] = [
     maxOutputTokens: 32_768,
     imageInput: true,
     toolCalling: true,
-    reasoningEffortValues: [],
+    // Docs: low..max only; "none" turns reasoning off, "minimal" is applied as "low", "xhigh" as "max".
+    reasoningEffortValues: ["none", "low", "medium", "high", "max"],
   },
   {
     id: "gemma4",
@@ -75,7 +87,8 @@ const CHAT_MODELS: readonly ModelMetadata[] = [
     maxOutputTokens: 65_536,
     imageInput: true,
     toolCalling: false,
-    reasoningEffortValues: ["none", "minimal", "low", "medium", "high", "max"],
+    // Docs: both "none" and "minimal" disable reasoning; low..max cap the reasoning phase.
+    reasoningEffortValues: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
   },
   {
     id: "qwen3.6",
@@ -84,7 +97,8 @@ const CHAT_MODELS: readonly ModelMetadata[] = [
     maxOutputTokens: 65_536,
     imageInput: true,
     toolCalling: false,
-    reasoningEffortValues: ["none", "minimal", "low", "medium", "high", "max"],
+    // Docs: both "none" and "minimal" disable reasoning; low..max cap the reasoning phase.
+    reasoningEffortValues: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
   },
   {
     id: "glm5.3",
@@ -94,7 +108,8 @@ const CHAT_MODELS: readonly ModelMetadata[] = [
     imageInput: false,
     toolCalling: true,
     largerModel: true,
-    reasoningEffortValues: ["low", "medium", "high", "max"],
+    // Docs: GLM always reasons; there is no off switch and "none" is applied as "minimal".
+    reasoningEffortValues: ["minimal", "low", "medium", "high", "xhigh", "max"],
   },
   {
     id: "kimi-k3.1-pro",
@@ -248,13 +263,18 @@ export function getKnownModel(id: string): ModelMetadata | undefined {
 
 export function reasoningDescription(model: ModelMetadata): string {
   const values = model.reasoningEffortValues;
+  const note = reasoningLevelNotes(model.id);
   if (values === undefined) {
     return "Reasoning support is unknown.";
   }
   if (values.length === 0) {
-    return "Reasoning depth is model-managed; effort levels are not user-adjustable.";
+    return `Reasoning depth is model-managed; effort levels are not user-adjustable.${note ? ` Note: ${note}` : ""}`;
   }
-  return `Documented reasoning effort levels: ${values.join(", ")}. Configurable via the nanBuilders.defaultReasoningEffort setting.`;
+  return [
+    `Documented reasoning effort levels: ${values.join(", ")}.`,
+    `Defaults to '${defaultReasoningEffortForModel(values)}' under nanBuilders.defaultReasoningEffort = auto; pick a per-model level with 'NaN Builders: Set Model Reasoning Effort'.`,
+    ...(note ? [`Note: ${note}`] : []),
+  ].join(" ");
 }
 
 /**
@@ -269,6 +289,96 @@ export function billingDescription(model: ModelMetadata): string {
 
 export function isKnownNonChatModel(id: string): boolean {
   return KNOWN_NON_CHAT_IDS.has(id);
+}
+
+/** Canonical low-to-high order used to find the nearest documented level. */
+const REASONING_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+/** Levels accepted from requests/settings; words above "max" clamp to it. */
+const REASONING_WORDS = /^(none|minimal|low|medium|high|max|xhigh)$/;
+
+export interface ResolveReasoningEffortInput {
+  /** Effort coming from the chat request (`modelOptions.reasoning_effort`). */
+  readonly requested?: string;
+  /** Per-model override chosen with the Set Model Reasoning Effort command. */
+  readonly perModelOverride?: string;
+  /** `nanBuilders.defaultReasoningEffort`; "auto" defers to the model default. */
+  readonly globalDefault?: string;
+  /** Documented ladder. `undefined` = unknown model, `[]` = model-managed. */
+  readonly ladder?: readonly string[];
+}
+
+function effortRank(level: string): number {
+  const index = (REASONING_ORDER as readonly string[]).indexOf(level);
+  // Any above-max word sorts after "max".
+  return index >= 0 ? index : REASONING_ORDER.length;
+}
+
+/**
+ * Map a valid effort word to the closest level of `ladder`. Unknown levels are
+ * elevated to the nearest real one instead of being rejected or ignored
+ * (e.g. with a low..max ladder: none/minimal -> low, xhigh -> max).
+ * Ties prefer the higher level.
+ */
+export function remapReasoningEffort(level: string, ladder: readonly string[]): string {
+  if (ladder.length === 0 || ladder.includes(level)) {
+    return level;
+  }
+  const rank = effortRank(level);
+  let best = ladder[0];
+  let bestDistance = Math.abs(effortRank(best) - rank);
+  for (const candidate of ladder) {
+    const distance = Math.abs(effortRank(candidate) - rank);
+    if (distance < bestDistance || (distance === bestDistance && effortRank(candidate) > effortRank(best))) {
+      best = candidate;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+/**
+ * Per-model default: "medium" when the model documents it, otherwise the
+ * central level of its documented ladder. Falls back to "low" for
+ * model-managed or unknown models.
+ */
+export function defaultReasoningEffortForModel(ladder: readonly string[] | undefined): string {
+  if (!ladder || ladder.length === 0) {
+    return "low";
+  }
+  if (ladder.includes("medium")) {
+    return "medium";
+  }
+  return ladder[Math.floor((ladder.length - 1) / 2)];
+}
+
+/**
+ * Resolve the effort to send: request override > per-model override >
+ * explicit global default > model default. The result is always remapped to
+ * the model's documented ladder (canonical levels for unknown or
+ * model-managed models).
+ */
+export function resolveReasoningEffort(input: ResolveReasoningEffortInput): string {
+  const word = (value: string | undefined): string | undefined =>
+    value !== undefined && REASONING_WORDS.test(value) ? value : undefined;
+  const globalDefault = input.globalDefault === "auto" ? undefined : word(input.globalDefault);
+  const candidate = word(input.requested) ?? word(input.perModelOverride) ?? globalDefault
+    ?? defaultReasoningEffortForModel(input.ladder);
+  return remapReasoningEffort(candidate, input.ladder && input.ladder.length > 0 ? input.ladder : [...REASONING_ORDER]);
+}
+
+const REASONING_LEVEL_NOTES: readonly (readonly [string, string])[] = [
+  ["deepseek-v4-flash", "DeepSeek Flash: effort values steer depth as hints, not caps; 'none' turns reasoning off."],
+  ["qwen3.8-flash", "Qwen3.8 Flash: reasoning is on by default; 'none' turns it off and effort values are hints, not caps. 'max_tokens' bounds only the answer; use 'max_completion_tokens' for the total."],
+  ["mimo-v2.6-flash", "MiMo counts reasoning tokens inside max_tokens; 'minimal' is applied as 'low' and 'xhigh' as 'max'."],
+  ["gemma4", "Gemma: both 'none' and 'minimal' disable reasoning; on Chat Completions levels cap the reasoning phase at 2,048-32,768 tokens."],
+  ["qwen3.6", "Qwen3.6: both 'none' and 'minimal' disable reasoning; on Chat Completions levels cap the reasoning phase at 2,048-32,768 tokens."],
+  ["glm5.3-flash", "GLM always reasons; there is no off switch and 'none' is applied as 'minimal'."],
+  ["glm5.3", "GLM always reasons; there is no off switch and 'none' is applied as 'minimal'."],
+];
+
+export function reasoningLevelNotes(id: string): string | undefined {
+  return REASONING_LEVEL_NOTES.find(([modelId]) => modelId === id)?.[1];
 }
 
 /**
