@@ -38,6 +38,10 @@ issues, in the repository's GSD format, for work that nobody has proposed yet.
      in-flight parallel work.
 4. Rank candidates by user impact and pick at most 3. If none pass the
    deduplication filter, produce no issues and end with a summary of why.
+   Skip routine dependency version bumps or "update X to latest" ideas:
+   Renovate owns dependency updates with supply-chain cooldowns (see
+   `renovate.json`); only propose dependency work for architectural changes
+   (e.g. replacing an abandoned package, changing the bundling strategy).
 5. For each chosen candidate, create one issue with:
    - Title: `<type>(<scope>): <imperative outcome>` using one of
      feat|fix|docs|chore|ci|refactor|perf|test|build.
