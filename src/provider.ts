@@ -14,6 +14,13 @@ import {
 } from "./modelCatalog";
 import { convertMessages, convertTools, estimateTokens, httpError, isImagePart } from "./openai/request";
 import { OpenAIStreamDecoder, StreamLimitError, type StreamEvent } from "./openai/stream";
+import {
+  ChatTimeoutController,
+  DEFAULT_CONNECT_TIMEOUT_SECONDS,
+  DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS,
+  resolveTimeoutSeconds,
+  type ChatTimeouts,
+} from "./openai/timeouts";
 import type { OpenAIUsage } from "./openai/types";
 import { sanitizeUpstreamText } from "./text";
 import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
@@ -184,11 +191,18 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       requestBody.tool_choice = toolMapping.toolChoice ?? "auto";
     }
 
-    const cancellation = cancellationSignal(token);
+    let timeoutController: ChatTimeoutController | undefined;
+    const cancellation = cancellationSignal(token, () => timeoutController?.settle());
+    timeoutController = new ChatTimeoutController(this.chatTimeouts(), (reason) => cancellation.abort(reason));
+    if (token.isCancellationRequested) {
+      timeoutController.settle();
+    }
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     let chunkCount = 0;
     try {
+      timeoutController.armConnect();
       const response = await this.sendChatRequest(apiKey, requestBody, cancellation.signal);
+      timeoutController.startStream();
       diagnostic("chat.http.response", { modelId: model.id, status: response.status, elapsedMs: Date.now() - startedAt });
       if (!response.body) {
         throw new Error("NaN Builders returned an empty streaming response.");
@@ -223,10 +237,12 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
         if (done) {
           break;
         }
+        timeoutController.touch();
         chunkCount += 1;
         reportStreamEvents(streamDecoder.push(textDecoder.decode(value, { stream: true })));
       }
 
+      timeoutController.settle();
       if (!token.isCancellationRequested) {
         reportStreamEvents(streamDecoder.push(textDecoder.decode()));
         reportStreamEvents(streamDecoder.finish());
@@ -247,9 +263,10 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
         }
       }
     } catch (error) {
-      if (error instanceof StreamLimitError && reader) {
+      const timeoutError = timeoutController.timeoutError;
+      if ((error instanceof StreamLimitError || timeoutError) && reader) {
         try {
-          await reader.cancel(error);
+          await reader.cancel(timeoutError ?? error);
         } catch (cancelError) {
           diagnostic("chat.stream.cancel.error", {
             modelId: model.id,
@@ -257,19 +274,31 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
           });
         }
       }
+      const reported = timeoutError ?? error;
       diagnostic("chat.error", {
         modelId: model.id,
         elapsedMs: Date.now() - startedAt,
-        errorName: error instanceof Error ? error.name : typeof error,
+        errorName: reported instanceof Error ? reported.name : typeof reported,
+        timedOut: Boolean(timeoutError),
         cancelled: token.isCancellationRequested,
       });
+      // A timeout is always surfaced, even if the user canceled afterwards,
+      // so an aborted signal is never reported as a plain cancellation.
+      if (timeoutError) {
+        throw timeoutError;
+      }
       if (!token.isCancellationRequested && !isAbortError(error)) {
         throw error;
       }
     } finally {
+      timeoutController.settle();
       reader?.releaseLock();
       cancellation.dispose();
-      diagnostic("chat.finally", { modelId: model.id, cancelled: token.isCancellationRequested });
+      diagnostic("chat.finally", {
+        modelId: model.id,
+        timedOut: Boolean(timeoutController.timeoutError),
+        cancelled: token.isCancellationRequested,
+      });
     }
   }
 
@@ -433,6 +462,20 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     return response;
   }
 
+  private chatTimeouts(): ChatTimeouts {
+    const configuration = vscode.workspace.getConfiguration("nanBuilders");
+    return {
+      connectTimeoutSeconds: resolveTimeoutSeconds(
+        configuration.get<number>("connectTimeoutSeconds", DEFAULT_CONNECT_TIMEOUT_SECONDS),
+        DEFAULT_CONNECT_TIMEOUT_SECONDS,
+      ),
+      streamIdleTimeoutSeconds: resolveTimeoutSeconds(
+        configuration.get<number>("streamIdleTimeoutSeconds", DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS),
+        DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS,
+      ),
+    };
+  }
+
   private apiBaseUrl(): string {
     return (
       this.nativeBaseUrl ??
@@ -517,14 +560,22 @@ function providerConfigString(configuration: Record<string, unknown> | undefined
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function cancellationSignal(token: vscode.CancellationToken): { signal: AbortSignal; dispose: () => void } {
+function cancellationSignal(
+  token: vscode.CancellationToken,
+  onCancel?: () => void,
+): { signal: AbortSignal; abort: (reason?: unknown) => void; dispose: () => void } {
   const controller = new AbortController();
+  const abort = (reason?: unknown): void => controller.abort(reason);
   if (token.isCancellationRequested) {
+    onCancel?.();
     controller.abort();
-    return { signal: controller.signal, dispose: () => {} };
+    return { signal: controller.signal, abort, dispose: () => {} };
   }
-  const listener = token.onCancellationRequested(() => controller.abort());
-  return { signal: controller.signal, dispose: () => listener.dispose() };
+  const listener = token.onCancellationRequested(() => {
+    onCancel?.();
+    controller.abort();
+  });
+  return { signal: controller.signal, abort, dispose: () => listener.dispose() };
 }
 
 async function readChatErrorText(response: Response): Promise<string> {

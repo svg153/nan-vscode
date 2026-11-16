@@ -107,6 +107,20 @@
           "maximum": 3600,
           "description": "How long the discovered model list is cached before refreshing."
         },
+        "nanBuilders.connectTimeoutSeconds": {
+          "type": "number",
+          "default": 20,
+          "minimum": 1,
+          "maximum": 3600,
+          "description": "Seconds to wait for the response headers of a chat request before failing with a timeout. User cancellation is still immediate and reported separately; raise this for slow gateways."
+        },
+        "nanBuilders.streamIdleTimeoutSeconds": {
+          "type": "number",
+          "default": 120,
+          "minimum": 1,
+          "maximum": 3600,
+          "description": "Maximum silence between streamed chunks before a chat request is aborted as timed out. The timer restarts on every chunk, so slow but alive streams are never cut off by a total deadline. Raise it for models with long silent reasoning phases."
+        },
         "nanBuilders.showStatusBar": {
           "type": "boolean",
           "default": true,

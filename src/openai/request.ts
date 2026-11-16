@@ -28,6 +28,31 @@ export function estimateTokens(text: string): number {
   return Math.max(1, Math.ceil(text.length / 4));
 }
 
+export type RequestTimeoutKind = "connect" | "stream-idle";
+
+const TIMEOUT_MESSAGES: Record<RequestTimeoutKind, (seconds: number) => string> = {
+  connect: (seconds) =>
+    `NaN Builders did not send response headers within ${seconds} seconds, so the request timed out. ` +
+    "Check the network and the configured endpoint, or raise nanBuilders.connectTimeoutSeconds for a slower gateway.",
+  "stream-idle": (seconds) =>
+    `NaN Builders sent no stream data for ${seconds} seconds, so the stalled request timed out and was aborted. ` +
+    "Raise nanBuilders.streamIdleTimeoutSeconds for models with longer silent reasoning phases.",
+};
+
+/**
+ * Explicit timeout failure, distinct from user cancellation. Messages name the
+ * setting that controls the deadline so the surfaced error is actionable.
+ */
+export class RequestTimeoutError extends Error {
+  constructor(
+    readonly kind: RequestTimeoutKind,
+    readonly timeoutSeconds: number,
+  ) {
+    super(TIMEOUT_MESSAGES[kind](timeoutSeconds));
+    this.name = "RequestTimeoutError";
+  }
+}
+
 export function httpError(status: number, statusText: string, body: string): Error {
   const summary = sanitizeErrorBody(body);
   const suffix = summary ? `: ${summary}` : "";
