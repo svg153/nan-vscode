@@ -6,6 +6,7 @@ import {
   estimateTokens,
   httpError,
   isImagePart,
+  RequestTimeoutError,
 } from "../src/openai/request";
 
 const noMapping = new Map<string, string>();
@@ -189,6 +190,23 @@ test("explains the credit reasons behind an HTTP 402 instead of leaving it crypt
   assert.match(error.message, /credits are frozen/);
   assert.match(error.message, /NaN Builders: Show Usage/);
   assert.match(httpError(402, "Payment Required", "").message, /does not draw credits\.$/);
+});
+
+test("timeout errors are explicit, actionable, and never worded as cancellation", () => {
+  const connect = new RequestTimeoutError("connect", 20);
+  assert.equal(connect.name, "RequestTimeoutError");
+  assert.equal(connect.kind, "connect");
+  assert.match(connect.message, /did not send response headers within 20 seconds/);
+  assert.match(connect.message, /nanBuilders\.connectTimeoutSeconds/);
+
+  const idle = new RequestTimeoutError("stream-idle", 120);
+  assert.match(idle.message, /no stream data for 120 seconds/);
+  assert.match(idle.message, /nanBuilders\.streamIdleTimeoutSeconds/);
+
+  for (const error of [connect, idle]) {
+    assert.match(error.message, /timed out/);
+    assert.equal(/cancel/i.test(error.message), false);
+  }
 });
 
 test("detects image parts only for image mime types backed by bytes", () => {
