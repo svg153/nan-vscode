@@ -181,8 +181,20 @@ export function renderHtml() {
 
   function apply(next) { state = next; render(); }
 
+  function markOffline() {
+    offline = true;
+    document.getElementById("keyChip").textContent = "backend offline";
+    showError("Canvas backend unreachable. Retrying automatically...");
+  }
+
   async function post(path, body) {
-    var res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+    var res;
+    try {
+      res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+    } catch (e) {
+      markOffline();
+      return null;
+    }
     var json = await res.json().catch(function () { return {}; });
     if (!res.ok) { showError(json.error || ("Request failed (" + res.status + ")")); return null; }
     showError(null);
@@ -219,10 +231,22 @@ export function renderHtml() {
   });
   document.getElementById("confirmNo").addEventListener("click", function () { document.getElementById("confirmDialog").close(); });
 
-  try { apply(await (await fetch("/api/state")).json()); } catch (e) { showError("Canvas backend unreachable."); }
+  var offline = false;
+  async function loadState() {
+    try {
+      var res = await fetch("/api/state");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      apply(await res.json());
+      if (offline) { offline = false; showError(null); }
+    } catch (e) {
+      markOffline();
+    }
+  }
+  loadState();
+  setInterval(function () { if (offline && document.visibilityState !== "hidden") loadState(); }, 5000);
   var source = new EventSource("/events");
-  source.addEventListener("state", function (event) { apply(JSON.parse(event.data)); });
-  source.addEventListener("error", function () { /* reconnects automatically */ });
+  source.addEventListener("state", function (event) { apply(JSON.parse(event.data)); offline = false; });
+  source.addEventListener("error", function () { /* EventSource reconnects; poll loop above recovers state if the backend flaked */ });
   selectTab(tab);
 })();
 </script>
