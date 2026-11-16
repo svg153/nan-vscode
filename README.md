@@ -156,6 +156,26 @@ No alternate chat webview is created; the provider uses the built-in VS Code Cha
 - `nanBuilders.apiBaseUrl` is machine-scoped so a workspace cannot redirect the stored API key to another endpoint.
 - Changing `nanBuilders.apiBaseUrl` sends the configured key to that endpoint, so only change it to a server you trust.
 
+## GitHub Copilot app plugin (canvas and tools)
+
+This repository also ships an installable plugin for the GitHub Copilot app: the root `plugin.json` plus the Copilot CLI extension under `com.github.copilot/extensions/nan-builders/`. It does not replace the VS Code provider and cannot register NaN models inside Copilot — it adds agent-facing surfaces to the app:
+
+- **`nan-builders` canvas** — a monthly quota dashboard (per-model usage and % of the documented fixed monthly counters), the model catalog, and API key / base URL settings, served from a local loopback-only server.
+- **`nan_ask` tool** — one-shot prompts to any NaN chat model (cheap second-opinion or verification passes). No streaming, no tool calls.
+- **`nan_usage` tool** — account usage for the current UTC month as plain text for the agent.
+- **Session context hook** — every new Copilot session learns these surfaces exist and how to handle the key safely.
+
+Install from this repository's marketplace:
+
+```text
+/plugin marketplace add svg153/nan-vscode
+/plugin install nan-builders@nan-vscode
+```
+
+Then run `/reload` (or restart the app) and ask Copilot to open the **NaN Builders** canvas.
+
+The plugin keeps its API key outside the repository, in `$COPILOT_HOME/extensions/nan-builders/artifacts/config.json` (defaults under `~/.copilot`), overridable with the `NAN_BUILDERS_API_KEY` environment variable; the key is only ever sent as `Authorization: Bearer` to the configured base URL, and non-loopback plain HTTP requires explicit confirmation in the canvas settings, same policy as the VS Code extension. Plugin logic reuses the identical API contract and quota rules as the provider and is covered by `npm run test:extension` (dependency-free `node --test`). The VSIX build excludes `com.github.copilot/` and `plugin.json`, so the VS Code extension is unaffected.
+
 ## Development and contribution
 
 ```bash

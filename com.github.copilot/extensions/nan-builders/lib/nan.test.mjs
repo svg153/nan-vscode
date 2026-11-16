@@ -1,0 +1,115 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import {
+  DEFAULT_BASE_URL,
+  NanError,
+  classifyBaseUrl,
+  fetchUsage,
+  isChatModel,
+  monthUtcWindow,
+  normalizeBaseUrl,
+  redactSecret,
+} from "./nan.mjs";
+
+test("normalizeBaseUrl trims, strips trailing slashes and defaults", () => {
+  assert.equal(normalizeBaseUrl("https://api.nan.builders/v1/"), "https://api.nan.builders/v1");
+  assert.equal(normalizeBaseUrl("  "), DEFAULT_BASE_URL);
+  assert.equal(normalizeBaseUrl(undefined), DEFAULT_BASE_URL);
+});
+
+test("classifyBaseUrl separates https, loopback http, remote http and garbage", () => {
+  assert.equal(classifyBaseUrl("https://api.nan.builders/v1"), "https");
+  assert.equal(classifyBaseUrl("http://127.0.0.1:8787/v1"), "http-loopback");
+  assert.equal(classifyBaseUrl("http://localhost:3000/v1"), "http-loopback");
+  assert.equal(classifyBaseUrl("http://example.com/v1"), "http-insecure");
+  assert.equal(classifyBaseUrl("ftp://example.com"), "invalid");
+  assert.equal(classifyBaseUrl("not a url"), "invalid");
+});
+
+test("monthUtcWindow is inclusive UTC current month", () => {
+  const window = monthUtcWindow(new Date(Date.UTC(2026, 0, 15, 23, 59)));
+  assert.deepEqual(window, { startDate: "2026-01-01", endDate: "2026-01-15" });
+});
+
+test("redactSecret removes every key occurrence from messages", () => {
+  assert.equal(redactSecret("Bearer sk-abc and sk-abc again", "sk-abc"), "Bearer [redacted] and [redacted] again");
+  assert.equal(redactSecret("nothing here", ""), "nothing here");
+});
+
+test("isChatModel follows metadata, denylist and known catalog (conservative default)", () => {
+  assert.equal(isChatModel({ id: "whisper", is_chat: true }), false); // denylist wins
+  assert.equal(isChatModel({ id: "mystery", is_chat: true }), true); // explicit metadata
+  assert.equal(isChatModel({ id: "mystery", model_type: "embedding" }), false);
+  assert.equal(isChatModel({ id: "qwen3.8-flash" }), true); // known catalog fallback
+  assert.equal(isChatModel({ id: "mystery" }), false); // unknown without metadata
+});
+
+function jsonResponse(status, payload) {
+  const text = JSON.stringify(payload);
+  return { ok: status >= 200 && status < 300, status, body: undefined, text: async () => text };
+}
+
+test("fetchUsage merges cursor pages and normalizes totals", async () => {
+  const original = globalThis.fetch;
+  const urls = [];
+  try {
+    globalThis.fetch = async (url) => {
+      urls.push(String(url));
+      if (String(url).includes("cursor=")) {
+        return jsonResponse(200, {
+          object: "usage.report",
+          data: [{ date: "2026-01-02", model: "qwen3.8-flash", total_tokens: 20, prompt_tokens: 12, completion_tokens: 8, api_requests: 1 }],
+          totals: { prompt_tokens: 32, completion_tokens: 20, total_tokens: 52, api_requests: 3, by_model: [{ model: "qwen3.8-flash", prompt_tokens: 32, completion_tokens: 20, total_tokens: 52, api_requests: 3 }] },
+          has_more: false,
+        });
+      }
+      return jsonResponse(200, {
+        object: "usage.report",
+        data: [{ date: "2026-01-01", model: "qwen3.8-flash", total_tokens: 32, prompt_tokens: 20, completion_tokens: 12, api_requests: 2 }],
+        totals: { prompt_tokens: 20, completion_tokens: 12, total_tokens: 32, api_requests: 2, by_model: [{ model: "qwen3.8-flash", prompt_tokens: 20, completion_tokens: 12, total_tokens: 32, api_requests: 2 }] },
+        has_more: true,
+        next_cursor: "cur1",
+      });
+    };
+    const report = await fetchUsage({ baseUrl: DEFAULT_BASE_URL, apiKey: "sk-test" }, { startDate: "2026-01-01", endDate: "2026-01-31" });
+    assert.equal(report.rows.length, 2);
+    assert.equal(report.truncated, false);
+    assert.equal(report.totals.totalTokens, 32); // first page totals object
+    assert.equal(report.totals.byModel[0].model, "qwen3.8-flash");
+    assert.ok(urls[0].includes("start_date=2026-01-01") && urls[0].includes("end_date=2026-01-31") && urls[0].includes("limit=500"));
+    assert.ok(urls[1].includes("cursor=cur1"));
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("fetchUsage maps HTTP 429 to a rate_limited NanError with API message", async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => jsonResponse(429, { error: { message: "slow down" } });
+    await assert.rejects(
+      fetchUsage({ baseUrl: DEFAULT_BASE_URL, apiKey: "sk-test" }),
+      (error) => error instanceof NanError && error.kind === "rate_limited" && /slow down/.test(error.message) && error.status === 429,
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("fetchUsage refuses non-loopback plain HTTP before hitting the network", async () => {
+  const original = globalThis.fetch;
+  try {
+    let called = false;
+    globalThis.fetch = async () => {
+      called = true;
+      return jsonResponse(200, {});
+    };
+    await assert.rejects(
+      fetchUsage({ baseUrl: "http://example.com/v1", apiKey: "sk-test" }),
+      (error) => error instanceof NanError && error.kind === "confirmation_required",
+    );
+    assert.equal(called, false);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
