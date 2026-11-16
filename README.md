@@ -82,6 +82,22 @@ Available settings:
 
 When `nanBuilders.apiBaseUrl` uses non-loopback `http:`, the extension asks before sending the stored API key. The decision is remembered for that endpoint until the extension session ends and covers model discovery, chat, account usage, and inline completions. A declined endpoint stays blocked without repeating the prompt; changing the endpoint clears declined decisions. Canceling prevents the request; HTTPS and loopback HTTP endpoints do not prompt.
 
+### Recipe: custom OpenAI-compatible server with auto-discovery
+
+To point the extension at a trusted OpenAI-compatible server (LM Studio, vLLM, Ollama's OpenAI endpoint, a corporate gateway) and pick its models directly, like the Copilot custom-endpoint experience:
+
+1. Set the endpoint and restart-free refresh:
+
+   ```json
+   "nanBuilders.apiBaseUrl": "https://my-server.example.com/v1/",
+   "nanBuilders.discoveryMode": "auto"
+   ```
+
+2. Run **NaN Builders: Manage Provider** to store the server's API key (any bearer token the server expects) and validate it; the picker then lists every chat ID returned by `GET /models`, minus obvious non-chat endpoints.
+3. Trigger **NaN Builders: Refresh Models** after adding or removing models on the server; results are cached for `nanBuilders.modelCacheSeconds`.
+
+Notes: in `auto` mode the picker reflects the live endpoint only (no NaN catalog fallback), capability fields declared by the server (`is_chat`, `model_type`, context/output limits) take precedence over conservative defaults, and `http:` (non-loopback) endpoints require the one-time consent prompt before the key is sent. Set `discoveryMode` back to `curated` to restore the NaN Builders Marketplace experience.
+
 ## Remote workspaces
 
 The provider prefers the workspace extension host when using WSL, SSH, or a Dev Container. This keeps the model provider on the same host as the Chat/Agent session and avoids a known VS Code routing problem where Auto can replace an explicitly selected remote-provider model. In a remote workspace, install the extension and enter the API key in that remote host's SecretStorage.
