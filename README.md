@@ -40,6 +40,13 @@ code --install-extension svg153.nan-builders-vscode
 
 The listing is community-maintained under the `svg153` publisher and is not an official NaN Builders product.
 
+Pre-release builds are published to the Marketplace pre-release channel on every
+merge that cuts a release. To try them, open the extension in the Extensions
+view, choose **Switch to Pre-Release Version**, and update normally; switch back
+to **Release Version** at any time. Stable versions are promoted manually once a
+pre-release has been validated, so a pre-release is ahead of the latest stable
+on purpose.
+
 ### From a release VSIX
 
 1. Download the latest `.vsix` from [GitHub Releases](https://github.com/svg153/nan-vscode/releases).

@@ -13,11 +13,11 @@ graph LR
   D --> E[CI: npm run check<br/>+ VS Code Insiders test]
   E --> F[Copilot code review]
   F -->|human approves| G[auto-merge squash]
-  G --> H[preview VSIX<br/>rolling release]
-  G --> I[semantic-release<br/>stable GitHub release]
-  H -->|manual Install from VSIX| J[publish-stable.yml<br/>1 click + env approval]
-  I --> J
-  J --> K[VS Code Marketplace]
+  G --> H[semantic-release<br/>stable GitHub release]
+  H --> I[preview job<br/>Marketplace pre-release<br/>+ rolling VSIX]
+  I --> J[you validate the pre-release<br/>in VS Code]
+  J --> K[publish-stable.yml<br/>1 click + env approval]
+  K --> L[Marketplace stable]
 ```
 
 ## Components
@@ -28,7 +28,8 @@ graph LR
 | Copilot hand-off agent | `.github/workflows/copilot-triage.md` | Issue labeled `agent:ready` |
 | Dependency updates | Renovate (`renovate.json`) + npm `min-release-age` (`.npmrc`) | Cooldown-gated, see below |
 | Advisory gate on PRs | `.github/workflows/dependency-review.yml` | Every pull request |
-| Preview channel | `.github/workflows/release.yml` (`preview` job) | Every merge to `main` |
+| Marketplace pre-release | `.github/workflows/release.yml` (`preview` job) | Every merge to `main` that cuts a release |
+| Preview VSIX (rolling) | `.github/workflows/release.yml` (`preview` job) | Same run, attached to the `preview` release |
 | Stable promotion | `.github/workflows/publish-stable.yml` | Manual dispatch + environment approval |
 
 - `feature-scout` scans merged PRs and open issues/PRs from the last 7 days
@@ -43,6 +44,24 @@ graph LR
   tests and launches a real VS Code Insiders integration host
   (`scripts/run-insiders-integration.cjs`), and `npm run package` proves the
   VSIX builds.
+
+## Release channels and versioning
+
+`semantic-release` owns the version. It does not commit version bumps, so
+`package.json` in the repository always lags the last tag.
+
+| Channel | Version | How a user gets it |
+| --- | --- | --- |
+| Stable | `v1.12.0` (the release tag) | Normal Marketplace install/update |
+| Pre-release | `1.12.1` (tag + 1 patch) | *Switch to Pre-Release Version*, or the `preview` release VSIX |
+
+The Marketplace **does not accept semver prerelease tags** (`1.12.1-preview.3`
+is rejected), which is why the preview channel publishes the next patch instead
+of a suffixed version; `scripts/marketplace-version.cjs` derives it from the
+tag. Because the pre-release is numerically higher, pre-release users are never
+silently downgraded when a stable version ships, and they keep getting previews
+until they switch back. Publishing `1.12.0` as stable while `1.12.1` exists as a
+pre-release is explicitly allowed by the Marketplace.
 
 ## Dependency updates & supply chain
 
@@ -103,10 +122,27 @@ your approval. If you later want low-risk churn removed, set
 5. **Allow auto-merge**: *Settings → General → Pull Requests → Allow auto-merge*
    and *merge queue*. With it, once you approve, the agent-merge flow fixes
    any CI flake/conflict and squash-merges unattended.
-6. **Environments and secrets** (*Settings → Environments*):
-   - `marketplace` environment: add your user under **Required reviewers**,
-     and store the `VSCE_PAT` secret there (scoped to the `svg153`
-     publisher).
+6. **Marketplace credentials** (*Settings → Secrets and variables → Actions*):
+   - `VSCE_PAT` at **repository** level (not only inside an environment): the
+     pre-release publish runs unattended on every merge and cannot wait for a
+     deployment approval. Scope the token to the `svg153` publisher.
+   - **Preferred: trusted publishing (OIDC).** Azure DevOps global PATs are
+     retired on 2026-12-01. In the
+     [publisher management portal](https://marketplace.visualstudio.com/manage)
+     → *Trusted publishing*, add one policy per publishing workflow:
+
+     | Workflow | Environment |
+     | --- | --- |
+     | `.github/workflows/release.yml` (pre-release) | *(leave empty)* |
+     | `.github/workflows/publish-stable.yml` (stable) | `marketplace` |
+
+     Then set the repository variable `MARKETPLACE_TRUSTED_PUBLISHING=true`.
+     Both workflows authenticate with `vsce publish --oidc` (a 15-minute
+     credential, no PAT) and `VSCE_PAT` can be deleted.
+7. **Environments** (*Settings → Environments*):
+   - `marketplace`: add your user under **Required reviewers**. That review is
+     the manual gate for *stable* publishing; the pre-release channel is
+     automatic and does not use an environment.
    - `COPILOT_GITHUB_TOKEN` is **required**: both compiled agentic locks
      validate it during activation and use it for Copilot inference, so
      without it even feature discovery fails (it is not just an optional
@@ -114,8 +150,6 @@ your approval. If you later want low-risk churn removed, set
    - `GH_AW_AGENT_TOKEN` (the assignment PAT used by `assign-to-agent`) is
      optional: set it only if `gh aw doctor` reports it is needed for your
      plan.
-7. **Marketplace variable cleanup**: the old auto-publish flag
-   `MARKETPLACE_PUBLISH_ENABLED` is no longer used; delete it if set.
 8. **Dependency guards**: add `dependency-review` (and keep `test`) to the
    required status checks on `main`. Optionally enable *Dependabot security
    updates* (Settings → Code security and analysis) for transitive advisory
@@ -131,17 +165,22 @@ your approval. If you later want low-risk churn removed, set
   dedup happens at PR time because each PR must pass required checks.
 - **Merge**: approve the Copilot code review, then
   `gh pr merge <n> --auto --squash` (or click *Enable auto-merge*).
-- **Validate a build locally**: download the VSIX from the
+- **Validate a build**: the merge already published the pre-release to the
+  Marketplace, so the fastest path is to enable *Switch to Pre-Release Version*
+  for the extension and update normally. To test the exact artifact without
+  changing your channel, download the VSIX from the
   [`preview` release](https://github.com/svg153/nan-vscode/releases/tag/preview)
-  and install it via *Extensions: Install from VSIX…* (or
+  and use *Extensions: Install from VSIX…* (or
   `code --install-extension nan-builders-vscode-preview.vsix`).
-  Preview versions sort below the next stable, so the Marketplace update
-  channel is never polluted and stable installs still win.
-- **Promote to Marketplace** (the simple manual gate):
-  1. Check the stable GitHub release produced by semantic-release
-      (e.g. `v1.6.0`) works — its VSIX asset is identical to what ships.
-   2. *Actions → Publish stable to Marketplace → Run workflow* with that tag.
-   3. Approve the pending `marketplace` deployment review. Done.
+- **Promote to Marketplace** (the manual gate, one click after validation):
+  1. Confirm the pre-release (or the stable release VSIX) behaves.
+  2. *Actions → Publish stable to Marketplace → Run workflow*. Leave the tag
+     empty to promote the latest stable release, or pass one (e.g. `v1.12.0`)
+     to promote an older one.
+  3. Approve the pending `marketplace` deployment review. That approval is the
+     "validated" signal; the VSIX published is the one `main` built.
+  The stable version is the release tag (`1.12.0`), not the pre-release
+  version (`1.12.1`), which is what keeps pre-release users on pre-releases.
 
 ## Editing agentic workflows
 
@@ -155,8 +194,11 @@ your approval. If you later want low-risk churn removed, set
 ## Safety properties
 
 - Issues created by the scout always need a human `agent:ready` label.
-- Nothing reaches the Marketplace without: CI + Insiders smoke test passing,
-  a human PR approval, a stable GitHub release, and an environment-gated
-  manual dispatch (optionally a second reviewer).
+- Nothing reaches the Marketplace **stable** channel without: CI + Insiders
+  smoke test passing, a human PR approval, a stable GitHub release, and an
+  environment-gated manual dispatch (optionally a second reviewer).
+- The pre-release channel is automatic, but it can never publish a stable
+  version: `vsce publish --pre-release` only updates the pre-release channel,
+  and promoting needs the separate, environment-gated workflow.
 - Locked Actions/images pin the compiled workflows (see the `gh-aw-manifest`
   header in each `*.lock.yml`).
