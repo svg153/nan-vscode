@@ -83,6 +83,101 @@ test("fetchUsage merges cursor pages and normalizes totals", async () => {
   }
 });
 
+test("fetchUsage parses the credits block into camelCase plan credits", async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url) => {
+      const shared = {
+        allowance: 7000.5,
+        used: 1234.5,
+        remaining: 5766,
+        period_start: "2026-11-01",
+        period_end: "2026-12-01",
+        frozen: true,
+      };
+      const payload = String(url).includes("cursor=")
+        ? { object: "usage.report", totals: { total_tokens: 0 }, credits: { ...shared, used: 999 }, has_more: false }
+        : {
+            object: "usage.report",
+            data: [],
+            totals: {
+              prompt_tokens: 10,
+              completion_tokens: 5,
+              total_tokens: 15,
+              api_requests: 1,
+              credits: 4.5,
+              by_model: [{ model: "glm5.3", prompt_tokens: 10, completion_tokens: 5, total_tokens: 15, api_requests: 1, credits: 4.5 }],
+            },
+            credits: { ...shared, pack_credits: 500, pack_expires_at: "2027-01-01" },
+            has_more: true,
+            next_cursor: "cur1",
+          };
+      return jsonResponse(200, payload);
+    };
+    const report = await fetchUsage({ baseUrl: DEFAULT_BASE_URL, apiKey: "sk-test" }, { startDate: "2026-11-01", endDate: "2026-11-16" });
+    assert.deepEqual(report.credits, {
+      allowance: 7000.5,
+      used: 1234.5,
+      remaining: 5766,
+      packCredits: 500,
+      packExpiresAt: "2027-01-01",
+      periodStart: "2026-11-01",
+      periodEnd: "2026-12-01",
+      frozen: true,
+    });
+    assert.equal(report.totals.credits, 4.5);
+    assert.equal(report.totals.byModel[0].credits, 4.5);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("fetchUsage tolerates a gateway without the credits block", async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async () =>
+      jsonResponse(200, {
+        object: "usage.report",
+        data: [],
+        totals: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, api_requests: 0, by_model: [] },
+        has_more: false,
+      });
+    const report = await fetchUsage({ baseUrl: DEFAULT_BASE_URL, apiKey: "sk-test" }, { startDate: "2026-11-01", endDate: "2026-11-16" });
+    assert.equal(report.credits, undefined);
+    assert.equal(report.totals.credits, undefined);
+    assert.deepEqual(report.totals.byModel, []);
+    assert.equal(report.truncated, false);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("fetchUsage keeps per-model credits optional and drops a malformed block", async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async () =>
+      jsonResponse(200, {
+        object: "usage.report",
+        data: [],
+        totals: {
+          total_tokens: 30,
+          by_model: [
+            { model: "gemma4", total_tokens: 10 },
+            { model: "unknown-model", total_tokens: 20, credits: "many" },
+          ],
+        },
+        credits: "not-an-object",
+        has_more: false,
+      });
+    const report = await fetchUsage({ baseUrl: DEFAULT_BASE_URL, apiKey: "sk-test" }, { startDate: "2026-11-01", endDate: "2026-11-16" });
+    assert.equal(report.credits, undefined);
+    assert.equal(report.totals.byModel[0].credits, undefined);
+    assert.equal(report.totals.byModel[1].credits, undefined);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test("fetchUsage maps HTTP 429 to a rate_limited NanError with API message", async () => {
   const original = globalThis.fetch;
   try {

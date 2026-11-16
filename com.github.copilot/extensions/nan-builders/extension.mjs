@@ -7,7 +7,7 @@ import { createServer } from "node:http";
 import { CanvasError, createCanvas, joinSession } from "@github/copilot-sdk/extension";
 import { configPath, loadConfig, saveApiKey, saveBaseUrl } from "./lib/config.mjs";
 import { DEFAULT_BASE_URL, NanError, createChatCompletion, fetchModels, fetchUsage, isChatModel, redactSecret } from "./lib/nan.mjs";
-import { compactTokens, getKnownModel, monthlyQuotaProgress, quotaCapLabel } from "./lib/quota.mjs";
+import { compactTokens, composeUsage, formatCredits, getKnownModel, quotaCapLabel } from "./lib/quota.mjs";
 import { renderHtml } from "./ui.mjs";
 
 const MODELS_TTL_MS = 300_000;
@@ -30,28 +30,10 @@ function invalidateCache() {
   cache.lastError = undefined;
 }
 
-function composeUsage(report) {
-  const progress = monthlyQuotaProgress(report.totals.byModel.map((m) => ({ model: m.model, totalTokens: m.totalTokens })));
-  const percentByModel = new Map(progress.map((p) => [p.model, p.percent]));
-  const items = report.totals.byModel
-    .slice()
-    .sort((a, b) => b.totalTokens - a.totalTokens)
-    .map((entry) => ({
-      model: entry.model,
-      usedTokens: entry.totalTokens,
-      requests: entry.apiRequests,
-      percent: percentByModel.has(entry.model) ? percentByModel.get(entry.model) : null,
-      cap: quotaCapLabel(entry.model),
-    }));
-  return {
-    startDate: report.startDate,
-    endDate: report.endDate,
-    truncated: report.truncated,
-    totals: report.totals,
-    items,
-  };
-}
-
+/**
+ * Model catalog rows for the canvas Models tab: the API reports the models, the
+ * plugin only enriches known ids with published metadata.
+ */
 function modelsForView(list) {
   return list.map((entry) => {
     const known = getKnownModel(entry.id);
@@ -250,7 +232,7 @@ async function startServer() {
 const canvas = createCanvas({
   id: "nan-builders",
   displayName: "NaN Builders",
-  description: "NaN Builders monthly quota dashboard, model catalog and API key settings (local canvas).",
+  description: "NaN Builders credit dashboard, model catalog and API key settings (local canvas).",
   inputSchema: {
     type: "object",
     properties: {
@@ -261,7 +243,7 @@ const canvas = createCanvas({
   actions: [
     {
       name: "get_state",
-      description: "Return the current snapshot (key status, models, monthly usage with quota %) without forcing network calls.",
+      description: "Return the current snapshot (key status, models, usage with plan credits and per-model billed credits) without forcing network calls.",
       handler: async () => buildSnapshot(),
     },
     {
@@ -370,8 +352,9 @@ const tools = [
   {
     name: "nan_usage",
     description:
-      "Force-refresh and summarize NaN Builders token usage for the current UTC month, with % only for documented fixed " +
-      "monthly quotas (deepseek-v4-flash, glm5.3-flash, qwen3.8-flash, mimo-v2.6-flash). Read-only.",
+      "Force-refresh and summarize NaN Builders usage for the current UTC month: plan credits for the billing period " +
+      "(allowance, used, remaining, optional credit pack, frozen state) plus per-model billed credits. Models that draw " +
+      "no credits are noted instead of given a percentage. Read-only.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
     handler: async () => {
       const cfg = await loadConfig();
@@ -388,18 +371,57 @@ const tools = [
       if (!state.usage) {
         return fail("nan_usage: could not fetch usage." + (state.error ? " " + state.error : ""));
       }
-      const lines = ["NaN Builders usage " + state.usage.startDate + " .. " + state.usage.endDate];
-      if (!state.usage.items.length) {
-        lines.push("No token usage recorded in this window.");
+      const usage = state.usage;
+      const credits = usage.credits;
+      const lines = ["NaN Builders usage " + usage.startDate + " .. " + usage.endDate];
+      if (!credits) {
+        lines.push("This gateway does not report plan credits (no credits block on GET /v1/usage); the token counts below are not a quota.");
+      } else {
+        if (credits.frozen) {
+          lines.push("WARNING: plan credits are frozen - credit-billed requests are refused until the subscription is active again. No usage percentage is implied.");
+        }
+        const facts = [];
+        if (credits.used !== null) facts.push("used " + formatCredits(credits.used));
+        if (credits.allowance !== null) facts.push("allowance " + formatCredits(credits.allowance));
+        if (credits.remaining !== null) facts.push("remaining " + formatCredits(credits.remaining));
+        const period = credits.periodStart && credits.periodEnd
+          ? credits.periodStart + " -> " + credits.periodEnd
+          : credits.periodEnd
+            ? "renews " + credits.periodEnd
+            : "";
+        if (facts.length) {
+          lines.push("Plan credits" + (period ? " (" + period + ")" : "") + ": " + facts.join(" · ") + ".");
+        }
+        if (credits.percent !== null) {
+          lines.push("Credit pool: " + credits.percent + "% of the plan allowance used.");
+        }
+        if (credits.packCredits) {
+          lines.push("Credit pack: " + formatCredits(credits.packCredits) + " credits" + (credits.packExpiresAt ? " · expires " + credits.packExpiresAt : "") + ".");
+        }
       }
-      for (const item of state.usage.items) {
+      if (usage.windowCredits !== null) {
+        lines.push("Window credits: " + formatCredits(usage.windowCredits) + " (calendar-month sum of the per-model rows; the billing-period used total can differ by tenths).");
+      }
+      if (!usage.items.length) {
+        lines.push("No usage recorded in this window.");
+      }
+      for (const item of usage.items) {
+        const facts = [];
+        if (item.percent !== null) {
+          facts.push(formatCredits(item.credits) + " credits (" + item.percent + "% of plan credits)");
+        } else if (item.credits !== null && item.credits > 0) {
+          facts.push(formatCredits(item.credits) + " credits");
+        }
+        if (item.note) {
+          facts.push(item.note);
+        }
         lines.push(
           "- " + item.model + ": " + compactTokens(item.usedTokens) +
           (item.requests ? ", " + item.requests.toLocaleString("en-US") + " requests" : "") +
-          (item.percent !== null ? " (" + item.percent + "% of monthly cap)" : " (" + item.cap + ")"),
+          (facts.length ? " · " + facts.join(" · ") : ""),
         );
       }
-      lines.push("Window total: " + compactTokens(state.usage.totals.totalTokens) + " tokens." + (state.usage.truncated ? " (older rows beyond the first pages are omitted)" : ""));
+      lines.push("Window total: " + compactTokens(usage.totals.totalTokens) + " tokens." + (usage.truncated ? " (older rows beyond the first pages are omitted)" : ""));
       if (state.error) {
         lines.push("Warning: " + state.error);
       }
@@ -418,11 +440,11 @@ const session = await joinSession({
       const cfg = await loadConfig().catch(() => ({ hasKey: false }));
       return {
         additionalContext:
-          "nan-builders plugin: canvas \"nan-builders\" shows the NaN Builders quota dashboard, model catalog and API key " +
-          "settings; tools nan_ask (one-shot prompt to a NaN chat model) and nan_usage (monthly usage with published quota %) " +
-          "are available. API key status: " +
+          "nan-builders plugin: canvas \"nan-builders\" shows the NaN Builders credit dashboard, model catalog and API key " +
+          "settings; tools nan_ask (one-shot prompt to a NaN chat model) and nan_usage (plan credits for the billing period " +
+          "plus per-model billed credits) are available. API key status: " +
           (cfg.hasKey ? "configured (" + (cfg.keySource ?? "config-file") + ")" : "NOT configured - if usage/chat tools are needed, ask the user to open the NaN Builders canvas > Settings and save the key there (never in chat) or set NAN_BUILDERS_API_KEY") +
-          ". Base URL: " + cfg.baseUrl + ". Quota percentages are only defined for models with a documented fixed monthly counter; do not present others as percentages.",
+          ". Base URL: " + cfg.baseUrl + ". NaN bills every metered model from one credits pool (allowance per billing period); report shares as \"% of plan credits\" and never as per-model token caps. Models that draw no credits and frozen pools get no percentage.",
       };
     },
   },
