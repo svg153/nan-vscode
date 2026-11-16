@@ -41,6 +41,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
 
   private cache: CachedModels | undefined;
   private nativeBaseUrl: string | undefined;
+  private lastDiscoveryError: string | undefined;
 
   constructor(
     private readonly context: Pick<vscode.ExtensionContext, "secrets">,
@@ -97,11 +98,13 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     let discoveryFailed = false;
     try {
       models = await this.fetchModelIds(apiKey, token);
+      this.lastDiscoveryError = undefined;
     } catch (error) {
       if (isAbortError(error)) {
         return [];
       }
       discoveryFailed = true;
+      this.lastDiscoveryError = error instanceof Error ? error.message : String(error);
       diagnostic("models.fetch.failed", {
         errorName: error instanceof Error ? error.name : typeof error,
         message: error instanceof Error ? error.message.slice(0, 200) : typeof error,
@@ -306,17 +309,45 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   }
 
   async validateConfiguredKey(): Promise<number> {
+    return (await this.probeConfiguredKey()).length;
+  }
+
+  /**
+   * Silent model discovery for "Test Connection": reads the stored key
+   * directly (never prompting for one) and returns the IDs it can reach.
+   * Discovery is the only request sent - no chat completion is made.
+   */
+  async probeConfiguredKey(): Promise<string[]> {
     const apiKey = await this.context.secrets.get(SECRET_API_KEY);
     if (!apiKey) {
-      throw new Error("No NaN Builders API key is configured.");
+      throw new Error("No NaN Builders API key is configured. Run 'NaN Builders: Manage Provider'.");
     }
     const source = new vscode.CancellationTokenSource();
     try {
-      const ids = await this.fetchModelIds(apiKey, source.token);
-      return ids.length;
+      const models = await this.fetchModelIds(apiKey, source.token);
+      this.lastDiscoveryError = undefined;
+      return models.map((model) => model.id);
+    } catch (error) {
+      this.lastDiscoveryError = error instanceof Error ? error.message : String(error);
+      throw error;
     } finally {
       source.dispose();
     }
+  }
+
+  /** Endpoint used for discovery, chat, and usage; native provider configuration wins. */
+  getBaseUrl(): string {
+    return this.apiBaseUrl();
+  }
+
+  /** Model IDs tracked locally: the warm discovery cache, else the curated catalog. */
+  trackedModelIds(): string[] {
+    return this.cache?.models.map((model) => model.id) ?? knownChatModelIds();
+  }
+
+  /** Last raw model-discovery error message; the diagnostics report sanitizes it. */
+  discoveryError(): string | undefined {
+    return this.lastDiscoveryError;
   }
 
   refresh(): void {
