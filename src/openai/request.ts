@@ -24,19 +24,6 @@ export interface PlainTool {
   readonly inputSchema?: unknown;
 }
 
-const REASONING_EFFORTS = /^(none|minimal|low|medium|high|max)$/;
-
-export function reasoningEffort(
-  options: { readonly [name: string]: unknown } | undefined,
-  fallback = "low",
-): string {
-  const requested = options?.reasoning_effort;
-  if (typeof requested === "string" && REASONING_EFFORTS.test(requested)) {
-    return requested;
-  }
-  return REASONING_EFFORTS.test(fallback) ? fallback : "low";
-}
-
 export function estimateTokens(text: string): number {
   return Math.max(1, Math.ceil(text.length / 4));
 }
@@ -44,8 +31,20 @@ export function estimateTokens(text: string): number {
 export function httpError(status: number, statusText: string, body: string): Error {
   const summary = sanitizeErrorBody(body);
   const suffix = summary ? `: ${summary}` : "";
-  return new Error(`NaN Builders API error ${status} ${sanitizeUpstreamText(statusText, MAX_FIELD_LENGTH)}${suffix}`);
+  const hint = status === 402 ? ` — ${CREDITS_REFUSED_HINT}` : "";
+  return new Error(
+    `NaN Builders API error ${status} ${sanitizeUpstreamText(statusText, MAX_FIELD_LENGTH)}${suffix}${hint}`,
+  );
 }
+
+/**
+ * HTTP 402 is the only symptom of an exhausted or frozen credit pool, so the
+ * message names the three causes the user can act on instead of staying cryptic.
+ */
+const CREDITS_REFUSED_HINT =
+  "NaN Builders bills every metered model from one credits pool, so this request was refused because the " +
+  "plan allowance is spent, credits are frozen, or no credit pack is active. Run 'NaN Builders: Show Usage' " +
+  "for the balance, or use a model that does not draw credits.";
 
 const MAX_SUMMARY_LENGTH = 200;
 const MAX_FIELD_LENGTH = 64;

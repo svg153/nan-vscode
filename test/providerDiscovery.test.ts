@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import test from "node:test";
 import type * as vscode from "vscode";
+import { SECRET_API_KEY } from "../src/constants";
 import { MAX_ERROR_RESPONSE_BYTES, MAX_JSON_RESPONSE_BYTES, ResponseTooLargeError } from "../src/responseBody";
 import { MAX_SSE_LINE_CHARS, StreamLimitError } from "../src/openai/stream";
 
@@ -34,6 +35,12 @@ const moduleLoader = moduleRequire("node:module") as ModuleLoader;
 const originalLoad = moduleLoader._load;
 const settings = new Map<string, unknown>();
 const vscodeStub = {
+  CancellationTokenSource: class {
+    token = new TestCancellationToken();
+    dispose(): void {
+      /* no-op for unit tests */
+    }
+  },
   EventEmitter: FakeEventEmitter,
   extensions: { getExtension: () => undefined },
   LanguageModelChatMessageRole: { User: 1, Assistant: 2 },
@@ -169,24 +176,37 @@ test("model discovery caches results and refresh invalidates them after a settin
   }
 });
 
-test("malformed and unsuccessful model responses reject discovery with useful errors", async (t) => {
+test("discoveryMode auto exposes bare third-party IDs and hides non-chat endpoints", async () => {
   const originalFetch = globalThis.fetch;
-  const cases: Array<{ name: string; response: () => Response; message: RegExp }> = [
-    {
-      name: "malformed JSON",
-      response: () => new Response("{", { status: 200 }),
-      message: /JSON|unexpected/i,
-    },
-    {
-      name: "other HTTP failure",
-      response: () => new Response("unavailable", { status: 503, statusText: "Service Unavailable" }),
-      message: /HTTP 503 Service Unavailable/,
-    },
-    ...[401, 403].map((status) => ({
-      name: `HTTP ${status} key guidance`,
-      response: () => new Response("", { status }),
-      message: /rejected the API key.*Manage Provider/,
-    })),
+  const harness = createHarness(async () =>
+    modelListResponse({
+      data: [{ id: "mimo-v2.6-flash" }, { id: "future-chat-model" }, { id: "bge-m3-embedding" }],
+    }),
+  );
+  try {
+    settings.set("discoveryMode", "auto");
+    const models = await harness.provider.provideLanguageModelChatInformation(
+      { silent: true },
+      new TestCancellationToken(),
+    );
+    assert.deepEqual(models.map((model) => model.id).sort(), ["future-chat-model", "mimo-v2.6-flash"]);
+    const discovered = models.find((model) => model.id === "future-chat-model");
+    assert.ok(discovered);
+    assert.equal(discovered.capabilities?.toolCalling, false);
+    assert.match(String(discovered.tooltip), /Auto-discovered from the configured endpoint/);
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("malformed and unsuccessful model responses fall back to the static unverified catalog", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const cases: Array<{ name: string; response: () => Response }> = [
+    { name: "malformed JSON", response: () => new Response("{", { status: 200 }) },
+    { name: "other HTTP failure", response: () => new Response("unavailable", { status: 503, statusText: "Service Unavailable" }) },
+    { name: "HTTP 401", response: () => new Response("", { status: 401 }) },
+    { name: "HTTP 403", response: () => new Response("", { status: 403 }) },
   ];
 
   try {
@@ -196,34 +216,110 @@ test("malformed and unsuccessful model responses reject discovery with useful er
           const harness = createHarness(async () => testCase.response());
           try {
             // oxlint-disable-next-line eslint/no-await-in-loop
-            await assert.rejects(
-            harness.provider.provideLanguageModelChatInformation({ silent: true }, new TestCancellationToken()),
-            testCase.message,
-          );
-          assert.equal(harness.calls.length, 1);
-        } finally {
-          harness.provider.dispose();
-        }
-      });
+            const models = await harness.provider.provideLanguageModelChatInformation(
+              { silent: true },
+              new TestCancellationToken(),
+            );
+            assert.ok(models.length >= 1);
+            assert.equal(models[0]!.detail, "NaN Builders - not live-verified");
+            assert.match(String(models[0]!.tooltip), /Static NaN Builders catalog .* not verified/i);
+            assert.ok(models.some((model) => model.id === "glm5.3-flash"));
+            assert.equal(harness.calls.length, 1);
+          } finally {
+            harness.provider.dispose();
+          }
+        });
     }
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test("model discovery rejects oversized JSON with a stable error and cancels the body", async () => {
+test("empty chat model lists fall back to the static catalog only in curated mode", async () => {
+  const originalFetch = globalThis.fetch;
+  const harness = createHarness(async () =>
+    modelListResponse({ data: [{ id: "bge-m3-embedding" }, { id: "mimo-v2.6-flash", is_chat: false }] }),
+  );
+  try {
+    const curated = await harness.provider.provideLanguageModelChatInformation(
+      { silent: true },
+      new TestCancellationToken(),
+    );
+    assert.ok(curated.some((model) => model.id === "glm5.3-flash"));
+    assert.equal(curated[0]!.detail, "NaN Builders - not live-verified");
+
+    harness.provider.refresh();
+    settings.set("discoveryMode", "auto");
+    const auto = await harness.provider.provideLanguageModelChatInformation(
+      { silent: true },
+      new TestCancellationToken(),
+    );
+    assert.deepEqual(auto, []);
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("validateConfiguredKey still surfaces discovery errors for the manage command", async () => {
+  const originalFetch = globalThis.fetch;
+  const harness = createHarness(async () => new Response("", { status: 401 }));
+  try {
+    await assert.rejects(harness.provider.validateConfiguredKey(), /rejected the API key/);
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("advertised input budget reserves a 10 percent tokenizer margin", async () => {
+  const originalFetch = globalThis.fetch;
+  const harness = createHarness(async () =>
+    modelListResponse({
+      data: [
+        { id: "mimo-v2.6-flash" },
+        { id: "gemma4" },
+        { id: "third-party", context_window: 1000, max_output_tokens: 50 },
+      ],
+    }),
+  );
+  try {
+    settings.set("includeUnknownModels", true);
+    const models = await harness.provider.provideLanguageModelChatInformation(
+      { silent: true },
+      new TestCancellationToken(),
+    );
+    const byId = new Map(models.map((model) => [model.id, model]));
+    // context - output (1,015,808) exceeds 0.9x context -> budget wins.
+    assert.equal(byId.get("mimo-v2.6-flash")!.maxInputTokens, Math.floor(1_048_576 * 0.9));
+    // context - output (196,608) is below 0.9x context (235,929) -> output size wins.
+    assert.equal(byId.get("gemma4")!.maxInputTokens, 262_144 - 65_536);
+    assert.equal(byId.get("third-party")!.maxInputTokens, 900);
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("model discovery rejects oversized JSON from validation but falls back in the picker", async () => {
   const originalFetch = globalThis.fetch;
   const oversized = oversizedResponse(MAX_JSON_RESPONSE_BYTES + 1);
   const harness = createHarness(async () => oversized.response);
   try {
-    await assert.rejects(
-      harness.provider.provideLanguageModelChatInformation({ silent: true }, new TestCancellationToken()),
-      (error: unknown) =>
-        error instanceof ResponseTooLargeError &&
-        error.message === "Upstream response exceeded the maximum allowed size." &&
-        !error.message.includes("A".repeat(32)),
+    const models = await harness.provider.provideLanguageModelChatInformation(
+      { silent: true },
+      new TestCancellationToken(),
     );
+    assert.equal(models[0]!.detail, "NaN Builders - not live-verified");
     assert.equal(oversized.wasCancelled(), true);
+
+    const oversized2 = oversizedResponse(MAX_JSON_RESPONSE_BYTES + 1);
+    const harness2 = createHarness(async () => oversized2.response);
+    try {
+      await assert.rejects(harness2.provider.validateConfiguredKey(), ResponseTooLargeError);
+    } finally {
+      harness2.provider.dispose();
+    }
   } finally {
     harness.provider.dispose();
     globalThis.fetch = originalFetch;
@@ -327,6 +423,131 @@ test("chat finalization emits a multibyte character split across response chunks
     harness.provider.dispose();
     globalThis.fetch = originalFetch;
     globalThis.TextDecoder = originalTextDecoder;
+  }
+});
+
+test("native provider configuration overrides the stored key and settings for discovery and chat", async () => {
+  const originalFetch = globalThis.fetch;
+  const storedSecrets = new Map<string, string>();
+  const secrets: vscode.SecretStorage = {
+    keys: async () => [...storedSecrets.keys()],
+    get: async (key) => storedSecrets.get(key),
+    store: async (key, value) => {
+      storedSecrets.set(key, value);
+    },
+    delete: async (key) => {
+      storedSecrets.delete(key);
+    },
+    onDidChange: () => ({ dispose: () => undefined }),
+  };
+  settings.clear();
+  settings.set("apiBaseUrl", "https://unit.test/v1/");
+  settings.set("includeUnknownModels", false);
+  settings.set("modelCacheSeconds", 300);
+  const calls: string[] = [];
+  const authorizations: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    calls.push(String(input));
+    const headers = init?.headers as { Authorization?: string } | undefined;
+    authorizations.push(String(headers?.Authorization));
+    return modelListResponse({ data: [{ id: "mimo-v2.6-flash" }] });
+  };
+  const provider = new NanChatModelProvider(
+    { secrets },
+    { record: async () => undefined },
+    { authorize: async () => undefined },
+  );
+  try {
+    const token = new TestCancellationToken();
+    const configuration = { apiKey: " native-key ", apiBaseUrl: "https://native.test/v1/" };
+    await provider.provideLanguageModelChatInformation({ silent: true, configuration }, token);
+    assert.deepEqual(calls, ["https://native.test/v1/models"]);
+    assert.equal(authorizations[0], "Bearer native-key");
+    assert.equal(storedSecrets.get(SECRET_API_KEY), "native-key");
+
+    const [model] = await provider.provideLanguageModelChatInformation({ silent: true, configuration }, token);
+    assert.ok(model);
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [],
+      {
+        toolMode: 1 as vscode.LanguageModelChatToolMode,
+        modelConfiguration: { apiKey: "request-key" },
+      } as vscode.ProvideLanguageModelChatResponseOptions,
+      { report: () => undefined },
+      token,
+    );
+    assert.deepEqual(calls, ["https://native.test/v1/models", "https://native.test/v1/chat/completions"]);
+    assert.equal(authorizations[1], "Bearer request-key");
+  } finally {
+    provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("provider configuration changes invalidate the model cache", async () => {
+  const originalFetch = globalThis.fetch;
+  const harness = createHarness(async () => modelListResponse({ data: [{ id: "mimo-v2.6-flash" }] }));
+  try {
+    const token = new TestCancellationToken();
+    await harness.provider.provideLanguageModelChatInformation({ silent: true }, token);
+    await harness.provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assert.equal(harness.calls.length, 1);
+    await harness.provider.provideLanguageModelChatInformation(
+      { silent: true, configuration: { apiBaseUrl: "https://other.test/v1" } },
+      token,
+    );
+    assert.deepEqual(harness.calls, ["https://unit.test/v1/models", "https://other.test/v1/models"]);
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("reasoning effort resolves request > per-model override > global default > model default with closest-level remapping", async () => {
+  const originalFetch = globalThis.fetch;
+  const bodies: Record<string, unknown>[] = [];
+  const harness = createHarness(async (input, init) => {
+    if (String(input).endsWith("/models")) {
+      return modelListResponse({ data: [{ id: "glm5.3-flash" }] });
+    }
+    bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    return new Response(JSON.stringify({ choices: [{ delta: { content: "ok" } }] }));
+  });
+  try {
+    const token = new TestCancellationToken();
+    const model = await discoverChatModel(harness.provider);
+    const send = (options: Partial<vscode.ProvideLanguageModelChatResponseOptions>) =>
+      harness.provider.provideLanguageModelChatResponse(
+        model,
+        [],
+        options as vscode.ProvideLanguageModelChatResponseOptions,
+        chatProgress([]),
+        token,
+      );
+
+    // auto default: "medium" exists in the GLM ladder.
+    await send({});
+    assert.equal(bodies[0]?.reasoning_effort, "medium");
+
+    // Per-model override outside the documented ladder is remapped: GLM has
+    // no off switch, so "none" lands on its lowest documented level.
+    settings.set("reasoningEffortByModel", { "glm5.3-flash": "none" });
+    await send({});
+    assert.equal(bodies[1]?.reasoning_effort, "minimal");
+
+    // The chat request wins over everything; "xhigh" is documented on GLM.
+    await send({ modelOptions: { reasoning_effort: "xhigh" } });
+    assert.equal(bodies[2]?.reasoning_effort, "xhigh");
+
+    // Explicit global default applies when no override exists, remapped to the ladder.
+    settings.set("reasoningEffortByModel", {});
+    settings.set("defaultReasoningEffort", "minimal");
+    await send({});
+    assert.equal(bodies[3]?.reasoning_effort, "minimal");
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
   }
 });
 

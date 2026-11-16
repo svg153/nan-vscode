@@ -6,7 +6,6 @@ import {
   estimateTokens,
   httpError,
   isImagePart,
-  reasoningEffort,
 } from "../src/openai/request";
 
 const noMapping = new Map<string, string>();
@@ -131,16 +130,6 @@ test("leaves tool choice undefined when no tools are provided", () => {
   assert.equal(mapping.toolChoice, undefined);
 });
 
-test("accepts supported reasoning efforts and defaults to low", () => {
-  for (const effort of ["none", "minimal", "low", "medium", "high", "max"]) {
-    assert.equal(reasoningEffort({ reasoning_effort: effort }), effort);
-  }
-  assert.equal(reasoningEffort({ reasoning_effort: "extreme" }), "low");
-  assert.equal(reasoningEffort({ reasoning_effort: 3 }), "low");
-  assert.equal(reasoningEffort({}), "low");
-  assert.equal(reasoningEffort(undefined), "low");
-});
-
 test("estimates tokens with a floor of one", () => {
   assert.equal(estimateTokens(""), 1);
   assert.equal(estimateTokens("abcd"), 1);
@@ -191,6 +180,15 @@ test("redacts bearer tokens in structural error fields", () => {
 test("bounds the sanitized summary length", () => {
   const error = httpError(400, "Bad Request", JSON.stringify({ error: { type: "t".repeat(400) } }));
   assert.equal(error.message.length, "NaN Builders API error 400 Bad Request: ".length + 64);
+});
+
+test("explains the credit reasons behind an HTTP 402 instead of leaving it cryptic", () => {
+  const error = httpError(402, "Payment Required", '{"error":{"type":"insufficient_balance"}}');
+  assert.match(error.message, /^NaN Builders API error 402 Payment Required: insufficient_balance — /);
+  assert.match(error.message, /one credits pool/);
+  assert.match(error.message, /credits are frozen/);
+  assert.match(error.message, /NaN Builders: Show Usage/);
+  assert.match(httpError(402, "Payment Required", "").message, /does not draw credits\.$/);
 });
 
 test("detects image parts only for image mime types backed by bytes", () => {

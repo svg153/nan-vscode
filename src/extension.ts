@@ -4,10 +4,26 @@ import { configureDiagnosticFile, diagnostic } from "./diagnostics";
 import { HttpEndpointConsentDeniedError, HttpEndpointGuard } from "./httpEndpointGuard";
 import { NanInlineCompletionProvider } from "./inlineCompletionProvider";
 import { NanChatModelProvider } from "./provider";
-import { AccountUsageService, accountModelRows } from "./accountUsage";
+import { getKnownModel, resolveReasoningEffort } from "./modelCatalog";
+import { AccountUsageService, accountModelRows, windowCredits } from "./accountUsage";
 import { compactTokens } from "./quotaCatalog";
-import { API_REQUESTS_CUTOFF_DATE } from "./usageApi";
+import { API_REQUESTS_CUTOFF_DATE, CACHED_TOKENS_CUTOFF_DATE, CREDITS_CUTOFF_DATE, type UsageCredits } from "./usageApi";
+import { describePackExpiry, formatCredits, formatPercent, usageLinks, type UsageLink } from "./usagePresentation";
 import { UsageTracker } from "./usageTracker";
+
+const USAGE_LINK_ICON = "$(link-external)";
+
+function usageLinkLabel(link: UsageLink): string {
+  return `${USAGE_LINK_ICON} ${link.label}`;
+}
+
+function usageLinkItems(): vscode.QuickPickItem[] {
+  return usageLinks().map((link) => ({
+    label: usageLinkLabel(link),
+    description: link.description,
+    detail: link.url,
+  }));
+}
 
 function buildQuickPickItems(
   account: AccountUsageService,
@@ -15,10 +31,12 @@ function buildQuickPickItems(
 ): vscode.QuickPickItem[] {
   return [
     ...accountItems(account),
-    { kind: vscode.QuickPickItemKind.Separator, label: "Published quotas (local session)" },
+    { kind: vscode.QuickPickItemKind.Separator, label: "Billing posture (local session)" },
     ...usage.quotaItems(),
     { kind: vscode.QuickPickItemKind.Separator, label: "Recent local daily history" },
     ...usage.historyItems(),
+    { kind: vscode.QuickPickItemKind.Separator, label: "Open" },
+    ...usageLinkItems(),
   ];
 }
 
@@ -161,14 +179,15 @@ export function activate(context: vscode.ExtensionContext): {
       provider.refresh();
       vscode.window.showInformationMessage("NaN Builders model list refreshed.");
     }),
+    vscode.commands.registerCommand("nanBuilders.setReasoningEffort", () => setModelReasoningEffort(provider)),
     vscode.commands.registerCommand("nanBuilders.showUsage", () => {
       const picker = vscode.window.createQuickPick<vscode.QuickPickItem>();
       picker.title = "NaN Builders usage";
-      picker.placeholder = "Account-wide usage, published quotas, and this extension's local history.";
+      picker.placeholder = "Account-wide credit usage, billing posture, and this extension's local history.";
       picker.matchOnDescription = true;
       picker.matchOnDetail = true;
       picker.items = buildQuickPickItems(account, usage);
-            picker.buttons = [
+      picker.buttons = [
         { iconPath: new vscode.ThemeIcon("refresh"), tooltip: "Refresh account usage" },
         { iconPath: new vscode.ThemeIcon("trash"), tooltip: "Clear local usage history" },
         { iconPath: new vscode.ThemeIcon("gear"), tooltip: "Manage provider (API key)" },
@@ -188,7 +207,7 @@ export function activate(context: vscode.ExtensionContext): {
         }
         if (icon === "trash") {
           if (await usage.clearHistory()) {
-                    picker.items = buildQuickPickItems(account, usage);
+            picker.items = buildQuickPickItems(account, usage);
             vscode.window.showInformationMessage("NaN Builders local usage history cleared.");
           } else {
             vscode.window.showErrorMessage("Could not clear NaN Builders local usage history from VS Code storage.");
@@ -203,6 +222,15 @@ export function activate(context: vscode.ExtensionContext): {
         if (icon === "globe") {
           await vscode.env.openExternal(vscode.Uri.parse(NAN_DASHBOARD_URL));
         }
+      });
+      picker.onDidAccept(async () => {
+        const selected = picker.selectedItems[0]?.label;
+        const link = usageLinks().find((entry) => usageLinkLabel(entry) === selected);
+        if (!link) {
+          return;
+        }
+        picker.hide();
+        await vscode.env.openExternal(vscode.Uri.parse(link.url));
       });
       picker.onDidHide(() => picker.dispose());
       picker.show();
@@ -267,6 +295,76 @@ export function activate(context: vscode.ExtensionContext): {
         getInlineRegistrationTest: () => inlineRegistrationSelector,
       }
     : undefined;
+}
+
+/**
+ * Per-model reasoning effort selector: picks a model that documents effort
+ * levels, then one of that model's real levels (or resets it to auto).
+ * Overrides land in `nanBuilders.reasoningEffortByModel`.
+ */
+async function setModelReasoningEffort(provider: NanChatModelProvider): Promise<void> {
+  const cancellation = new vscode.CancellationTokenSource();
+  let models: vscode.LanguageModelChatInformation[];
+  try {
+    models = await provider.provideLanguageModelChatInformation({ silent: false }, cancellation.token);
+  } finally {
+    cancellation.dispose();
+  }
+  const selectable = models
+    .map((model) => ({ model, ladder: getKnownModel(model.id)?.reasoningEffortValues ?? [] }))
+    .filter((entry) => entry.ladder.length > 0);
+  if (selectable.length === 0) {
+    vscode.window.showInformationMessage("No NaN Builders models with selectable reasoning effort are available (configure an API key first).");
+    return;
+  }
+  const modelPick = await vscode.window.showQuickPick(
+    selectable.map(({ model, ladder }) => ({
+      id: model.id,
+      label: model.name,
+      description: ladder.join(" < "),
+    })),
+    { title: "NaN Builders: Set Model Reasoning Effort", placeHolder: "Choose a model" },
+  );
+  if (!modelPick) {
+    return;
+  }
+  const selected = selectable.find((candidate) => candidate.model.id === modelPick.id)!;
+  const entry = { id: selected.model.id, ladder: selected.ladder };
+  const configuration = vscode.workspace.getConfiguration("nanBuilders");
+  const overrides = configuration.get<Record<string, unknown>>("reasoningEffortByModel", {});
+  const perModel = typeof overrides?.[entry.id] === "string" ? (overrides[entry.id] as string) : undefined;
+  const current = resolveReasoningEffort({
+    perModelOverride: perModel,
+    globalDefault: configuration.get<string>("defaultReasoningEffort", "auto"),
+    ladder: entry.ladder,
+  });
+  const levelPick = await vscode.window.showQuickPick(
+    [
+      ...entry.ladder.map((level) => ({
+        label: level,
+        description: level === current ? "$(checkmark) current" : undefined,
+        detail: level === current ? (perModel ? "per-model override" : "effective default") : undefined,
+      })),
+      { label: "Reset to auto", description: perModel ? "clears the per-model override" : "no override set", detail: "Use the global default / model default." },
+    ],
+    { title: `${modelPick.label}: reasoning effort`, placeHolder: "Choose a level (values outside the model ladder are remapped to the closest one)" },
+  );
+  if (!levelPick) {
+    return;
+  }
+  const next: Record<string, unknown> = { ...overrides };
+  if (levelPick.label === "Reset to auto") {
+    delete next[entry.id];
+  } else {
+    next[entry.id] = levelPick.label;
+  }
+  await configuration.update("reasoningEffortByModel", next, vscode.ConfigurationTarget.Global);
+  provider.refresh();
+  vscode.window.showInformationMessage(
+    levelPick.label === "Reset to auto"
+      ? `NaN Builders: ${modelPick.label} reasoning effort reset to auto.`
+      : `NaN Builders: ${modelPick.label} reasoning effort set to ${levelPick.label}.`,
+  );
 }
 
 async function manageProvider(
@@ -399,7 +497,8 @@ function accountItems(account: AccountUsageService): vscode.QuickPickItem[] {
     description: `${snapshot.startDate} → ${snapshot.endDate}`,
     detail:
       `Window totals: ${report.totals.totalTokens.toLocaleString()} tokens ` +
-      `(${report.totals.promptTokens.toLocaleString()} prompt + ${report.totals.completionTokens.toLocaleString()} completion)` +
+      `(${report.totals.promptTokens.toLocaleString()} prompt + ${report.totals.completionTokens.toLocaleString()} completion` +
+      `${report.totals.cachedTokens ? `, ${report.totals.cachedTokens.toLocaleString()} cached` : ""})` +
       ` · ${report.totals.apiRequests.toLocaleString()} API requests · fetched ${snapshot.fetchedAt}`,
   };
   const allTime: vscode.QuickPickItem = {
@@ -409,26 +508,80 @@ function accountItems(account: AccountUsageService): vscode.QuickPickItem[] {
   };
   const rows = accountModelRows(report).map((row): vscode.QuickPickItem => {
     const usage = `${compactTokens(row.totalTokens)} tokens`;
-    const percent = row.percent !== undefined ? ` · ${percentText(row.percent)}% of monthly quota` : "";
+    const credits = row.credits !== undefined ? ` · ${formatCredits(row.credits)} credits` : "";
+    const percent = row.percent !== undefined ? ` · ${formatPercent(row.percent)}% of plan credits` : "";
     const note = row.note ? ` · ${row.note}` : "";
     return {
       label: `  ${row.model}`,
-      description: `${usage}${percent}${note}`,
+      description: `${usage}${credits}${percent}${note}`,
       detail:
         `${row.promptTokens.toLocaleString()} prompt + ${row.completionTokens.toLocaleString()} completion` +
+        `${row.cachedTokens ? ` (${row.cachedTokens.toLocaleString()} cached)` : ""}` +
         ` · ${row.apiRequests.toLocaleString()} API requests this window`,
     };
   });
+  const creditRows = creditsItems(report.credits);
+  const windowCredit = windowCredits(report);
+  const windowRow: vscode.QuickPickItem[] =
+    windowCredit === undefined
+      ? []
+      : [
+          {
+            label: "$(credit-card) Window credits (calendar month)",
+            description: `${formatCredits(windowCredit)} credits`,
+            detail:
+              `Approximate sum of the per-model rows in ${snapshot.startDate} to ${snapshot.endDate}; ` +
+              `the billing-period used total can differ by tenths.`,
+          },
+        ];
   const cutoff: vscode.QuickPickItem = {
     label: "Daily API-request counts start",
     description: API_REQUESTS_CUTOFF_DATE,
     detail: "Earlier days in the window report 0 requests.",
   };
-  return [header, allTime, ...rows, cutoff, ...errorRow];
+  const creditsCutoff: vscode.QuickPickItem = {
+    label: "Credits billing starts",
+    description: CREDITS_CUTOFF_DATE,
+    detail: `Per-model credits are reported from this date; cached input tokens from ${CACHED_TOKENS_CUTOFF_DATE}.`,
+  };
+  return [header, allTime, ...creditRows, ...windowRow, ...rows, cutoff, creditsCutoff, ...errorRow];
 }
 
-function percentText(value: number): string {
-  return Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1);
+/** Plan-credit rows for the account QuickPick; empty on accounts not billed in credits. */
+function creditsItems(credits: UsageCredits | undefined): vscode.QuickPickItem[] {
+  if (!credits || (credits.allowance === undefined && credits.used === undefined)) {
+    return [];
+  }
+  const summary = [
+    credits.allowance === undefined ? undefined : `${formatCredits(credits.allowance)} allowance`,
+    credits.packCredits ? `${formatCredits(credits.packCredits)} pack` : undefined,
+  ].filter((part): part is string => part !== undefined);
+  const detail = [
+    credits.used === undefined ? undefined : `${formatCredits(credits.used)} used`,
+    credits.remaining === undefined ? undefined : `${formatCredits(credits.remaining)} remaining`,
+    credits.periodStart && credits.periodEnd
+      ? `${credits.periodStart} → ${credits.periodEnd}`
+      : credits.periodEnd
+        ? `renews ${credits.periodEnd}`
+        : undefined,
+  ].filter((part): part is string => part !== undefined);
+  const items: vscode.QuickPickItem[] = [
+    {
+      label: credits.frozen ? "$(warning) Plan credits (frozen)" : "$(credit-card) Plan credits",
+      description: summary.join(" + "),
+      detail: credits.frozen
+        ? `${detail.join(" · ")} · credit-billed requests are refused until the subscription is active again`
+        : detail.join(" · "),
+    },
+  ];
+  if (credits.packCredits && credits.packExpiresAt) {
+    items.push({
+      label: "Credit pack expiry",
+      description: describePackExpiry(credits.packExpiresAt),
+      detail: "Pack credits are consumed after the plan allowance runs out.",
+    });
+  }
+  return items;
 }
 
 function errorMessage(error: unknown): string {

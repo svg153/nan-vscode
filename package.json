@@ -47,7 +47,26 @@
       {
         "vendor": "nan-builders",
         "displayName": "NaN Builders",
-        "managementCommand": "nanBuilders.manage"
+        "icon": "./media/icon.png",
+        "managementCommand": "nanBuilders.manage",
+        "configuration": {
+          "type": "object",
+          "title": "NaN Builders",
+          "properties": {
+            "apiKey": {
+              "type": "string",
+              "title": "API Key",
+              "markdownDescription": "NaN Builders API key. Stored securely; leave empty to keep the key set via **NaN Builders: Manage Provider**.",
+              "secret": true
+            },
+            "apiBaseUrl": {
+              "type": "string",
+              "title": "API Base URL",
+              "markdownDescription": "OpenAI-compatible base URL. Leave empty to use the `nanBuilders.apiBaseUrl` setting.",
+              "pattern": "^https?://"
+            }
+          }
+        }
       }
     ],
     "commands": [
@@ -60,6 +79,11 @@
         "command": "nanBuilders.refreshModels",
         "category": "NaN Builders",
         "title": "Refresh Models"
+      },
+      {
+        "command": "nanBuilders.setReasoningEffort",
+        "category": "NaN Builders",
+        "title": "Set Model Reasoning Effort"
       },
       {
         "command": "nanBuilders.showUsage",
@@ -86,7 +110,7 @@
         "nanBuilders.showStatusBar": {
           "type": "boolean",
           "default": true,
-          "description": "Show NaN usage in the VS Code status bar: account-wide monthly quota % when an API key is configured, otherwise local session usage."
+          "description": "Show NaN usage in the VS Code status bar: plan-credit usage % when an API key is configured, otherwise local session usage."
         },
         "nanBuilders.diagnostics.enabled": {
           "type": "boolean",
@@ -98,6 +122,16 @@
           "default": false,
           "description": "Also show model IDs returned by NaN that are not yet in this extension's metadata catalog. Disabled by default because an unknown ID may be a non-chat endpoint; when enabled, unknown models are exposed without Agent tool-calling or vision capability."
         },
+        "nanBuilders.discoveryMode": {
+          "type": "string",
+          "enum": ["curated", "auto"],
+          "default": "curated",
+          "enumDescriptions": [
+            "Only show models from the local catalog, models the endpoint explicitly marks as chat, and (with includeUnknownModels) unmarked IDs.",
+            "Show every ID returned by GET /models except obvious non-chat endpoints (embeddings, rerank, transcription, image generation). Capability fields from the endpoint take precedence over defaults."
+          ],
+          "markdownDescription": "How the model list from `GET /models` is filtered. `auto` enables Copilot-style auto-discovery for trusted OpenAI-compatible endpoints: unknown chat models appear with capabilities declared by the endpoint, or conservative defaults when none are declared. Use only with endpoints you trust."
+        },
         "nanBuilders.completionModel": {
           "type": "string",
           "default": "",
@@ -105,9 +139,18 @@
                 },
                 "nanBuilders.defaultReasoningEffort": {
                   "type": "string",
-                  "default": "low",
-                  "enum": ["none", "minimal", "low", "medium", "high", "max"],
-                  "markdownDescription": "Reasoning effort sent to NaN when the chat request does not specify one. Models that manage reasoning themselves ignore it."
+                  "default": "auto",
+                  "enum": ["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"],
+                  "markdownDescription": "Reasoning effort sent to NaN when the chat request does not specify one. `auto` uses a per-model default (medium when the model documents it, otherwise the central documented level). Explicit levels are remapped to the closest level the model documents in https://nan.builders/docs/models."
+                },
+                "nanBuilders.reasoningEffortByModel": {
+                  "type": "object",
+                  "default": {},
+                  "markdownDescription": "Per-model reasoning effort overrides set by the `NaN Builders: Set Model Reasoning Effort` command. Keys are model IDs, values are effort levels; each value is remapped to the closest level the model documents.",
+                  "additionalProperties": {
+                    "type": "string",
+                    "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+                  }
                 }
       }
     }
@@ -117,11 +160,12 @@
     "compile": "tsc -p .",
     "watch": "tsc -p . -w",
     "test:unit": "node --test out/test/*.test.js",
+    "test:extension": "node --test \"com.github.copilot/extensions/nan-builders/lib/*.test.mjs\"",
     "test": "npm run compile && npm run test:unit",
     "test:insiders": "npm run compile && node scripts/run-insiders-integration.cjs",
         "test:coverage": "c8 --reporter=lcov --report-dir coverage node scripts/run-coverage.cjs",
         "audit:dependencies": "node scripts/dependency-audit.cjs",
-        "check": "npm run clean && npm run compile && npm run test:unit && npm run test:insiders",
+        "check": "npm run clean && npm run compile && npm run test:unit && npm run test:extension && npm run test:insiders",
     "package": "vsce package --no-dependencies",
     "lint:commits": "commitlint --from=HEAD~1 --to=HEAD",
     "release": "semantic-release",
@@ -141,7 +185,7 @@
     "@vscode/test-electron": "^3.1.0",
     "@vscode/vsce": "^4.0.0",
     "conventional-changelog-conventionalcommits": "^10.0.0",
-    "c8": "^10.1.3",
+    "c8": "^12.0.0",
         "husky": "^9.1.7",
         "semantic-release": "^25.0.9",
         "typescript": "^7.0.0"

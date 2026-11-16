@@ -7,9 +7,12 @@ import { normalizeHistory } from "../src/usageHistory";
 import {
   buildTooltipMarkdown,
   compact,
+  describePackExpiry,
   escapeMarkdown,
+  formatCredits,
   formatPercent,
   statusBarText,
+  usageLinks,
 } from "../src/usagePresentation";
 
 function report(overrides: Partial<UsageReport> = {}): UsageReport {
@@ -23,6 +26,7 @@ function report(overrides: Partial<UsageReport> = {}): UsageReport {
       completionTokens: 2_000,
       totalTokens: 3_000,
       apiRequests: 7,
+      credits: 210,
       byModel: [
         {
           model: "deepseek-v4-flash",
@@ -30,8 +34,17 @@ function report(overrides: Partial<UsageReport> = {}): UsageReport {
           completionTokens: 2_000,
           totalTokens: 3_000,
           apiRequests: 7,
+          credits: 210,
         },
       ],
+    },
+    credits: {
+      periodEnd: "2026-02-01",
+      allowance: 7_000,
+      used: 210,
+      remaining: 6_790,
+      packCredits: 1_000,
+      packExpiresAt: "2026-06-01",
     },
     allTime: {
       promptTokens: 10_000,
@@ -55,7 +68,7 @@ function snapshot(overrides: Partial<UsageReport> = {}): AccountUsageSnapshot {
 }
 
 const quotaItems: readonly QuotaSummaryItem[] = [
-  { label: "DeepSeek V4 Flash", description: "3B per month · local usage: 3K", detail: "1 request(s)" },
+  { label: "DeepSeek V4 Flash", description: "Paid from plan credits · local usage: 3K", detail: "1 request(s)" },
 ];
 
 test("status bar shows the documented initial state for an empty history", () => {
@@ -67,9 +80,15 @@ test("status bar shows the compact local total when no account snapshot exists",
   assert.equal(statusBarText(undefined, 12_000), "$(graph) NaN 12K");
 });
 
-test("status bar prefers the account-wide quota percentage when available", () => {
+test("status bar prefers the plan-credit percentage when available", () => {
   assert.equal(statusBarText(42, 1_500), "$(graph) NaN 42%");
   assert.equal(statusBarText(42.5, 0), "$(graph) NaN 42.5%");
+});
+
+test("status bar replaces the percentage with a frozen warning when the credit pool is frozen", () => {
+  assert.equal(statusBarText(42, 1_500, true), "$(warning) NaN frozen");
+  // No credit headline means nothing to freeze: keep the local-total fallbacks.
+  assert.equal(statusBarText(undefined, 0, true), "$(sparkle) NaN");
 });
 
 test("compact formats magnitudes with one decimal below ten units", () => {
@@ -93,7 +112,51 @@ test("escapeMarkdown escapes markdown punctuation and collapses newlines", () =>
   assert.equal(escapeMarkdown("line1\nline2"), "line1 line2");
 });
 
-test("tooltip includes the quota percentage and the reporting period", () => {
+test("formatCredits keeps whole credits compact and decimals to one place", () => {
+  assert.equal(formatCredits(0), "0");
+  assert.equal(formatCredits(7_000), "7,000");
+  assert.equal(formatCredits(210), "210");
+  assert.equal(formatCredits(0.4), "0.4");
+});
+
+test("describePackExpiry turns pack_expires_at into a readable date with day distance", () => {
+  const now = new Date("2026-05-20T10:30:00.000Z");
+  assert.equal(describePackExpiry("2026-06-01", now), "expires 2026-06-01 (in 12 days)");
+  assert.equal(describePackExpiry("2026-05-21", now), "expires tomorrow (2026-05-21)");
+  assert.equal(describePackExpiry("2026-05-20", now), "expires today (2026-05-20)");
+  assert.equal(describePackExpiry("2026-05-19", now), "expired on 2026-05-19");
+});
+
+test("describePackExpiry accepts ISO timestamps and passes through unparsable values", () => {
+  const now = new Date("2026-05-20T10:30:00.000Z");
+  assert.equal(describePackExpiry("2026-06-01T00:00:00.000Z", now), "expires 2026-06-01 (in 12 days)");
+  assert.equal(describePackExpiry("next billing cycle", now), "next billing cycle");
+  assert.equal(describePackExpiry("", now), "");
+});
+
+test("usageLinks points at the API-keys deep link, the model catalogue, billing and pricing", () => {
+  const links = usageLinks();
+  assert.deepEqual(
+    links.map((link) => link.url),
+    [
+      "https://cloud.nan.builders/#settings-api-keys",
+      "https://nan.builders/docs/models",
+      "https://cloud.nan.builders/#settings-billing",
+      "https://cloud.nan.builders/tokens",
+    ],
+  );
+  assert.deepEqual(
+    links.map((link) => link.label),
+    [
+      "Open API keys",
+      "Open model docs",
+      "Open billing & credit packs",
+      "Open credits per 1M tokens",
+    ],
+  );
+});
+
+test("tooltip includes the plan-credit percentage and the reporting period", () => {
   const md = buildTooltipMarkdown({
     snapshot: snapshot(),
     requests: 1,
@@ -103,9 +166,97 @@ test("tooltip includes the quota percentage and the reporting period", () => {
     history: [],
   });
   assert.match(md, /Account usage\*\* — 2026-01-01 → 2026-01-31/);
-  assert.match(md, /deepseek-v4-flash: 3[.,]?000 tokens · \*\*0%\*\* of monthly quota/);
+  assert.match(md, /Plan credits: allowance 7,000 · used 210 · remaining \*\*6,790\*\* · renews 2026-02-01/);
+  assert.match(md, /Credit pack: 1,000 credits · (expires|expired on) 2026-06-01/);
+  assert.match(md, /Window credits: \*\*210\*\* — approximate calendar-month sum of the per-model rows/);
+  assert.match(md, /deepseek-v4-flash: 3[.,]?000 tokens · 210 credits · \*\*3%\*\* of plan credits/);
   assert.match(md, /Window totals: \*\*3[.,]?000 tokens\*\*/);
+  assert.match(md, /Credits are billed and reported from 2026-11-10 onward/);
+  assert.match(md, /Cached input tokens are reported from 2026-11-11 onward/);
   assert.match(md, /Last refresh: 2026-01-31T12:00:00\.000Z/);
+});
+
+test("tooltip omits the credits block on accounts that are not billed in credits", () => {
+  const md = buildTooltipMarkdown({
+    snapshot: snapshot({ credits: undefined, totals: { promptTokens: 1, completionTokens: 0, totalTokens: 1, apiRequests: 1, byModel: [] } }),
+    requests: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    quotaItems,
+    history: [],
+  });
+  assert.doesNotMatch(md, /Plan credits:/);
+  assert.doesNotMatch(md, /% of plan credits/);
+});
+
+test("tooltip shows reported cached input tokens for the window and each model", () => {
+  const md = buildTooltipMarkdown({
+    snapshot: snapshot({
+      totals: {
+        promptTokens: 1_000,
+        cachedTokens: 400,
+        completionTokens: 2_000,
+        totalTokens: 3_000,
+        apiRequests: 7,
+        credits: 210,
+        byModel: [
+          {
+            model: "deepseek-v4-flash",
+            promptTokens: 1_000,
+            cachedTokens: 400,
+            completionTokens: 2_000,
+            totalTokens: 3_000,
+            apiRequests: 7,
+            credits: 210,
+          },
+        ],
+      },
+    }),
+    requests: 1,
+    promptTokens: 1_000,
+    completionTokens: 2_000,
+    quotaItems,
+    history: [],
+  });
+  assert.match(md, /Window totals: \*\*3[.,]?000 tokens\*\* \(1[.,]?000 prompt \+ 2[.,]?000 completion\), 400 of the prompt cached/);
+  assert.match(md, /deepseek-v4-flash: 3[.,]?000 tokens · 400 cached · 210 credits/);
+});
+
+test("tooltip omits cached input tokens when NaN does not report them", () => {
+  const md = buildTooltipMarkdown({
+    snapshot: snapshot(),
+    requests: 1,
+    promptTokens: 1_000,
+    completionTokens: 2_000,
+    quotaItems,
+    history: [],
+  });
+  assert.doesNotMatch(md, /of the prompt cached/);
+  assert.doesNotMatch(md, / tokens · .* cached/);
+  assert.doesNotMatch(md, /frozen/);
+});
+
+test("tooltip shows the credit period range and warns about frozen plan credits", () => {
+  const md = buildTooltipMarkdown({
+    snapshot: snapshot({
+      credits: {
+        periodStart: "2026-01-02",
+        periodEnd: "2026-02-01",
+        allowance: 7_000,
+        used: 210,
+        remaining: 6_790,
+        frozen: true,
+      },
+    }),
+    requests: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    quotaItems,
+    history: [],
+  });
+  assert.match(md, /Plan credits: allowance 7,000 · used 210 · remaining \*\*6,790\*\* · 2026-01-02 → 2026-02-01/);
+  assert.match(md, /Plan credits are frozen: credit-billed requests are refused/);
+  assert.doesNotMatch(md, /renews 2026-02-01/);
 });
 
 test("tooltip reports a failed refresh alongside the retained snapshot", () => {
@@ -156,7 +307,7 @@ test("tooltip renders local session usage, quota items and history", () => {
   });
   assert.match(md, /Requests: 3 · prompt 1[.,]?500 \+ completion 500 = 2[.,]?000 tokens/);
   assert.match(md, /Last model: deepseek-v4-flash/);
-  assert.match(md, /DeepSeek V4 Flash: 3B per month · local usage: 3K/);
+  assert.match(md, /DeepSeek V4 Flash: Paid from plan credits · local usage: 3K/);
   assert.match(md, /Local history \(last 30 days\):/);
   assert.match(md, /2026-01-31 · deepseek-v4-flash/);
 });

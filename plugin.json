@@ -1,0 +1,28 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "nan-builders",
+  "description": "NaN Builders in the GitHub Copilot app: a canvas with the monthly quota dashboard, model catalog and API-key settings, plus nan_ask / nan_usage agent tools to call NaN models directly (cheap second-opinion and verification passes).",
+  "version": "0.1.0",
+  "author": {
+    "name": "Sergio Valverde",
+    "url": "https://github.com/svg153"
+  },
+  "homepage": "https://github.com/svg153/nan-vscode#readme",
+  "repository": "https://github.com/svg153/nan-vscode",
+  "license": "MIT",
+  "keywords": [
+    "agent-plugins",
+    "canvas",
+    "copilot-cli",
+    "github-copilot",
+    "nan-builders",
+    "openai-compatible",
+    "quotas",
+    "usage"
+  ],
+  "extensions": {
+    "com.github.copilot": {
+      "logo": "media/icon.png"
+    }
+  }
+}
