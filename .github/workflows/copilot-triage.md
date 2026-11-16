@@ -14,12 +14,12 @@ network: defaults
 max-ai-credits: 150
 max-daily-ai-credits: 300
 
-# Draft (not enabled): run this workflow on Anthropic instead of Copilot.
-# Uncomment both lines and add the ANTHROPIC_API_KEY repository secret. See
-# docs/agentic-pipeline.md#swapping-the-model-provider-draft.
-# engine:
-#   id: claude
-#   model: claude-sonnet-5
+# Not a provider-swap candidate: this workflow hands work to the Copilot coding
+# agent through `safe-outputs: assign-to-agent`, so Copilot is load-bearing here
+# and the engine has to stay on it. If that hand-off is ever removed, the swap
+# target is the NaN Builders gateway (see feature-scout.md for the same draft):
+# engine id: codex with OPENAI_BASE_URL, model deepseek-v4-flash, secret
+# OPENAI_API_KEY, and api.nan.builders allowed in network.
 
 safe-outputs:
   assign-to-agent:

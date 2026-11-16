@@ -54,7 +54,7 @@ decides how each one is billed.
 | --- | --- | --- |
 | Standard GitHub-hosted runner (`ubuntu-latest`) | Free and unlimited | Draws from included compute usage (~$0.006/min Linux) |
 | Copilot inference | Billed in **AI Credits** (1 AIC = $0.01) against the PAT owner's Copilot allowance | Same |
-| Anthropic / OpenAI / Google inference | Billed to that provider account | Same |
+| NaN Builders gateway inference (draft) | Billed in NaN credits to the NaN account | Same |
 
 Being public makes the **runner minutes** free. It does **not** make inference
 free: both workflows call Copilot, and Copilot usage is measured in AI Credits
@@ -96,35 +96,69 @@ provider invoice; confirm real charges in the billing dashboard.
 
 ### Swapping the model provider (draft)
 
-`engine:` selects a different inference provider without touching the workflow
-body. Both workflows carry a commented draft block for exactly this:
+The alternative provider is our own gateway, the same OpenAI-compatible API the
+extension talks to, not a third-party vendor account.
+
+| Field | Value |
+| --- | --- |
+| Endpoint | `https://api.nan.builders/v1` |
+| Engine | `codex` (gh-aw's OpenAI route) |
+| Model | any NaN model id: `deepseek-v4-flash`, `glm5.3`, `qwen3.8-flash`, `kimi-k3.1-pro`, ... |
+| Repository secret | `OPENAI_API_KEY` (or `CODEX_API_KEY`) holding a NaN API key |
+| Network | `api.nan.builders` must be allowed |
+| Billing | NaN credits against the NaN account, not Copilot AI Credits |
+
+`feature-scout.md` carries this draft as a comment block:
 
 ```yaml
+network:
+  allowed: [defaults, api.nan.builders]
+
 engine:
-  id: claude          # or: codex
-  model: claude-sonnet-5   # or: gpt-5.6-sol
+  id: codex
+  model: deepseek-v4-flash
+  api-target: api.nan.builders
+  env:
+    OPENAI_BASE_URL: https://api.nan.builders/v1
 ```
 
-| Engine | Repository secret | Billing |
-| --- | --- | --- |
-| `claude` | `ANTHROPIC_API_KEY` | Anthropic account |
-| `codex` | `OPENAI_API_KEY` (or `CODEX_API_KEY`) | OpenAI account |
-| Copilot (current) | `COPILOT_GITHUB_TOKEN` | Copilot AI Credits |
+That frontmatter was compiled in a throwaway workflow to confirm it is real
+rather than aspirational. The generated job pins
+`"model_provider":"openai-proxy"` with `"wire_api":"responses"`, routes the
+`openai` proxy target to `api.nan.builders`, validates `CODEX_API_KEY` or
+`OPENAI_API_KEY` before the agent starts, and passes `deepseek-v4-flash`
+through unchanged because `OPENAI_BASE_URL` disables model fallback.
+
+**The one real blocker: the Responses API.** The Codex engine speaks
+`/v1/responses`, not Chat Completions, and the extension only uses
+`/v1/chat/completions`. Working through the extension does not prove the
+gateway serves the Responses API, so verify it before enabling:
+
+```bash
+curl -sS -X POST https://api.nan.builders/v1/responses \
+  -H "Authorization: Bearer $NAN_API_KEY" -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-v4-flash","input":"ping"}'
+```
+
+A 404 or 405 means the gateway needs a Responses-compatible bridge; until then
+the swap stays blocked and the workflows stay on Copilot.
 
 Rules for enabling the draft:
 
-1. Uncomment the two `engine:` lines, keep the YAML indentation, and run
-   `gh aw compile <workflow> --strict`; the lock file is what actually runs.
-2. Add the provider secret before merging, otherwise activation fails.
-3. Keep Copilot-specific frontmatter out of the same edit. `safe-outputs:
-   assign-to-agent` is a Copilot coding-agent hand-off, so `copilot-triage`
-   should stay on the Copilot engine; the swap is only meaningful for
-   `feature-scout`, which is pure research.
-4. Do not use a provider-keyed engine on a `pull_request`/`fork` trigger:
-   workflows from fork PRs receive no secrets. Both workflows use `schedule`,
-   `workflow_dispatch` or `issues`, so they are unaffected today.
-5. `max-ai-credits` stays meaningful on any engine — AWF measures the routed
-   model — but the provider invoice, not the patched budget, is authoritative.
+1. Store the NaN API key as the repository secret first; activation fails
+   without it.
+2. Replace `network: defaults`, do not add a second `network:` key, then run
+   `gh aw compile <workflow> --strict`. The lock file is what actually runs.
+3. `feature-scout` only. `copilot-triage` hands work to the Copilot coding
+   agent through `safe-outputs: assign-to-agent`, so Copilot is load-bearing
+   there.
+4. Do not use a provider-keyed engine on a `pull_request`/fork trigger:
+   workflows from fork PRs receive no secrets.
+5. `max-ai-credits` keeps working (AWF meters whatever model is routed), but
+   the NaN account is the authoritative invoice. `GET /v1/usage` with the same
+   key shows the real spend.
+6. Treat the NaN key as a billing credential: repository secret only, never in
+   a workflow body or log, rotated from the NaN Cloud API keys page.
 ## Dependency updates & supply chain
 
 Renovate (Mend app, `app/renovate`) is the single version-update bot for npm
