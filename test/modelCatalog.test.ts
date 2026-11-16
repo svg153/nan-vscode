@@ -160,15 +160,20 @@ test("filterDiscoveredModels auto mode keeps bare IDs and drops obvious non-chat
     { id: "flux-dev" },
     { id: "audio-transcribe" },
     { id: "speak-tts" },
+    { id: "llama-guard-4-12l" },
+    { id: "sora-video-gen" },
+    { id: "transcripts-summarizer" },
+    { id: "minimax-m2.5" },
+    { id: "minimax-chat", is_chat: true },
     { id: "explicitly-not-chat", is_chat: false },
   ];
 
   const auto = filterDiscoveredModels(rawModels, false, "auto");
-  assert.deepEqual(auto.map((m) => m.id).sort(), ["my-local-llama", "vision-chat"]);
+  assert.deepEqual(auto.map((m) => m.id).sort(), ["minimax-chat", "my-local-llama", "vision-chat"]);
 
   // Curated mode stays unchanged for the same input: only explicit chat metadata passes.
   const curated = filterDiscoveredModels(rawModels, false, "curated");
-  assert.deepEqual(curated.map((m) => m.id), ["vision-chat"]);
+  assert.deepEqual(curated.map((m) => m.id).sort(), ["minimax-chat", "vision-chat"]);
 });
 
 test("auto-discovered unknown models keep API capability metadata", () => {
