@@ -123,6 +123,9 @@ your approval. If you later want low-risk churn removed, set
    and *merge queue*. With it, once you approve, the agent-merge flow fixes
    any CI flake/conflict and squash-merges unattended.
 6. **Marketplace credentials** (*Settings → Secrets and variables → Actions*):
+   - Until at least one method below exists, the pre-release job **skips**
+     publishing with a warning annotation and a job-summary note instead of
+     failing; the rolling `preview` release still carries the VSIX.
    - `VSCE_PAT` at **repository** level (not only inside an environment): the
      pre-release publish runs unattended on every merge and cannot wait for a
      deployment approval. Scope the token to the `svg153` publisher.
@@ -140,9 +143,12 @@ your approval. If you later want low-risk churn removed, set
      Both workflows authenticate with `vsce publish --oidc` (a 15-minute
      credential, no PAT) and `VSCE_PAT` can be deleted.
 7. **Environments** (*Settings → Environments*):
-   - `marketplace`: add your user under **Required reviewers**. That review is
-     the manual gate for *stable* publishing; the pre-release channel is
-     automatic and does not use an environment.
+   - `marketplace`: **create it explicitly and add your user under Required
+     reviewers.** GitHub silently auto-creates an unprotected environment the
+     first time a workflow references a missing one, which would remove the
+     approval gate entirely — so create it *before* the first promotion. That
+     review is the manual gate for *stable* publishing; the pre-release
+     channel is automatic and does not use an environment.
    - `COPILOT_GITHUB_TOKEN` is **required**: both compiled agentic locks
      validate it during activation and use it for Copilot inference, so
      without it even feature discovery fails (it is not just an optional
@@ -165,8 +171,9 @@ your approval. If you later want low-risk churn removed, set
   dedup happens at PR time because each PR must pass required checks.
 - **Merge**: approve the Copilot code review, then
   `gh pr merge <n> --auto --squash` (or click *Enable auto-merge*).
-- **Validate a build**: the merge already published the pre-release to the
-  Marketplace, so the fastest path is to enable *Switch to Pre-Release Version*
+- **Validate a build**: the merge publishes the pre-release to the
+  Marketplace once credentials are configured (before that, the job warns and
+  skips). Either way you can enable *Switch to Pre-Release Version*
   for the extension and update normally. To test the exact artifact without
   changing your channel, download the VSIX from the
   [`preview` release](https://github.com/svg153/nan-vscode/releases/tag/preview)
