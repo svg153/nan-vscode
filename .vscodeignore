@@ -14,6 +14,8 @@ scripts/**
 out/test/**
 coverage/**
 dependency-audit/**
+com.github.copilot/**
+plugin.json
 tsconfig.json
 renovate.json
 **/*.map
