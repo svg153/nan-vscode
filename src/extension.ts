@@ -4,6 +4,7 @@ import { configureDiagnosticFile, diagnostic } from "./diagnostics";
 import { HttpEndpointConsentDeniedError, HttpEndpointGuard } from "./httpEndpointGuard";
 import { NanInlineCompletionProvider } from "./inlineCompletionProvider";
 import { NanChatModelProvider } from "./provider";
+import { collectDiagnostics, formatConnectionOk, formatConnectionWarning } from "./providerDiagnostics";
 import { getKnownModel, resolveReasoningEffort } from "./modelCatalog";
 import { AccountUsageService, accountModelRows, windowCredits } from "./accountUsage";
 import { compactTokens } from "./quotaCatalog";
@@ -169,6 +170,19 @@ export function activate(context: vscode.ExtensionContext): {
     }
   };
 
+  // "Show Diagnostics" falls back to this channel when the Markdown document cannot be opened.
+  let reportChannel: vscode.OutputChannel | undefined;
+  const reportOutputChannel = (): vscode.OutputChannel => {
+    if (diagnosticChannel) {
+      return diagnosticChannel;
+    }
+    if (!reportChannel) {
+      reportChannel = vscode.window.createOutputChannel("NaN Builders Diagnostics", "markdown");
+      context.subscriptions.push(reportChannel);
+    }
+    return reportChannel;
+  };
+
   context.subscriptions.push(
     usage,
     provider,
@@ -179,6 +193,10 @@ export function activate(context: vscode.ExtensionContext): {
       provider.refresh();
       vscode.window.showInformationMessage("NaN Builders model list refreshed.");
     }),
+    vscode.commands.registerCommand("nanBuilders.testConnection", () => testConnection(context, provider)),
+    vscode.commands.registerCommand("nanBuilders.showDiagnostics", () =>
+      showDiagnostics(context, provider, reportOutputChannel()),
+    ),
     vscode.commands.registerCommand("nanBuilders.setReasoningEffort", () => setModelReasoningEffort(provider)),
     vscode.commands.registerCommand("nanBuilders.showUsage", () => {
       const picker = vscode.window.createQuickPick<vscode.QuickPickItem>();
@@ -464,6 +482,81 @@ async function manageProvider(
     case "docs":
       await vscode.env.openExternal(vscode.Uri.parse(NAN_DOCS_URL));
       return;
+  }
+}
+
+/**
+ * "Test Connection": silent, read-only model discovery for the stored key.
+ * A missing key, no reachable models, or a gateway error each produce an
+ * actionable warning; gateway text is sanitized before it is displayed.
+ */
+async function testConnection(context: vscode.ExtensionContext, provider: NanChatModelProvider): Promise<void> {
+  const apiKey = await context.secrets.get(SECRET_API_KEY);
+  if (!apiKey) {
+    vscode.window.showWarningMessage(
+      "No NaN Builders API key is configured. Run 'NaN Builders: Manage Provider' to add one, then test the connection again.",
+    );
+    return;
+  }
+
+  try {
+    const modelIds = await provider.probeConfiguredKey();
+    diagnostic("testConnection.complete", { modelCount: modelIds.length });
+    if (modelIds.length === 0) {
+      vscode.window.showWarningMessage(formatConnectionWarning(provider.getBaseUrl(), provider.discoveryError()));
+      return;
+    }
+    vscode.window.showInformationMessage(`NaN Builders: ${formatConnectionOk(modelIds)}`);
+  } catch (error) {
+    if (error instanceof HttpEndpointConsentDeniedError) {
+      vscode.window.showWarningMessage(
+        "NaN Builders could not test the connection because access to the HTTP endpoint was declined.",
+      );
+      return;
+    }
+    if (isAbortError(error)) {
+      return;
+    }
+    diagnostic("testConnection.error", { errorName: error instanceof Error ? error.name : typeof error });
+    vscode.window.showWarningMessage(
+      formatConnectionWarning(provider.getBaseUrl(), error instanceof Error ? error.message : String(error)),
+    );
+  }
+}
+
+/**
+ * "Show Diagnostics": a pasteable Markdown dump of versions, endpoint, the
+ * models this VS Code host actually exposes, the configured key count, and the
+ * locally tracked models. Never includes key material.
+ */
+async function showDiagnostics(
+  context: vscode.ExtensionContext,
+  provider: NanChatModelProvider,
+  channel: vscode.OutputChannel,
+): Promise<void> {
+  let markdown: string;
+  try {
+    markdown = await collectDiagnostics({
+      extensionVersion: String(context.extension.packageJSON.version ?? "unknown"),
+      vscodeVersion: vscode.version,
+      baseUrl: provider.getBaseUrl(),
+      configuration: vscode.workspace.getConfiguration("nanBuilders"),
+      lm: vscode.lm,
+      secretKeys: await context.secrets.keys(),
+      trackedModels: provider.trackedModelIds(),
+      lastDiscoveryError: provider.discoveryError(),
+    });
+  } catch (error) {
+    vscode.window.showErrorMessage(`NaN Builders diagnostics failed to read the host model list: ${errorMessage(error)}`);
+    return;
+  }
+
+  try {
+    const document = await vscode.workspace.openTextDocument({ language: "markdown", content: markdown });
+    await vscode.window.showTextDocument(document, { preview: false });
+  } catch {
+    channel.appendLine(markdown);
+    channel.show(true);
   }
 }
 

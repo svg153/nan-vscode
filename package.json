@@ -39,7 +39,9 @@
     "onLanguageModelChatProvider:nan-builders",
     "onCommand:nanBuilders.manage",
     "onCommand:nanBuilders.refreshModels",
-    "onCommand:nanBuilders.showUsage"
+    "onCommand:nanBuilders.showUsage",
+    "onCommand:nanBuilders.testConnection",
+    "onCommand:nanBuilders.showDiagnostics"
   ],
   "main": "./out/src/extension.js",
   "contributes": {
@@ -89,6 +91,16 @@
         "command": "nanBuilders.showUsage",
         "category": "NaN Builders",
         "title": "Show Usage"
+      },
+      {
+        "command": "nanBuilders.testConnection",
+        "category": "NaN Builders",
+        "title": "Test Connection"
+      },
+      {
+        "command": "nanBuilders.showDiagnostics",
+        "category": "NaN Builders",
+        "title": "Show Diagnostics"
       }
     ],
     "configuration": {
