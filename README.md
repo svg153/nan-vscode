@@ -85,6 +85,13 @@ Available settings:
 | `nanBuilders.discoveryMode` | `"curated"` | `auto` lists every chat ID returned by `GET /models` from a trusted custom endpoint, except obvious non-chat names (embeddings, rerank, speech, transcription, moderation/guard, image/video generation, minimax-only endpoints). Endpoint-declared capability fields take precedence; models without metadata get conservative defaults. In `curated` mode, if `GET /models` fails or returns no chat IDs, the picker falls back to the static catalog marked "not live-verified". |
 | `nanBuilders.completionModel` | `""` | Model ID for opt-in inline ghost-text completions; empty disables the feature and no completion request is sent. |
 
+## Diagnostics
+
+Two read-only commands help when the model picker is empty or a request fails. Neither sends a chat request, and neither prints an API key, token, or `Authorization` header.
+
+- **NaN Builders: Test Connection** runs model discovery silently and reports either `OK — N model(s) reachable (id, ...)` or an actionable warning naming the base URL, the sanitized gateway error, and the command to run next.
+- **NaN Builders: Show Diagnostics** opens a Markdown report with the VS Code and extension versions, the effective base URL, the discovery mode, the models this VS Code host exposes through `vscode.lm.selectChatModels` (ID and `maxInputTokens`), the number of configured keys/profiles (count only; values are never read), and the locally tracked model IDs. When the report cannot be opened as a document, the same text is written to the output channel.
+
 ## Reasoning effort per model
 
 Models differ in which reasoning levels the API documents for them. Resolution happens per request, in this order:
