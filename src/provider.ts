@@ -5,10 +5,12 @@ import {
   billingDescription,
   filterDiscoveredModels,
   getKnownModel,
+  knownChatModelIds,
   reasoningDescription,
   resolveReasoningEffort,
   toDisplayMetadata,
   type DiscoveredModel,
+  type ModelMetadata,
 } from "./modelCatalog";
 import { convertMessages, convertTools, estimateTokens, httpError, isImagePart } from "./openai/request";
 import { OpenAIStreamDecoder, StreamLimitError, type StreamEvent } from "./openai/stream";
@@ -92,24 +94,44 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     }
 
     let models: DiscoveredModel[];
+    let discoveryFailed = false;
     try {
       models = await this.fetchModelIds(apiKey, token);
     } catch (error) {
       if (isAbortError(error)) {
         return [];
       }
-      throw error;
+      discoveryFailed = true;
+      diagnostic("models.fetch.failed", {
+        errorName: error instanceof Error ? error.name : typeof error,
+        message: error instanceof Error ? error.message.slice(0, 200) : typeof error,
+      });
+      models = [];
     }
     const includeUnknown = vscode.workspace
       .getConfiguration("nanBuilders")
       .get<boolean>("includeUnknownModels", false);
+    const discoveryMode = vscode.workspace
+      .getConfiguration("nanBuilders")
+      .get<string>("discoveryMode", "curated") === "auto" ? "auto" : "curated";
 
     // NaN documents /v1/models as the definitive, API-key-filtered list.
     // Only expose model IDs returned for this key. Known non-chat endpoints are
     // filtered out; unknown IDs are opt-in because a future non-chat endpoint
     // must not accidentally be advertised to VS Code as a chat model.
-    const chatModels = filterDiscoveredModels(models, includeUnknown);
+    const chatModels = filterDiscoveredModels(models, includeUnknown, discoveryMode);
     const vsCodeModels = chatModels.map((m) => this.toVsCodeModel(m));
+
+    // Static catalog fallback (curated mode): if /v1/models fails or returns
+    // no usable chat model, never leave the picker empty. The curated catalog
+    // is served marked as not live-verified and is not cached, so the next
+    // refresh retries the endpoint. Auto mode targets third-party servers,
+    // where the NaN catalog would be misleading, so it keeps the live result.
+    if (discoveryMode === "curated" && (discoveryFailed || vsCodeModels.length === 0)) {
+      diagnostic("models.provide.staticFallback", { discoveryFailed, liveChatCount: vsCodeModels.length });
+      return this.staticCatalogModels();
+    }
+
     const cacheSeconds = vscode.workspace
       .getConfiguration("nanBuilders")
       .get<number>("modelCacheSeconds", 300);
@@ -441,20 +463,38 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   }
 
   private toVsCodeModel(discovered: DiscoveredModel): vscode.LanguageModelChatInformation {
-    const metadata = toDisplayMetadata(discovered.id, discovered);
-    const known = getKnownModel(discovered.id);
+    return this.toModelInfo(toDisplayMetadata(discovered.id, discovered));
+  }
+
+  /** Curated catalog served when live discovery failed or returned nothing usable. */
+  private staticCatalogModels(): vscode.LanguageModelChatInformation[] {
+    return knownChatModelIds().map((id) => this.toModelInfo(toDisplayMetadata(id), true));
+  }
+
+  private toModelInfo(metadata: ModelMetadata, unverified = false): vscode.LanguageModelChatInformation {
+    const known = getKnownModel(metadata.id);
+    // Reserve a 10% input budget margin against tokenizer divergence: a
+    // full-context request can still 400 when the server tokenizes differently.
+    const inputBudget = Math.min(
+      metadata.contextWindow - metadata.maxOutputTokens,
+      Math.floor(metadata.contextWindow * 0.9),
+    );
     return {
       id: metadata.id,
       name: metadata.largerModel ? `${metadata.name} (larger model)` : metadata.name,
       family: metadata.id,
       version: "1",
-      maxInputTokens: Math.max(1, metadata.contextWindow - metadata.maxOutputTokens),
+      maxInputTokens: Math.max(1, inputBudget),
       maxOutputTokens: metadata.maxOutputTokens,
-      detail: known ? "NaN Builders" : "NaN Builders - metadata unknown",
+      detail: unverified ? "NaN Builders - not live-verified" : known ? "NaN Builders" : "NaN Builders - metadata unknown",
       tooltip: [
-        known
-          ? `NaN Builders hosted ${metadata.name}`
-          : "Discovered from NaN Builders. Tool calling is disabled until metadata is known.",
+        unverified
+          ? `Static NaN Builders catalog (${metadata.name}); live model discovery failed or returned no chat models. Access is not verified for the current API key.`
+          : known
+            ? `NaN Builders hosted ${metadata.name}`
+            : metadata.toolCalling
+              ? "Auto-discovered from the configured endpoint. Capabilities come from endpoint metadata."
+              : "Auto-discovered from the configured endpoint. Tool calling is disabled until metadata is known.",
         billingDescription(metadata),
         reasoningDescription(metadata),
         ...(known?.reasoningEffortValues?.length ? [`Current effort: ${this.resolveEffort(metadata.id, undefined)}.`] : []),

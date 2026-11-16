@@ -177,6 +177,10 @@ Open a WSL workspace with the extension installed locally.
 
 Expected: the provider remains available without requiring a second installation inside WSL, because the extension is declared as a UI extension.
 
+## Auto-discovery mode
+
+`nanBuilders.discoveryMode: auto` mirrors the Copilot custom-endpoint behavior for trusted OpenAI-compatible servers: all IDs from `GET /models` are offered except the non-chat denylist, obvious non-chat name patterns (`embedding`, `rerank`, `whisper`, `tts`, `image`, `flux`, `video`, `guard`, `speech`, `transcri…`, `asr`, `moderation`, `minimax`), and entries explicitly marked non-chat. Explicit endpoint metadata (`is_chat`, chat `model_type`) takes precedence over the name heuristics, so a model named like a non-chat family but marked chat stays listed. Capability fields returned by the endpoint override the conservative defaults; unknown models without declared capabilities stay without tool calling or vision. `curated` (the default) keeps the previous catalog-first behavior. In `curated` mode, when `GET /models` fails or returns no usable chat IDs, the picker falls back to the static NaN Builders catalog; each fallback entry is marked "not live-verified" in its detail and tooltip and the result is not cached, so the next request retries live discovery. `auto` mode never substitutes the static catalog because it would misrepresent third-party endpoints. Every discovered model gets an input budget of `max(1, min(context − max_output, 0.9 × context))` tokens. The remote-HTTP consent guard applies unchanged, so an API key is never sent to an unconfirmed `http:` endpoint.
+
 ## Exit criteria
 
 The release is ready for a tagged pre-release when all checks above pass on current stable VS Code and no API key or session secret appears in logs or workspace files.

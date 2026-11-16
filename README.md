@@ -25,6 +25,7 @@ Use [NaN Builders](https://nan.builders/) models in VS Code Chat and Agent mode 
 - Account-wide credit usage in the status bar via `GET /v1/usage` when an API key is configured, with local-session usage as fallback.
 - Conservative handling of newly discovered model IDs that are not yet in the local metadata catalog.
 - Per-model reasoning effort: choose a level with **NaN Builders: Set Model Reasoning Effort**, send per-request levels through `modelOptions`, or leave everything on `auto`, which uses a documented default per model.
+- Opt-in `nanBuilders.discoveryMode: auto` for Copilot-style auto-discovery from trusted OpenAI-compatible endpoints: every non-chat-filtered ID returned by `GET /models` appears in the picker with endpoint-declared capabilities ([issue #100](https://github.com/svg153/nan-vscode/issues/100)).
 - Remote-workspace support: the provider prefers the workspace extension host and falls back to the local UI host.
 
 ## Install
@@ -81,6 +82,7 @@ Available settings:
 | `nanBuilders.includeUnknownModels` | `false` | Expose unknown IDs without tool or vision metadata. |
 | `nanBuilders.defaultReasoningEffort` | `auto` | Fallback reasoning level for models that expose adjustable effort. `auto` uses each model's documented default (medium when supported, otherwise the central documented level); explicit levels act as the global fallback. |
 | `nanBuilders.reasoningEffortByModel` | `{}` | Per-model reasoning overrides set by **NaN Builders: Set Model Reasoning Effort** (for example `"glm-5.3-flash": "high"`). Overrides win over the global setting; removing an entry resets that model to `auto`. |
+| `nanBuilders.discoveryMode` | `"curated"` | `auto` lists every chat ID returned by `GET /models` from a trusted custom endpoint, except obvious non-chat names (embeddings, rerank, speech, transcription, moderation/guard, image/video generation, minimax-only endpoints). Endpoint-declared capability fields take precedence; models without metadata get conservative defaults. In `curated` mode, if `GET /models` fails or returns no chat IDs, the picker falls back to the static catalog marked "not live-verified". |
 | `nanBuilders.completionModel` | `""` | Model ID for opt-in inline ghost-text completions; empty disables the feature and no completion request is sent. |
 
 ## Reasoning effort per model
@@ -97,6 +99,22 @@ Whatever level is chosen is remapped to the closest documented level for that mo
 Run **NaN Builders: Set Model Reasoning Effort** from the Command Palette, pick a model, then pick a level (or reset it to `auto`). The current level is shown in the model tooltip and in the selection UI description.
 
 When `nanBuilders.apiBaseUrl` uses non-loopback `http:`, the extension asks before sending the stored API key. The decision is remembered for that endpoint until the extension session ends and covers model discovery, chat, account usage, and inline completions. A declined endpoint stays blocked without repeating the prompt; changing the endpoint clears declined decisions. Canceling prevents the request; HTTPS and loopback HTTP endpoints do not prompt.
+
+### Recipe: custom OpenAI-compatible server with auto-discovery
+
+To point the extension at a trusted OpenAI-compatible server (LM Studio, vLLM, Ollama's OpenAI endpoint, a corporate gateway) and pick its models directly, like the Copilot custom-endpoint experience:
+
+1. Set the endpoint and restart-free refresh:
+
+   ```json
+   "nanBuilders.apiBaseUrl": "https://my-server.example.com/v1/",
+   "nanBuilders.discoveryMode": "auto"
+   ```
+
+2. Run **NaN Builders: Manage Provider** to store the server's API key (any bearer token the server expects) and validate it; the picker then lists every chat ID returned by `GET /models`, minus obvious non-chat endpoints.
+3. Trigger **NaN Builders: Refresh Models** after adding or removing models on the server; results are cached for `nanBuilders.modelCacheSeconds`.
+
+Notes: in `auto` mode the picker reflects the live endpoint only (no NaN catalog fallback), capability fields declared by the server (`is_chat`, `model_type`, context/output limits) take precedence over conservative defaults, and `http:` (non-loopback) endpoints require the one-time consent prompt before the key is sent. Set `discoveryMode` back to `curated` to restore the NaN Builders Marketplace experience.
 
 ## Remote workspaces
 
