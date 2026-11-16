@@ -182,6 +182,15 @@ test("bounds the sanitized summary length", () => {
   assert.equal(error.message.length, "NaN Builders API error 400 Bad Request: ".length + 64);
 });
 
+test("explains the credit reasons behind an HTTP 402 instead of leaving it cryptic", () => {
+  const error = httpError(402, "Payment Required", '{"error":{"type":"insufficient_balance"}}');
+  assert.match(error.message, /^NaN Builders API error 402 Payment Required: insufficient_balance — /);
+  assert.match(error.message, /one credits pool/);
+  assert.match(error.message, /credits are frozen/);
+  assert.match(error.message, /NaN Builders: Show Usage/);
+  assert.match(httpError(402, "Payment Required", "").message, /does not draw credits\.$/);
+});
+
 test("detects image parts only for image mime types backed by bytes", () => {
   assert.equal(isImagePart({ mimeType: "image/png", data: new Uint8Array([0]) }), true);
   assert.equal(isImagePart({ mimeType: "text/plain", data: new Uint8Array([0]) }), false);

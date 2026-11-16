@@ -5,7 +5,7 @@ import {
   clampUsageWindow,
   fetchUsageReport,
 } from "./usageApi";
-import { monthlyQuotaProgress, NO_TOKEN_COUNTER_MODELS, nonMonthlyQuotaNote } from "./quotaCatalog";
+import { creditProgress, percentOf, sumCredits, unmeteredNote } from "./quotaCatalog";
 import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
 
 export interface AccountUsageConfig {
@@ -170,52 +170,77 @@ function monthStart(today: string): string {
 export interface AccountModelRow {
   readonly model: string;
   readonly promptTokens: number;
+  /** Cached input tokens in the window; part of promptTokens. */
+  readonly cachedTokens?: number;
   readonly completionTokens: number;
   readonly totalTokens: number;
   readonly apiRequests: number;
-  /** Monthly fixed-counter % (1 decimal) when NaN publishes one; undefined means "do not fabricate %". */
+  /** Credits billed on this model in the window; undefined when the row carries none. */
+  readonly credits?: number;
+  /** Share of the plan's credit allowance used by this model (1 decimal); undefined means "do not fabricate %". */
   readonly percent?: number;
-  /** Quota note when no monthly % applies, e.g. "No token counter" or a billing-period quota. */
+  /** Note when no % applies, e.g. "Does not draw credits" or "No credits billed in this window". */
   readonly note?: string;
 }
 
-/** Per-model rows for a usage report, sorted by total tokens desc, with % only where documented. */
+/** Per-model rows for a usage report, sorted by total tokens desc, with % of plan credits where documented. */
 export function accountModelRows(report: UsageReport): AccountModelRow[] {
+  const allowance = report.credits?.allowance;
   const progress = new Map(
-    monthlyQuotaProgress(
-      report.totals.byModel.map((entry) => ({ model: entry.model, totalTokens: entry.totalTokens })),
+    creditProgress(
+      report.totals.byModel.map((entry) => ({ model: entry.model, credits: entry.credits ?? 0 })),
+      allowance,
     ).map((entry) => [entry.model, entry.percent]),
   );
   return [...report.totals.byModel]
-      // oxlint-disable-next-line unicorn/no-array-sort
-      .sort((a, b) => b.totalTokens - a.totalTokens)
-      .map((entry) => {
+    // oxlint-disable-next-line unicorn/no-array-sort
+    .sort((a, b) => b.totalTokens - a.totalTokens)
+    .map((entry) => {
       const percent = progress.get(entry.model);
       return {
         model: entry.model,
         promptTokens: entry.promptTokens,
+        cachedTokens: entry.cachedTokens,
         completionTokens: entry.completionTokens,
         totalTokens: entry.totalTokens,
         apiRequests: entry.apiRequests,
+        credits: entry.credits,
         percent,
-        note: percent === undefined ? quotaNote(entry.model) : undefined,
+        note: percent === undefined ? creditsNote(entry.model, entry.credits) : undefined,
       };
     });
 }
 
-/** Most-restricted monthly quota: the status-bar headline percent, or undefined when none applies. */
-export function accountHeadline(report: UsageReport): { model: string; percent: number } | undefined {
-  const [top] = monthlyQuotaProgress(
-    report.totals.byModel.map((entry) => ({ model: entry.model, totalTokens: entry.totalTokens })),
-  );
-  return top ? { model: top.model, percent: top.percent } : undefined;
+/**
+ * Credits billed across the window's per-model rows.
+ *
+ * NaN rounds each model independently, so this calendar-month sum is
+ * approximate: it can differ by tenths from `credits.used`, which covers the
+ * billing period rather than the window. Both are labelled as such instead of
+ * presenting the sum as the period total.
+ */
+export function windowCredits(report: UsageReport): number | undefined {
+  const billed = report.totals.byModel
+    .map((entry) => entry.credits ?? 0)
+    .filter((value) => value > 0);
+  return billed.length === 0 ? undefined : sumCredits(billed);
 }
 
-function quotaNote(model: string): string | undefined {
-  if (NO_TOKEN_COUNTER_MODELS.has(model)) {
-    return "No token counter";
+/** Plan-credits headline: the share of the allowance used this period, or undefined when not billed in credits. */
+export function accountHeadline(report: UsageReport): { model: string; percent: number } | undefined {
+  const { allowance, used } = report.credits ?? {};
+  if (allowance === undefined || !Number.isFinite(allowance) || allowance <= 0 || used === undefined) {
+    return undefined;
   }
-  return nonMonthlyQuotaNote(model);
+  return { model: "credits", percent: percentOf(used, allowance) };
+}
+
+function creditsNote(model: string, credits: number | undefined): string | undefined {
+  const unmetered = unmeteredNote(model);
+  if (unmetered) {
+    return unmetered;
+  }
+  return credits === undefined || credits <= 0 ? "No credits billed in this window" : undefined;
 }
 
 function utcToday(): string {
