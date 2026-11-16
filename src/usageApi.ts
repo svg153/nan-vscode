@@ -74,6 +74,8 @@ export interface UsageRow {
 export interface UsageModelTotals {
   readonly model: string;
   readonly promptTokens: number;
+  /** Cached input tokens in the window; part of promptTokens, not an extra bucket. */
+  readonly cachedTokens?: number;
   readonly completionTokens: number;
   readonly totalTokens: number;
   readonly apiRequests: number;
@@ -83,6 +85,8 @@ export interface UsageModelTotals {
 
 export interface UsageTotals {
   readonly promptTokens: number;
+  /** Cached input tokens in the window; part of promptTokens, not an extra bucket. */
+  readonly cachedTokens?: number;
   readonly completionTokens: number;
   readonly totalTokens: number;
   readonly apiRequests: number;
@@ -92,12 +96,15 @@ export interface UsageTotals {
 
 /** Plan credits for the current billing period; absent when the account is not billed in credits. */
 export interface UsageCredits {
+  readonly periodStart?: string;
   readonly periodEnd?: string;
   readonly allowance?: number;
   readonly used?: number;
   readonly remaining?: number;
   readonly packCredits?: number;
   readonly packExpiresAt?: string;
+  /** True while the subscription is inactive: credit-billed requests are refused until it is restored. */
+  readonly frozen?: boolean;
 }
 
 export interface UsageAllTime {
@@ -418,7 +425,7 @@ function parseRow(value: unknown, index: number): UsageRow {
     totalTokens: asCount(row.total_tokens, `data[${index}].total_tokens`),
     apiRequests: asCount(row.api_requests, `data[${index}].api_requests`),
     credits: asOptionalAmount(row.credits, `data[${index}].credits`),
-    cachedTokens: asOptionalAmount(row.cached_tokens, `data[${index}].cached_tokens`),
+    cachedTokens: asOptionalCount(row.cached_tokens, `data[${index}].cached_tokens`),
   };
 }
 
@@ -428,12 +435,14 @@ function parseCredits(value: unknown): UsageCredits | undefined {
   }
   const credits = asObject(value, "credits");
   return {
+    periodStart: asOptionalString(credits.period_start, "credits.period_start"),
     periodEnd: asOptionalString(credits.period_end, "credits.period_end"),
     allowance: asOptionalAmount(credits.allowance, "credits.allowance"),
     used: asOptionalAmount(credits.used, "credits.used"),
     remaining: asOptionalAmount(credits.remaining, "credits.remaining"),
     packCredits: asOptionalAmount(credits.pack_credits, "credits.pack_credits"),
     packExpiresAt: asOptionalString(credits.pack_expires_at, "credits.pack_expires_at"),
+    frozen: asOptionalBoolean(credits.frozen, "credits.frozen"),
   };
 }
 
@@ -445,6 +454,7 @@ function parseTotals(value: unknown, field: string): UsageTotals {
   }
   return {
     promptTokens: asCount(totals.prompt_tokens, `${field}.prompt_tokens`),
+    cachedTokens: asOptionalCount(totals.cached_tokens, `${field}.cached_tokens`),
     completionTokens: asCount(totals.completion_tokens, `${field}.completion_tokens`),
     totalTokens: asCount(totals.total_tokens, `${field}.total_tokens`),
     apiRequests: asCount(totals.api_requests, `${field}.api_requests`),
@@ -454,6 +464,7 @@ function parseTotals(value: unknown, field: string): UsageTotals {
       return {
         model: asString(model.model, `${field}.by_model[${index}].model`),
         promptTokens: asCount(model.prompt_tokens, `${field}.by_model[${index}].prompt_tokens`),
+        cachedTokens: asOptionalCount(model.cached_tokens, `${field}.by_model[${index}].cached_tokens`),
         completionTokens: asCount(model.completion_tokens, `${field}.by_model[${index}].completion_tokens`),
         totalTokens: asCount(model.total_tokens, `${field}.by_model[${index}].total_tokens`),
         apiRequests: asCount(model.api_requests, `${field}.by_model[${index}].api_requests`),
@@ -514,11 +525,30 @@ function asOptionalAmount(value: unknown, field: string): number | undefined {
   return value;
 }
 
+/** Optional token count; must still be a non-negative integer when present. */
+function asOptionalCount(value: unknown, field: string): number | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  return asCount(value, field);
+}
+
 function asOptionalString(value: unknown, field: string): string | undefined {
   if (value === undefined || value === null) {
     return undefined;
   }
   return asString(value, field);
+}
+
+/** Field added after the original contract: absent on older responses, so it is optional. */
+function asOptionalBoolean(value: unknown, field: string): boolean | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "boolean") {
+    throw malformed(`${field} is not a boolean`);
+  }
+  return value;
 }
 
 function malformed(detail: string): UsageApiError {

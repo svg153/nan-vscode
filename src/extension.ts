@@ -7,7 +7,7 @@ import { NanChatModelProvider } from "./provider";
 import { AccountUsageService, accountModelRows } from "./accountUsage";
 import { compactTokens } from "./quotaCatalog";
 import { API_REQUESTS_CUTOFF_DATE, CACHED_TOKENS_CUTOFF_DATE, CREDITS_CUTOFF_DATE, type UsageCredits } from "./usageApi";
-import { formatCredits } from "./usagePresentation";
+import { formatCredits, formatPercent } from "./usagePresentation";
 import { UsageTracker } from "./usageTracker";
 
 function buildQuickPickItems(
@@ -16,7 +16,7 @@ function buildQuickPickItems(
 ): vscode.QuickPickItem[] {
   return [
     ...accountItems(account),
-    { kind: vscode.QuickPickItemKind.Separator, label: "Published quotas (local session)" },
+    { kind: vscode.QuickPickItemKind.Separator, label: "Billing posture (local session)" },
     ...usage.quotaItems(),
     { kind: vscode.QuickPickItemKind.Separator, label: "Recent local daily history" },
     ...usage.historyItems(),
@@ -400,7 +400,8 @@ function accountItems(account: AccountUsageService): vscode.QuickPickItem[] {
     description: `${snapshot.startDate} → ${snapshot.endDate}`,
     detail:
       `Window totals: ${report.totals.totalTokens.toLocaleString()} tokens ` +
-      `(${report.totals.promptTokens.toLocaleString()} prompt + ${report.totals.completionTokens.toLocaleString()} completion)` +
+      `(${report.totals.promptTokens.toLocaleString()} prompt + ${report.totals.completionTokens.toLocaleString()} completion` +
+      `${report.totals.cachedTokens ? `, ${report.totals.cachedTokens.toLocaleString()} cached` : ""})` +
       ` · ${report.totals.apiRequests.toLocaleString()} API requests · fetched ${snapshot.fetchedAt}`,
   };
   const allTime: vscode.QuickPickItem = {
@@ -411,13 +412,14 @@ function accountItems(account: AccountUsageService): vscode.QuickPickItem[] {
   const rows = accountModelRows(report).map((row): vscode.QuickPickItem => {
     const usage = `${compactTokens(row.totalTokens)} tokens`;
     const credits = row.credits !== undefined ? ` · ${formatCredits(row.credits)} credits` : "";
-    const percent = row.percent !== undefined ? ` · ${percentText(row.percent)}% of plan credits` : "";
+    const percent = row.percent !== undefined ? ` · ${formatPercent(row.percent)}% of plan credits` : "";
     const note = row.note ? ` · ${row.note}` : "";
     return {
       label: `  ${row.model}`,
       description: `${usage}${credits}${percent}${note}`,
       detail:
         `${row.promptTokens.toLocaleString()} prompt + ${row.completionTokens.toLocaleString()} completion` +
+        `${row.cachedTokens ? ` (${row.cachedTokens.toLocaleString()} cached)` : ""}` +
         ` · ${row.apiRequests.toLocaleString()} API requests this window`,
     };
   });
@@ -447,13 +449,19 @@ function creditsItems(credits: UsageCredits | undefined): vscode.QuickPickItem[]
   const detail = [
     credits.used === undefined ? undefined : `${formatCredits(credits.used)} used`,
     credits.remaining === undefined ? undefined : `${formatCredits(credits.remaining)} remaining`,
-    credits.periodEnd ? `renews ${credits.periodEnd}` : undefined,
+    credits.periodStart && credits.periodEnd
+      ? `${credits.periodStart} → ${credits.periodEnd}`
+      : credits.periodEnd
+        ? `renews ${credits.periodEnd}`
+        : undefined,
   ].filter((part): part is string => part !== undefined);
   const items: vscode.QuickPickItem[] = [
     {
-      label: "$(credit-card) Plan credits",
+      label: credits.frozen ? "$(warning) Plan credits (frozen)" : "$(credit-card) Plan credits",
       description: summary.join(" + "),
-      detail: detail.join(" · "),
+      detail: credits.frozen
+        ? `${detail.join(" · ")} · credit-billed requests are refused until the subscription is active again`
+        : detail.join(" · "),
     },
   ];
   if (credits.packCredits && credits.packExpiresAt) {
@@ -464,10 +472,6 @@ function creditsItems(credits: UsageCredits | undefined): vscode.QuickPickItem[]
     });
   }
   return items;
-}
-
-function percentText(value: number): string {
-  return Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1);
 }
 
 function errorMessage(error: unknown): string {

@@ -9,7 +9,7 @@ test("shows how each model is billed beside this extension's local-only usage", 
   assert.match(glm.description, /^Paid from plan credits/);
   assert.match(glm.description, /local usage: 250\.0K tokens/);
   assert.doesNotMatch(glm.description, /per month|per billing period/);
-  assert.match(glm.detail, /not account-wide usage or remaining quota/);
+  assert.match(glm.detail, /not account-wide usage or your credit balance/);
 });
 
 test("marks the larger models as paid from plan credits", () => {
@@ -71,4 +71,8 @@ test("never fabricates a percentage without a positive allowance", () => {
   assert.deepEqual(creditProgress(entries, Number.NaN), []);
   assert.equal(percentOf(5_000, 20_000), 25);
   assert.equal(percentOf(154, 20_000), 0.8); // one decimal, like NaN's credit amounts
+  assert.equal(percentOf(10, 0), 0);
+  assert.equal(percentOf(10, -5), 0);
+  assert.equal(percentOf(Number.POSITIVE_INFINITY, 20_000), 0);
+  assert.equal(percentOf(10, Number.NaN), 0);
 });

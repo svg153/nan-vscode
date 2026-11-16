@@ -119,6 +119,8 @@ Expected:
 
 - The status bar headline becomes `$(graph) NaN NN%`, the share of the plan's credit allowance used this period, read from `GET /v1/usage`.
 - The tooltip shows the served window (`start_date → end_date`), window totals, all-time totals with their cache timestamp, per-model rows, the plan-credit and credit-pack lines, and the API cutoff dates.
+- Window totals and per-model rows show the cached input tokens NaN reports (from 2026-11-11 onward) as a share of the prompt count, never added to the token total.
+- The plan-credit line ends with the billing period range (`period_start → period_end`) when the API reports one, or `renews <date>` otherwise; a frozen plan shows the frozen warning and the QuickPick label `$(warning) Plan credits (frozen)`.
 - Percentages appear only when the API reports a plan allowance and the model billed credits in the window. `qwen3.6` and `gemma4` say "Does not draw credits"; no percentage is fabricated.
 - A failed refresh keeps the previous snapshot and adds a "Last refresh failed" line; a 429 shows its `Retry-After` hint.
 - Automatic refreshes are throttled (60s between refreshes, 30 requests/minute limiter); a manual refresh bypasses the throttle.

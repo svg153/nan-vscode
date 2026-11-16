@@ -40,7 +40,7 @@ export function quotaSummaryItems(localUsage: ReadonlyMap<string, { requests: nu
       label: toDisplayMetadata(modelId).name,
       description: `${cap} · local usage: ${compactTokens(local.tokens)}`,
       detail: local.requests
-        ? `${local.requests} request(s) observed by this VS Code extension this session; not account-wide usage or remaining quota.`
+        ? `${local.requests} request(s) observed by this VS Code extension this session; not account-wide usage or your credit balance.`
         : "No requests observed by this VS Code extension this session.",
     };
   });
@@ -62,6 +62,9 @@ export interface CreditUsageProgress {
 
 /** One-decimal percentage, the precision NaN reports for credits. */
 export function percentOf(part: number, whole: number): number {
+  if (!Number.isFinite(part) || !Number.isFinite(whole) || whole <= 0) {
+    return 0;
+  }
   return Math.round((part / whole) * 1000) / 10;
 }
 

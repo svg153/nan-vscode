@@ -155,6 +155,7 @@ test("parses the credit billing fields NaN added for usage from 2026-11-10", asy
           ],
           totals: {
             prompt_tokens: 10,
+            cached_tokens: 4,
             completion_tokens: 5,
             total_tokens: 15,
             api_requests: 1,
@@ -163,6 +164,7 @@ test("parses the credit billing fields NaN added for usage from 2026-11-10", asy
               {
                 model: "kimi-k3.1-pro",
                 prompt_tokens: 10,
+                cached_tokens: 4,
                 completion_tokens: 5,
                 total_tokens: 15,
                 api_requests: 1,
@@ -171,12 +173,14 @@ test("parses the credit billing fields NaN added for usage from 2026-11-10", asy
             ],
           },
           credits: {
+            period_start: "2026-11-01",
             period_end: "2026-12-01",
             allowance: 7_000,
             used: 0.4,
             remaining: 6_999.6,
             pack_credits: 1_000,
             pack_expires_at: null,
+            frozen: true,
           },
         }),
       ),
@@ -184,13 +188,17 @@ test("parses the credit billing fields NaN added for usage from 2026-11-10", asy
   assert.equal(report.rows[0].credits, 0.4);
   assert.equal(report.rows[0].cachedTokens, 4);
   assert.equal(report.totals.credits, 0.4);
+  assert.equal(report.totals.cachedTokens, 4);
   assert.equal(report.totals.byModel[0].credits, 0.4);
+  assert.equal(report.totals.byModel[0].cachedTokens, 4);
+  assert.equal(report.credits?.periodStart, "2026-11-01");
   assert.equal(report.credits?.periodEnd, "2026-12-01");
   assert.equal(report.credits?.allowance, 7_000);
   assert.equal(report.credits?.used, 0.4);
   assert.equal(report.credits?.remaining, 6_999.6);
   assert.equal(report.credits?.packCredits, 1_000);
   assert.equal(report.credits?.packExpiresAt, undefined);
+  assert.equal(report.credits?.frozen, true);
 });
 
 test("treats a null credits block as absent and rejects a malformed one", async () => {
@@ -206,6 +214,37 @@ test("treats a null credits block as absent and rejects a malformed one", async 
       baseUrl: BASE_URL,
       apiKey: "k",
       fetchImpl: async () => json(reportPayload({ credits: { allowance: "lots" } })),
+    }),
+    (error: unknown) => error instanceof UsageApiError && error.kind === "malformed",
+  );
+  await assert.rejects(
+    fetchUsagePage({
+      baseUrl: BASE_URL,
+      apiKey: "k",
+      fetchImpl: async () => json(reportPayload({ credits: { frozen: "yes" } })),
+    }),
+    (error: unknown) => error instanceof UsageApiError && error.kind === "malformed",
+  );
+  await assert.rejects(
+    fetchUsagePage({
+      baseUrl: BASE_URL,
+      apiKey: "k",
+      fetchImpl: async () =>
+        json(
+          reportPayload({
+            data: [
+              {
+                date: "2026-09-17",
+                model: "mimo-v2.6-flash",
+                prompt_tokens: 100,
+                cached_tokens: 0.5,
+                completion_tokens: 50,
+                total_tokens: 150,
+                api_requests: 3,
+              },
+            ],
+          }),
+        ),
     }),
     (error: unknown) => error instanceof UsageApiError && error.kind === "malformed",
   );

@@ -143,6 +143,76 @@ test("tooltip omits the credits block on accounts that are not billed in credits
   assert.doesNotMatch(md, /% of plan credits/);
 });
 
+test("tooltip shows reported cached input tokens for the window and each model", () => {
+  const md = buildTooltipMarkdown({
+    snapshot: snapshot({
+      totals: {
+        promptTokens: 1_000,
+        cachedTokens: 400,
+        completionTokens: 2_000,
+        totalTokens: 3_000,
+        apiRequests: 7,
+        credits: 210,
+        byModel: [
+          {
+            model: "deepseek-v4-flash",
+            promptTokens: 1_000,
+            cachedTokens: 400,
+            completionTokens: 2_000,
+            totalTokens: 3_000,
+            apiRequests: 7,
+            credits: 210,
+          },
+        ],
+      },
+    }),
+    requests: 1,
+    promptTokens: 1_000,
+    completionTokens: 2_000,
+    quotaItems,
+    history: [],
+  });
+  assert.match(md, /Window totals: \*\*3[.,]?000 tokens\*\* \(1[.,]?000 prompt \+ 2[.,]?000 completion\), 400 of the prompt cached/);
+  assert.match(md, /deepseek-v4-flash: 3[.,]?000 tokens · 400 cached · 210 credits/);
+});
+
+test("tooltip omits cached input tokens when NaN does not report them", () => {
+  const md = buildTooltipMarkdown({
+    snapshot: snapshot(),
+    requests: 1,
+    promptTokens: 1_000,
+    completionTokens: 2_000,
+    quotaItems,
+    history: [],
+  });
+  assert.doesNotMatch(md, /of the prompt cached/);
+  assert.doesNotMatch(md, / tokens · .* cached/);
+  assert.doesNotMatch(md, /frozen/);
+});
+
+test("tooltip shows the credit period range and warns about frozen plan credits", () => {
+  const md = buildTooltipMarkdown({
+    snapshot: snapshot({
+      credits: {
+        periodStart: "2026-01-02",
+        periodEnd: "2026-02-01",
+        allowance: 7_000,
+        used: 210,
+        remaining: 6_790,
+        frozen: true,
+      },
+    }),
+    requests: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    quotaItems,
+    history: [],
+  });
+  assert.match(md, /Plan credits: allowance 7,000 · used 210 · remaining \*\*6,790\*\* · 2026-01-02 → 2026-02-01/);
+  assert.match(md, /Plan credits are frozen: credit-billed requests are refused/);
+  assert.doesNotMatch(md, /renews 2026-02-01/);
+});
+
 test("tooltip reports a failed refresh alongside the retained snapshot", () => {
   const md = buildTooltipMarkdown({
     snapshot: snapshot(),

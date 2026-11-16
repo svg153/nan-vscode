@@ -50,6 +50,12 @@ function creditsLines(credits: UsageCredits | undefined): string[] {
   if (!credits) {
     return [];
   }
+  const lines: string[] = [];
+  if (credits.frozen) {
+    lines.push(
+      "- $(warning) Plan credits are frozen: credit-billed requests are refused until the subscription is active again.\n",
+    );
+  }
   const parts: string[] = [];
   if (credits.allowance !== undefined) {
     parts.push(`allowance ${formatCredits(credits.allowance)}`);
@@ -60,11 +66,18 @@ function creditsLines(credits: UsageCredits | undefined): string[] {
   if (credits.remaining !== undefined) {
     parts.push(`remaining **${formatCredits(credits.remaining)}**`);
   }
-  if (!parts.length) {
-    return [];
+  const range =
+    credits.periodStart && credits.periodEnd
+      ? `${escapeMarkdown(credits.periodStart)} → ${escapeMarkdown(credits.periodEnd)}`
+      : credits.periodEnd
+        ? `renews ${escapeMarkdown(credits.periodEnd)}`
+        : undefined;
+  if (range) {
+    parts.push(range);
   }
-  const renews = credits.periodEnd ? ` · renews ${escapeMarkdown(credits.periodEnd)}` : "";
-  const lines = [`- Plan credits: ${parts.join(" · ")}${renews}\n`];
+  if (parts.length) {
+    lines.push(`- Plan credits: ${parts.join(" · ")}\n`);
+  }
   if (credits.packCredits) {
     const expires = credits.packExpiresAt ? ` until ${escapeMarkdown(credits.packExpiresAt)}` : "";
     lines.push(`- Credit pack: ${formatCredits(credits.packCredits)}${expires}\n`);
@@ -98,6 +111,7 @@ export function buildTooltipMarkdown(input: TooltipInput): string {
     lines.push(
       `- Window totals: **${report.totals.totalTokens.toLocaleString()} tokens** ` +
         `(${report.totals.promptTokens.toLocaleString()} prompt + ${report.totals.completionTokens.toLocaleString()} completion)` +
+        `${report.totals.cachedTokens ? `, ${report.totals.cachedTokens.toLocaleString()} of the prompt cached` : ""}` +
         ` · ${report.totals.apiRequests.toLocaleString()} API requests\n`,
     );
     lines.push(
@@ -113,7 +127,8 @@ export function buildTooltipMarkdown(input: TooltipInput): string {
           : row.note
             ? `${credits} · ${escapeMarkdown(row.note)}`
             : credits;
-      lines.push(`- ${escapeMarkdown(row.model)}: ${row.totalTokens.toLocaleString()} tokens${suffix}\n`);
+      const cached = row.cachedTokens ? ` · ${row.cachedTokens.toLocaleString()} cached` : "";
+      lines.push(`- ${escapeMarkdown(row.model)}: ${row.totalTokens.toLocaleString()} tokens${cached}${suffix}\n`);
     }
     lines.push(`- Daily API-request counts are reported from ${API_REQUESTS_CUTOFF_DATE} onward; earlier days count 0.\n`);
     lines.push(`- Credits are billed and reported from ${CREDITS_CUTOFF_DATE} onward; earlier days bill 0.\n`);

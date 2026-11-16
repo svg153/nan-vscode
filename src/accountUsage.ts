@@ -170,6 +170,8 @@ function monthStart(today: string): string {
 export interface AccountModelRow {
   readonly model: string;
   readonly promptTokens: number;
+  /** Cached input tokens in the window; part of promptTokens. */
+  readonly cachedTokens?: number;
   readonly completionTokens: number;
   readonly totalTokens: number;
   readonly apiRequests: number;
@@ -198,6 +200,7 @@ export function accountModelRows(report: UsageReport): AccountModelRow[] {
       return {
         model: entry.model,
         promptTokens: entry.promptTokens,
+        cachedTokens: entry.cachedTokens,
         completionTokens: entry.completionTokens,
         totalTokens: entry.totalTokens,
         apiRequests: entry.apiRequests,

@@ -54,7 +54,7 @@ The marker `AUTONOMOUS-DECISION` is used for decisions made during implementatio
 
 **Research:** Account-wide usage currently comes from a separate cloud endpoint authenticated with the NaN web session, while inference uses the API key. Coupling the extension to browser cookies or `nan-cli` would make installation less self-contained and expand credential handling.
 
-**Decision (MVP):** The MVP shows local VS Code session usage from streamed API usage metadata. Account-wide quota is deferred until there is a clean key-authenticated API or a separately reviewed account-login feature.
+**Decision (MVP):** The MVP shows local VS Code session usage from streamed API usage metadata. Account-wide usage is deferred until there is a clean key-authenticated API or a separately reviewed account-login feature.
 
 **Update — account-wide usage shipped:** NaN Builders now exposes a key-authenticated `GET /v1/usage` endpoint, so the deferral above is resolved without cookies or a second login flow. `src/accountUsage.ts` implements it:
 

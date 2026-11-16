@@ -10,6 +10,7 @@ interface ModelUsage {
   readonly model: string;
   readonly totalTokens: number;
   readonly credits?: number;
+  readonly cachedTokens?: number;
 }
 
 function reportPayload(
@@ -34,6 +35,7 @@ function reportPayload(
         total_tokens: entry.totalTokens,
         api_requests: 0,
         credits: entry.credits,
+        cached_tokens: entry.cachedTokens,
       })),
     },
     credits,
@@ -250,6 +252,22 @@ test("accountModelRows does not invent a percentage without plan credits", () =>
   assert.equal(rows[0].percent, undefined);
   assert.equal(rows[0].note, undefined);
   assert.equal(rows[0].credits, 3);
+});
+
+test("accountModelRows passes reported cached input tokens through and leaves them unset when absent", () => {
+  const rows = accountModelRows(
+    reportWith([
+      { model: "gemma4", totalTokens: 900, cachedTokens: 300 },
+      { model: "deepseek-v4-flash", totalTokens: 12, credits: 1 },
+    ]),
+  );
+  assert.deepEqual(
+    rows.map((row) => [row.model, row.cachedTokens]),
+    [
+      ["gemma4", 300],
+      ["deepseek-v4-flash", undefined],
+    ],
+  );
 });
 
 test("accountHeadline reports plan-credit usage and never fabricates one", () => {

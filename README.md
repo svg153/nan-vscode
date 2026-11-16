@@ -110,6 +110,8 @@ Account-wide usage details:
 - The window is the current calendar month (UTC), clamped client-side to the API's maximum of 90 days, with at most 500 rows per page and up to 3 pages merged.
 - NaN bills metered models from one credits pool (7,000 credits on Inference, 20,000 on Premium, then optional credit packs), so per-model percentages are each model's share of that single allowance. Unmetered models (qwen3.6, gemma4, embeddings, rerank, audio, image) show **Does not draw credits**; a model with no billed credits in the window shows a note instead of a fabricated percentage.
 - The headline percentage is the plan-credit usage for the current billing period, never a sum across models.
+- Cached input tokens reported by NaN are shown for the window and for each model; they are already part of the prompt count, so they are never added to the token total.
+- While `credits.frozen` is true the subscription is inactive and credit-billed requests are refused, so the tooltip and QuickPick flag the plan credits as frozen instead of implying the allowance is spendable.
 - Credits are billed and reported from 2026-11-10 onward, cached input tokens from 2026-11-11, and `api_requests` counts from 2026-09-02; earlier dates report 0.
 - Usage refreshes are throttled client-side (60s between automatic refreshes, plus a 30 requests/minute limiter). A 429 response surfaces its `Retry-After` hint.
 - Errors never clear the last good snapshot; they are reported in the tooltip and command output.
