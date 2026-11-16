@@ -50,7 +50,9 @@ jobs:
           ' > preview-version.txt
           cat preview-version.txt
       - name: Package preview VSIX
-        run: npx vsce package --no-dependencies --pre-release
+        # Fixed asset name so --clobber replaces the previous preview build
+        # instead of accumulating stale VSIXes on the rolling release.
+        run: npx vsce package --no-dependencies --pre-release --out nan-builders-vscode-preview.vsix
       - name: Attach to rolling preview release
         shell: bash
         env:

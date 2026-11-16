@@ -107,9 +107,13 @@ your approval. If you later want low-risk churn removed, set
    - `marketplace` environment: add your user under **Required reviewers**,
      and store the `VSCE_PAT` secret there (scoped to the `svg153`
      publisher).
-   - Set the `COPILOT_GITHUB_TOKEN` / `GH_AW_AGENT_TOKEN` repository secrets
-     only if `gh aw doctor` reports they are needed for `assign-to-agent` on
-     your plan.
+   - `COPILOT_GITHUB_TOKEN` is **required**: both compiled agentic locks
+     validate it during activation and use it for Copilot inference, so
+     without it even feature discovery fails (it is not just an optional
+     assignment credential).
+   - `GH_AW_AGENT_TOKEN` (the assignment PAT used by `assign-to-agent`) is
+     optional: set it only if `gh aw doctor` reports it is needed for your
+     plan.
 7. **Marketplace variable cleanup**: the old auto-publish flag
    `MARKETPLACE_PUBLISH_ENABLED` is no longer used; delete it if set.
 8. **Dependency guards**: add `dependency-review` (and keep `test`) to the
@@ -130,7 +134,7 @@ your approval. If you later want low-risk churn removed, set
 - **Validate a build locally**: download the VSIX from the
   [`preview` release](https://github.com/svg153/nan-vscode/releases/tag/preview)
   and install it via *Extensions: Install from VSIX…* (or
-  `code --install-extension nan-builders-vscode-x.y.z-preview.N.vsix`).
+  `code --install-extension nan-builders-vscode-preview.vsix`).
   Preview versions sort below the next stable, so the Marketplace update
   channel is never polluted and stable installs still win.
 - **Promote to Marketplace** (the simple manual gate):
