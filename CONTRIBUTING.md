@@ -20,7 +20,7 @@ npm run package
 
 For interactive extension work, open the repository in VS Code and press `F5` to launch an Extension Development Host.
 
-CI publishes a lockfile-based dependency audit report with package, severity, dependency type, and installed path. Existing advisories are non-blocking while maintainers triage the baseline; see [`docs/DEPENDENCY-AUDIT.md`](docs/DEPENDENCY-AUDIT.md) before proposing a blocking policy.
+CI publishes a lockfile-based dependency audit report with package, severity, dependency type, and installed path. Existing advisories are non-blocking while maintainers triage the baseline; see [`docs/DEPENDENCY-AUDIT.md`](docs/DEPENDENCY-AUDIT.md). Separately, the Dependency review workflow blocks PRs that **introduce new** vulnerable versions, and dependency updates themselves arrive through Renovate with supply-chain cooldowns (3/7/14 days by semver bump) plus npm's `min-release-age` guard on lockfile regeneration — see [`docs/agentic-pipeline.md`](docs/agentic-pipeline.md#dependency-updates--supply-chain).
 
 Create a branch named `codex/<short-topic>` and keep commits small. Commit messages and PR titles must follow [Conventional Commits](https://www.conventionalcommits.org/); Husky validates local commits and CI validates the complete PR.
 

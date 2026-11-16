@@ -26,6 +26,8 @@ graph LR
 | --- | --- | --- |
 | Feature discovery agent | `.github/workflows/feature-scout.md` | Daily (fuzzy) + manual |
 | Copilot hand-off agent | `.github/workflows/copilot-triage.md` | Issue labeled `agent:ready` |
+| Dependency updates | Renovate (`renovate.json`) + npm `min-release-age` (`.npmrc`) | Cooldown-gated, see below |
+| Advisory gate on PRs | `.github/workflows/dependency-review.yml` | Every pull request |
 | Preview channel | `.github/workflows/release.yml` (`preview` job) | Every merge to `main` |
 | Stable promotion | `.github/workflows/publish-stable.yml` | Manual dispatch + environment approval |
 
@@ -41,6 +43,43 @@ graph LR
   tests and launches a real VS Code Insiders integration host
   (`scripts/run-insiders-integration.cjs`), and `npm run package` proves the
   VSIX builds.
+
+## Dependency updates & supply chain
+
+Renovate (Mend app, `app/renovate`) is the single version-update bot for npm
+and GitHub Actions. `.github/dependabot.yml` was removed to avoid two bots
+filing competing bump PRs. Three layers keep brand-new (possibly malicious)
+releases out of the codebase:
+
+1. **Renovate cooldowns** (`renovate.json`, via `security:minimumReleaseAgeNpm`
+   + rules): update PRs only appear once the release is **3 days** old (patch),
+   **7 days** (minor, and GitHub Actions bumps), or **14 days** (major).
+   Renovate marks pending updates with a "pending" status check instead of
+   opening the PR early.
+2. **npm install guard** (`.npmrc` `min-release-age=3`): even for manual
+   `npm install` / lockfile refreshes — including transitive dependencies
+   Renovate can't see — npm refuses versions younger than 3 days. `npm ci`
+   (CI) installs the vetted lockfile unchanged, so builds never break.
+   One-off exceptions: `npm config set min-release-age-exclude '["pkg"]'`.
+   Requires npm >= 11.10 (Node 26 bundles 11.20; older npm ignores the key).
+3. **Advisory gate** (`.github/workflows/dependency-review.yml`): every PR is
+   diffed against `main` and fails if it *introduces* a package version with a
+   known GitHub Advisory (severity >= moderate). The pre-existing audit
+   baseline stays non-blocking per [`DEPENDENCY-AUDIT.md`](DEPENDENCY-AUDIT.md).
+
+**Security fast lane (no delay):** Renovate's `:enableVulnerabilityAlerts`
+(from `config:recommended`) raises fix PRs as soon as an advisory exists —
+the cooldown explicitly does not apply to `vulnerabilityAlert` updates. For
+transitive-only advisories you can additionally enable *Dependabot security
+updates* in *Settings → Code security*; unlike version updates these open
+immediately and don't conflict with Renovate.
+
+**Nothing auto-merges today:** Renovate's `automerge` is off in
+`config:recommended`, so every bump PR still needs the normal CI gauntlet
+(`npm run check` with the VS Code Insiders smoke test + dependency review) and
+your approval. If you later want low-risk churn removed, set
+`"automerge": true` + `"automergeType": "branch"` for patch/minor in a
+`packageRule` — the cooldowns and the advisory gate are what make that safe.
 
 ## One-time repository setup (owner only)
 
@@ -73,6 +112,11 @@ graph LR
      your plan.
 7. **Marketplace variable cleanup**: the old auto-publish flag
    `MARKETPLACE_PUBLISH_ENABLED` is no longer used; delete it if set.
+8. **Dependency guards**: add `dependency-review` (and keep `test`) to the
+   required status checks on `main`. Optionally enable *Dependabot security
+   updates* (Settings → Code security and analysis) for transitive advisory
+   fixes; keep *Dependabot version updates* off so Renovate stays the only
+   bump bot.
 
 ## Daily operation
 
