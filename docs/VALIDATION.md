@@ -45,10 +45,10 @@ Expected: the extension is loaded in an isolated Insiders profile, discovers the
 2. Enter an invalid key and confirm validation reports a clear authentication error.
 3. Enter a valid `sk-...` key.
 4. Confirm the key is not written to `settings.json`, `chatLanguageModels.json`, the workspace, or extension logs.
-5. Compare the picker with `GET /v1/models` for the same key. Every known chat ID returned there should be offered: `deepseek-v4-flash`, `glm5.3-flash`, `qwen3.8-flash`, `mimo-v2.6-flash`, `gemma4`, `qwen3.6`, and, for premium keys, `glm5.3`. Models absent from `/v1/models` must stay absent from the picker.
+5. Compare the picker with `GET /v1/models` for the same key. Every known chat ID returned there should be offered: `deepseek-v4-flash`, `deepseek-v4-pro`, `glm5.3-flash`, `qwen3.8-flash`, `qwen3.8-max`, `mimo-v2.6-flash`, `kimi-k3.1-pro`, `hy4`, `gemma4`, `qwen3.6`, and, for keys with access, `glm5.3`. Models absent from `/v1/models` must stay absent from the picker.
 6. Confirm known non-chat IDs such as embeddings, rerank, audio, and image generation are not exposed as chat models.
 
-Important: treat `/v1/models` as the definitive API-key-filtered list. A model must not be exposed just because it exists in the local metadata catalog. In particular, `glm5.3` should only appear for keys whose `/v1/models` response contains it.
+Important: treat `/v1/models` as the definitive API-key-filtered list. A model must not be exposed just because it exists in the local metadata catalog. In particular, the larger models (`glm5.3`, `kimi-k3.1-pro`, `qwen3.8-max`, `deepseek-v4-pro`, `hy4`) should only appear for keys whose `/v1/models` response contains them.
 
 ## Basic streaming chat
 
@@ -109,7 +109,7 @@ Expected: the HTTP stream is aborted and no further text or tool calls appear.
 
 Make at least one request from VS Code.
 
-Expected: the status bar shows `NaN` and local token usage when the API returns streaming usage metadata. The tooltip must state that this is local VS Code session usage, not the account-wide NaN quota.
+Expected: the status bar shows `NaN` and local token usage when the API returns streaming usage metadata. The tooltip must state that this is local VS Code session usage, not the account-wide NaN credit balance.
 
 ## Account-wide usage API
 
@@ -117,23 +117,24 @@ With a valid key configured, run **NaN Builders: Show Usage** and refresh.
 
 Expected:
 
-- The status bar headline becomes `$(graph) NaN NN%`, the most restricted monthly quota percentage in use this month, read from `GET /v1/usage`.
-- The tooltip shows the served window (`start_date → end_date`), window totals, all-time totals with their cache timestamp, per-model rows, and the daily API-request cutoff date.
-- Percentages appear only for models with a documented fixed monthly counter. `qwen3.6` and `gemma4` show "No token counter"; `glm5.3` shows its billing-period quota note. No percentage is fabricated.
+- The status bar headline becomes `$(graph) NaN NN%`, the share of the plan's credit allowance used this period, read from `GET /v1/usage`.
+- The tooltip shows the served window (`start_date → end_date`), window totals, all-time totals with their cache timestamp, per-model rows, the plan-credit and credit-pack lines, and the API cutoff dates.
+- Percentages appear only when the API reports a plan allowance and the model billed credits in the window. `qwen3.6` and `gemma4` say "Does not draw credits"; no percentage is fabricated.
 - A failed refresh keeps the previous snapshot and adds a "Last refresh failed" line; a 429 shows its `Retry-After` hint.
 - Automatic refreshes are throttled (60s between refreshes, 30 requests/minute limiter); a manual refresh bypasses the throttle.
 - A stalled usage refresh times out after 30 seconds, aborts the request, keeps the last good snapshot, and clears its loading state.
 - Without a key, the status bar and command fall back to local session usage and the tooltip says account usage is unavailable.
 
-## Quotas
+## Credits and billing posture
 
-Open **NaN Builders: Show Usage** and inspect the quota rows.
+Open **NaN Builders: Show Usage** and inspect the model rows.
 
 Expected:
 
-- Every known chat model appears with its documented cap (`3B per month`, `2B per month`, `500M per month`, `1B per month`, or the `glm5.3` billing-period/rolling note).
-- Models with no published limit say "No published quota limit"; models with no token counter say "No token counter".
-- Local usage per model is labelled as observed by this VS Code extension this session, never as account-wide usage or remaining quota.
+- Every known chat model lists its billing posture (`Paid from plan credits` or `Does not draw credits` for unmetered models) plus the local usage this session observed.
+- Models with no documented allowance say `Billed in credits; no documented allowance`.
+- Per-model credit usage counts only requests billed in credits (from 2026-11-10 onward); cached input tokens are only reported from 2026-11-11.
+- Local usage per model is labelled as observed by this VS Code extension this session, never as account-wide usage or remaining balance.
 
 ## Local usage history
 

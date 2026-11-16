@@ -6,7 +6,8 @@ import { NanInlineCompletionProvider } from "./inlineCompletionProvider";
 import { NanChatModelProvider } from "./provider";
 import { AccountUsageService, accountModelRows } from "./accountUsage";
 import { compactTokens } from "./quotaCatalog";
-import { API_REQUESTS_CUTOFF_DATE } from "./usageApi";
+import { API_REQUESTS_CUTOFF_DATE, CACHED_TOKENS_CUTOFF_DATE, CREDITS_CUTOFF_DATE, type UsageCredits } from "./usageApi";
+import { formatCredits } from "./usagePresentation";
 import { UsageTracker } from "./usageTracker";
 
 function buildQuickPickItems(
@@ -164,7 +165,7 @@ export function activate(context: vscode.ExtensionContext): {
     vscode.commands.registerCommand("nanBuilders.showUsage", () => {
       const picker = vscode.window.createQuickPick<vscode.QuickPickItem>();
       picker.title = "NaN Builders usage";
-      picker.placeholder = "Account-wide usage, published quotas, and this extension's local history.";
+      picker.placeholder = "Account-wide credit usage, billing posture, and this extension's local history.";
       picker.matchOnDescription = true;
       picker.matchOnDetail = true;
       picker.items = buildQuickPickItems(account, usage);
@@ -409,22 +410,60 @@ function accountItems(account: AccountUsageService): vscode.QuickPickItem[] {
   };
   const rows = accountModelRows(report).map((row): vscode.QuickPickItem => {
     const usage = `${compactTokens(row.totalTokens)} tokens`;
-    const percent = row.percent !== undefined ? ` · ${percentText(row.percent)}% of monthly quota` : "";
+    const credits = row.credits !== undefined ? ` · ${formatCredits(row.credits)} credits` : "";
+    const percent = row.percent !== undefined ? ` · ${percentText(row.percent)}% of plan credits` : "";
     const note = row.note ? ` · ${row.note}` : "";
     return {
       label: `  ${row.model}`,
-      description: `${usage}${percent}${note}`,
+      description: `${usage}${credits}${percent}${note}`,
       detail:
         `${row.promptTokens.toLocaleString()} prompt + ${row.completionTokens.toLocaleString()} completion` +
         ` · ${row.apiRequests.toLocaleString()} API requests this window`,
     };
   });
+  const creditRows = creditsItems(report.credits);
   const cutoff: vscode.QuickPickItem = {
     label: "Daily API-request counts start",
     description: API_REQUESTS_CUTOFF_DATE,
     detail: "Earlier days in the window report 0 requests.",
   };
-  return [header, allTime, ...rows, cutoff, ...errorRow];
+  const creditsCutoff: vscode.QuickPickItem = {
+    label: "Credits billing starts",
+    description: CREDITS_CUTOFF_DATE,
+    detail: `Per-model credits are reported from this date; cached input tokens from ${CACHED_TOKENS_CUTOFF_DATE}.`,
+  };
+  return [header, allTime, ...creditRows, ...rows, cutoff, creditsCutoff, ...errorRow];
+}
+
+/** Plan-credit rows for the account QuickPick; empty on accounts not billed in credits. */
+function creditsItems(credits: UsageCredits | undefined): vscode.QuickPickItem[] {
+  if (!credits || (credits.allowance === undefined && credits.used === undefined)) {
+    return [];
+  }
+  const summary = [
+    credits.allowance === undefined ? undefined : `${formatCredits(credits.allowance)} allowance`,
+    credits.packCredits ? `${formatCredits(credits.packCredits)} pack` : undefined,
+  ].filter((part): part is string => part !== undefined);
+  const detail = [
+    credits.used === undefined ? undefined : `${formatCredits(credits.used)} used`,
+    credits.remaining === undefined ? undefined : `${formatCredits(credits.remaining)} remaining`,
+    credits.periodEnd ? `renews ${credits.periodEnd}` : undefined,
+  ].filter((part): part is string => part !== undefined);
+  const items: vscode.QuickPickItem[] = [
+    {
+      label: "$(credit-card) Plan credits",
+      description: summary.join(" + "),
+      detail: detail.join(" · "),
+    },
+  ];
+  if (credits.packCredits && credits.packExpiresAt) {
+    items.push({
+      label: "Credit pack expiry",
+      description: credits.packExpiresAt,
+      detail: "Pack credits are consumed after the plan allowance runs out.",
+    });
+  }
+  return items;
 }
 
 function percentText(value: number): string {

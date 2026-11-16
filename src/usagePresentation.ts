@@ -1,7 +1,12 @@
 import { accountModelRows, type AccountUsageError, type AccountUsageSnapshot } from "./accountUsage";
 import type { QuotaSummaryItem } from "./quotaCatalog";
 import { sanitizeUpstreamText } from "./text";
-import { API_REQUESTS_CUTOFF_DATE } from "./usageApi";
+import {
+  API_REQUESTS_CUTOFF_DATE,
+  CACHED_TOKENS_CUTOFF_DATE,
+  CREDITS_CUTOFF_DATE,
+  type UsageCredits,
+} from "./usageApi";
 import type { DailyUsage } from "./usageHistory";
 
 export interface TooltipInput {
@@ -29,14 +34,52 @@ export function formatPercent(value: number): string {
   return Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1);
 }
 
+/** Credits are billed with one decimal, so keep that precision without trailing zeros. */
+export function formatCredits(value: number): string {
+  const rounded = Number.isInteger(value) ? String(value) : value.toFixed(1);
+  const [whole, fraction] = rounded.split(".");
+  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return fraction ? `${grouped}.${fraction}` : grouped;
+}
+
+/**
+ * Plan credits for the current billing period. The field is additive and only
+ * present on credit-billed accounts, so it yields no lines when absent.
+ */
+function creditsLines(credits: UsageCredits | undefined): string[] {
+  if (!credits) {
+    return [];
+  }
+  const parts: string[] = [];
+  if (credits.allowance !== undefined) {
+    parts.push(`allowance ${formatCredits(credits.allowance)}`);
+  }
+  if (credits.used !== undefined) {
+    parts.push(`used ${formatCredits(credits.used)}`);
+  }
+  if (credits.remaining !== undefined) {
+    parts.push(`remaining **${formatCredits(credits.remaining)}**`);
+  }
+  if (!parts.length) {
+    return [];
+  }
+  const renews = credits.periodEnd ? ` · renews ${escapeMarkdown(credits.periodEnd)}` : "";
+  const lines = [`- Plan credits: ${parts.join(" · ")}${renews}\n`];
+  if (credits.packCredits) {
+    const expires = credits.packExpiresAt ? ` until ${escapeMarkdown(credits.packExpiresAt)}` : "";
+    lines.push(`- Credit pack: ${formatCredits(credits.packCredits)}${expires}\n`);
+  }
+  return lines;
+}
+
 export function escapeMarkdown(text: string): string {
   return sanitizeUpstreamText(text, Number.MAX_SAFE_INTEGER).replace(/([\\`*_[\]()])/g, "\\$1");
 }
 
 /**
- * Status-bar label: the most-restricted account-wide quota percentage when a
- * snapshot exists, otherwise the compact local session total, otherwise the
- * documented initial state.
+ * Status-bar label: the share of plan credits used this period when a snapshot
+ * exists, otherwise the compact local session total, otherwise the documented
+ * initial state.
  */
 export function statusBarText(headlinePercent: number | undefined, localTotal: number): string {
   if (headlinePercent !== undefined) {
@@ -61,16 +104,20 @@ export function buildTooltipMarkdown(input: TooltipInput): string {
       `- All-time: ${report.allTime.totalTokens.toLocaleString()} tokens · ` +
         `${report.allTime.apiRequests.toLocaleString()} API requests (cached at ${escapeMarkdown(report.allTime.cachedAt)})\n`,
     );
+    lines.push(...creditsLines(report.credits));
     for (const row of accountModelRows(report)) {
+      const credits = row.credits !== undefined ? ` · ${formatCredits(row.credits)} credits` : "";
       const suffix =
         row.percent !== undefined
-          ? ` · **${formatPercent(row.percent)}%** of monthly quota`
+          ? `${credits} · **${formatPercent(row.percent)}%** of plan credits`
           : row.note
-            ? ` · ${row.note}`
-            : "";
+            ? `${credits} · ${escapeMarkdown(row.note)}`
+            : credits;
       lines.push(`- ${escapeMarkdown(row.model)}: ${row.totalTokens.toLocaleString()} tokens${suffix}\n`);
     }
     lines.push(`- Daily API-request counts are reported from ${API_REQUESTS_CUTOFF_DATE} onward; earlier days count 0.\n`);
+    lines.push(`- Credits are billed and reported from ${CREDITS_CUTOFF_DATE} onward; earlier days bill 0.\n`);
+    lines.push(`- Cached input tokens are reported from ${CACHED_TOKENS_CUTOFF_DATE} onward.\n`);
     lines.push(`- Last refresh: ${snapshot.fetchedAt}\n`);
     if (error) {
       lines.push(

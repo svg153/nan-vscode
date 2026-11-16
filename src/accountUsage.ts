@@ -5,7 +5,7 @@ import {
   clampUsageWindow,
   fetchUsageReport,
 } from "./usageApi";
-import { monthlyQuotaProgress, NO_TOKEN_COUNTER_MODELS, nonMonthlyQuotaNote } from "./quotaCatalog";
+import { creditProgress, percentOf, unmeteredNote } from "./quotaCatalog";
 import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
 
 export interface AccountUsageConfig {
@@ -173,23 +173,27 @@ export interface AccountModelRow {
   readonly completionTokens: number;
   readonly totalTokens: number;
   readonly apiRequests: number;
-  /** Monthly fixed-counter % (1 decimal) when NaN publishes one; undefined means "do not fabricate %". */
+  /** Credits billed on this model in the window; undefined when the row carries none. */
+  readonly credits?: number;
+  /** Share of the plan's credit allowance used by this model (1 decimal); undefined means "do not fabricate %". */
   readonly percent?: number;
-  /** Quota note when no monthly % applies, e.g. "No token counter" or a billing-period quota. */
+  /** Note when no % applies, e.g. "Does not draw credits" or "No credits billed in this window". */
   readonly note?: string;
 }
 
-/** Per-model rows for a usage report, sorted by total tokens desc, with % only where documented. */
+/** Per-model rows for a usage report, sorted by total tokens desc, with % of plan credits where documented. */
 export function accountModelRows(report: UsageReport): AccountModelRow[] {
+  const allowance = report.credits?.allowance;
   const progress = new Map(
-    monthlyQuotaProgress(
-      report.totals.byModel.map((entry) => ({ model: entry.model, totalTokens: entry.totalTokens })),
+    creditProgress(
+      report.totals.byModel.map((entry) => ({ model: entry.model, credits: entry.credits ?? 0 })),
+      allowance,
     ).map((entry) => [entry.model, entry.percent]),
   );
   return [...report.totals.byModel]
-      // oxlint-disable-next-line unicorn/no-array-sort
-      .sort((a, b) => b.totalTokens - a.totalTokens)
-      .map((entry) => {
+    // oxlint-disable-next-line unicorn/no-array-sort
+    .sort((a, b) => b.totalTokens - a.totalTokens)
+    .map((entry) => {
       const percent = progress.get(entry.model);
       return {
         model: entry.model,
@@ -197,25 +201,28 @@ export function accountModelRows(report: UsageReport): AccountModelRow[] {
         completionTokens: entry.completionTokens,
         totalTokens: entry.totalTokens,
         apiRequests: entry.apiRequests,
+        credits: entry.credits,
         percent,
-        note: percent === undefined ? quotaNote(entry.model) : undefined,
+        note: percent === undefined ? creditsNote(entry.model, entry.credits) : undefined,
       };
     });
 }
 
-/** Most-restricted monthly quota: the status-bar headline percent, or undefined when none applies. */
+/** Plan-credits headline: the share of the allowance used this period, or undefined when not billed in credits. */
 export function accountHeadline(report: UsageReport): { model: string; percent: number } | undefined {
-  const [top] = monthlyQuotaProgress(
-    report.totals.byModel.map((entry) => ({ model: entry.model, totalTokens: entry.totalTokens })),
-  );
-  return top ? { model: top.model, percent: top.percent } : undefined;
+  const { allowance, used } = report.credits ?? {};
+  if (allowance === undefined || !Number.isFinite(allowance) || allowance <= 0 || used === undefined) {
+    return undefined;
+  }
+  return { model: "credits", percent: percentOf(used, allowance) };
 }
 
-function quotaNote(model: string): string | undefined {
-  if (NO_TOKEN_COUNTER_MODELS.has(model)) {
-    return "No token counter";
+function creditsNote(model: string, credits: number | undefined): string | undefined {
+  const unmetered = unmeteredNote(model);
+  if (unmetered) {
+    return unmetered;
   }
-  return nonMonthlyQuotaNote(model);
+  return credits === undefined || credits <= 0 ? "No credits billed in this window" : undefined;
 }
 
 function utcToday(): string {

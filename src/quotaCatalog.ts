@@ -1,22 +1,19 @@
 import { knownChatModelIds, toDisplayMetadata } from "./modelCatalog";
 
-export interface ModelQuotaLimit {
-  readonly tokens: number;
-  readonly period: "month" | "billing period";
-  readonly rollingTokens?: number;
-  readonly rollingHours?: number;
-}
-
-const MODEL_QUOTA_LIMITS: Readonly<Record<string, ModelQuotaLimit>> = {
-  "deepseek-v4-flash": { tokens: 3_000_000_000, period: "month" },
-  "glm5.3-flash": { tokens: 2_000_000_000, period: "month" },
-  "qwen3.8-flash": { tokens: 500_000_000, period: "month" },
-  "mimo-v2.6-flash": { tokens: 1_000_000_000, period: "month" },
-  "glm5.3": { tokens: 3_000_000_000, period: "billing period", rollingTokens: 400_000_000, rollingHours: 4 },
-};
-
-/** Models where NaN Builders documents no fixed token-counter allowance; never show a fabricated % for them. */
-export const NO_TOKEN_COUNTER_MODELS: ReadonlySet<string> = new Set(["qwen3.6", "gemma4"]);
+/**
+ * Models NaN documents as "no counter": they do not draw credits, so no
+ * percentage of the plan allowance can be computed for them.
+ */
+export const UNMETERED_MODELS: ReadonlySet<string> = new Set([
+  "gemma4",
+  "qwen3.6",
+  "qwen3-embedding",
+  "rerank",
+  "kokoro",
+  "whisper",
+  "flux-2-klein",
+  "qwen-image-2.1",
+]);
 
 export interface QuotaSummaryItem {
   readonly label: string;
@@ -24,28 +21,20 @@ export interface QuotaSummaryItem {
   readonly detail: string;
 }
 
-/** Describes a quota that is NOT a fixed monthly counter (billing period / rolling window), or undefined. */
-export function nonMonthlyQuotaNote(modelId: string): string | undefined {
-  const limit = MODEL_QUOTA_LIMITS[modelId];
-  if (!limit || limit.period === "month") {
-    return undefined;
-  }
-  return `${compactTokens(limit.tokens)} per ${limit.period}` +
-    `${limit.rollingTokens ? ` · ${compactTokens(limit.rollingTokens)} per rolling ${limit.rollingHours}h` : ""} (not a fixed monthly counter)`;
+/** Note for a model that draws no credits, or undefined when it is metered. */
+export function unmeteredNote(modelId: string): string | undefined {
+  return UNMETERED_MODELS.has(modelId) ? "Does not draw credits" : undefined;
 }
 
 export function quotaSummaryItems(localUsage: ReadonlyMap<string, { requests: number; tokens: number }>): QuotaSummaryItem[] {
-  const modelIds = new Set([...knownChatModelIds(), ...localUsage.keys()]);
+  const known = new Set(knownChatModelIds());
+  const modelIds = new Set([...known, ...localUsage.keys()]);
   // oxlint-disable-next-line unicorn/no-array-sort
   return [...modelIds].sort().map((modelId: string) => {
-    const limit = MODEL_QUOTA_LIMITS[modelId];
     const local = localUsage.get(modelId) ?? { requests: 0, tokens: 0 };
-    const cap = limit
-      ? `${compactTokens(limit.tokens)} per ${limit.period}` +
-        `${limit.rollingTokens ? ` · ${compactTokens(limit.rollingTokens)} per rolling ${limit.rollingHours}h` : ""}`
-      : NO_TOKEN_COUNTER_MODELS.has(modelId)
-        ? "No token counter"
-        : "No published quota limit";
+    const cap =
+      unmeteredNote(modelId) ??
+      (known.has(modelId) ? "Paid from plan credits" : "Billed in credits; no documented allowance");
 
     return {
       label: toDisplayMetadata(modelId).name,
@@ -57,39 +46,49 @@ export function quotaSummaryItems(localUsage: ReadonlyMap<string, { requests: nu
   });
 }
 
-export interface QuotaUsageEntry {
+export interface CreditUsageEntry {
   readonly model: string;
-  /** total_tokens for the account usage window (totals.by_model from GET /v1/usage). */
-  readonly totalTokens: number;
+  /** Credits billed on this model in the window (`credits` on GET /v1/usage). */
+  readonly credits: number;
 }
 
-export interface QuotaUsageProgress {
+export interface CreditUsageProgress {
   readonly model: string;
-  /** used / published monthly quota, in percent with one decimal. */
+  /** credits / plan allowance, in percent with one decimal. */
   readonly percent: number;
-  readonly usedTokens: number;
-  readonly limitTokens: number;
+  readonly usedCredits: number;
+  readonly allowance: number;
+}
+
+/** One-decimal percentage, the precision NaN reports for credits. */
+export function percentOf(part: number, whole: number): number {
+  return Math.round((part / whole) * 1000) / 10;
 }
 
 /**
- * Compute usage percentages ONLY for models with a documented fixed monthly token
- * counter (deepseek-v4-flash, glm5.3-flash, qwen3.8-flash, mimo-v2.6-flash).
- * glm5.3 (billing period / rolling 4h) and models without a published allowance are
- * excluded so the UI never fabricates a percentage the API does not define.
- * Sorted descending: the first entry is the most-restricted quota (status-bar headline).
+ * Percentage of the plan's credit allowance used by each model.
+ * NaN bills every metered model from one credits pool (7,000 on Inference,
+ * 20,000 on Premium, then credit packs); models that draw no credits and models
+ * without credits in the window are excluded so no percentage is fabricated.
+ * Sorted descending: the first entry is the largest consumer.
  */
-export function monthlyQuotaProgress(entries: readonly QuotaUsageEntry[]): QuotaUsageProgress[] {
-  const progress: QuotaUsageProgress[] = [];
+export function creditProgress(
+  entries: readonly CreditUsageEntry[],
+  allowance: number | undefined,
+): CreditUsageProgress[] {
+  if (allowance === undefined || !Number.isFinite(allowance) || allowance <= 0) {
+    return [];
+  }
+  const progress: CreditUsageProgress[] = [];
   for (const entry of entries) {
-    const limit = MODEL_QUOTA_LIMITS[entry.model];
-    if (!limit || limit.period !== "month") {
+    if (UNMETERED_MODELS.has(entry.model) || !Number.isFinite(entry.credits) || entry.credits <= 0) {
       continue;
     }
     progress.push({
       model: entry.model,
-      percent: Math.round((entry.totalTokens / limit.tokens) * 1000) / 10,
-      usedTokens: entry.totalTokens,
-      limitTokens: limit.tokens,
+      percent: percentOf(entry.credits, allowance),
+      usedCredits: entry.credits,
+      allowance,
     });
   }
   // oxlint-disable-next-line unicorn/no-array-sort

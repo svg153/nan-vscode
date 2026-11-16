@@ -408,7 +408,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       const known = getKnownModel(discovered.id);
     return {
       id: metadata.id,
-      name: metadata.premium ? `${metadata.name} (premium)` : metadata.name,
+      name: metadata.largerModel ? `${metadata.name} (larger model)` : metadata.name,
       family: metadata.id,
       version: "1",
       maxInputTokens: Math.max(1, metadata.contextWindow - metadata.maxOutputTokens),

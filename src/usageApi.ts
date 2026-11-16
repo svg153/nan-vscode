@@ -23,6 +23,10 @@ export const USAGE_LIMIT_DEFAULT = 100;
 export const RATE_LIMIT_REQUESTS_PER_MINUTE = 30;
 /** Daily api_requests counts are only available from this date onward (older days report 0). */
 export const API_REQUESTS_CUTOFF_DATE = "2026-09-02";
+/** Credits are only billed and reported from this date onward (older rows report 0). */
+export const CREDITS_CUTOFF_DATE = "2026-11-10";
+/** Per-model cached input tokens are only reported from this date onward. */
+export const CACHED_TOKENS_CUTOFF_DATE = "2026-11-11";
 
 export type UsageApiErrorKind =
   | "unauthorized"
@@ -61,6 +65,10 @@ export interface UsageRow {
   readonly completionTokens: number;
   readonly totalTokens: number;
   readonly apiRequests: number;
+  /** Credits billed that day on that model, reported from CREDITS_CUTOFF_DATE onward. */
+  readonly credits?: number;
+  /** Input tokens served from the prompt cache, reported from CACHED_TOKENS_CUTOFF_DATE onward. */
+  readonly cachedTokens?: number;
 }
 
 export interface UsageModelTotals {
@@ -69,6 +77,8 @@ export interface UsageModelTotals {
   readonly completionTokens: number;
   readonly totalTokens: number;
   readonly apiRequests: number;
+  /** Credits billed on this model in the window. */
+  readonly credits?: number;
 }
 
 export interface UsageTotals {
@@ -76,7 +86,18 @@ export interface UsageTotals {
   readonly completionTokens: number;
   readonly totalTokens: number;
   readonly apiRequests: number;
+  readonly credits?: number;
   readonly byModel: readonly UsageModelTotals[];
+}
+
+/** Plan credits for the current billing period; absent when the account is not billed in credits. */
+export interface UsageCredits {
+  readonly periodEnd?: string;
+  readonly allowance?: number;
+  readonly used?: number;
+  readonly remaining?: number;
+  readonly packCredits?: number;
+  readonly packExpiresAt?: string;
 }
 
 export interface UsageAllTime {
@@ -95,6 +116,8 @@ export interface UsageReport {
   readonly rows: readonly UsageRow[];
   /** Full-window totals, independent of pagination. */
   readonly totals: UsageTotals;
+  /** Plan credits for the current billing period, whatever window was requested. */
+  readonly credits?: UsageCredits;
   readonly allTime: UsageAllTime;
   readonly hasMore: boolean;
   readonly nextCursor?: string;
@@ -261,6 +284,7 @@ export function parseUsageReport(payload: unknown): UsageReport {
     endDate,
     rows,
     totals,
+    credits: parseCredits(root.credits),
     allTime,
     hasMore,
     nextCursor: nextCursor === null ? undefined : nextCursor,
@@ -393,6 +417,23 @@ function parseRow(value: unknown, index: number): UsageRow {
     completionTokens: asCount(row.completion_tokens, `data[${index}].completion_tokens`),
     totalTokens: asCount(row.total_tokens, `data[${index}].total_tokens`),
     apiRequests: asCount(row.api_requests, `data[${index}].api_requests`),
+    credits: asOptionalAmount(row.credits, `data[${index}].credits`),
+    cachedTokens: asOptionalAmount(row.cached_tokens, `data[${index}].cached_tokens`),
+  };
+}
+
+function parseCredits(value: unknown): UsageCredits | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const credits = asObject(value, "credits");
+  return {
+    periodEnd: asOptionalString(credits.period_end, "credits.period_end"),
+    allowance: asOptionalAmount(credits.allowance, "credits.allowance"),
+    used: asOptionalAmount(credits.used, "credits.used"),
+    remaining: asOptionalAmount(credits.remaining, "credits.remaining"),
+    packCredits: asOptionalAmount(credits.pack_credits, "credits.pack_credits"),
+    packExpiresAt: asOptionalString(credits.pack_expires_at, "credits.pack_expires_at"),
   };
 }
 
@@ -407,6 +448,7 @@ function parseTotals(value: unknown, field: string): UsageTotals {
     completionTokens: asCount(totals.completion_tokens, `${field}.completion_tokens`),
     totalTokens: asCount(totals.total_tokens, `${field}.total_tokens`),
     apiRequests: asCount(totals.api_requests, `${field}.api_requests`),
+    credits: asOptionalAmount(totals.credits, `${field}.credits`),
     byModel: byModelRaw.map((entry, index) => {
       const model = asObject(entry, `${field}.by_model[${index}]`);
       return {
@@ -415,6 +457,7 @@ function parseTotals(value: unknown, field: string): UsageTotals {
         completionTokens: asCount(model.completion_tokens, `${field}.by_model[${index}].completion_tokens`),
         totalTokens: asCount(model.total_tokens, `${field}.by_model[${index}].total_tokens`),
         apiRequests: asCount(model.api_requests, `${field}.by_model[${index}].api_requests`),
+        credits: asOptionalAmount(model.credits, `${field}.by_model[${index}].credits`),
       };
     }),
   };
@@ -458,6 +501,24 @@ function asCount(value: unknown, field: string): number {
     throw malformed(`${field} is not a non-negative integer`);
   }
   return value;
+}
+
+/** Field added after the original contract: absent on older responses, so it is optional. */
+function asOptionalAmount(value: unknown, field: string): number | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw malformed(`${field} is not a non-negative number`);
+  }
+  return value;
+}
+
+function asOptionalString(value: unknown, field: string): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  return asString(value, field);
 }
 
 function malformed(detail: string): UsageApiError {

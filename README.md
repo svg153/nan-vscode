@@ -22,7 +22,7 @@ Use [NaN Builders](https://nan.builders/) models in VS Code Chat and Agent mode 
 - Image inputs for catalogued vision-capable models.
 - Opt-in inline ghost-text completions through the legacy `POST /v1/completions` endpoint when `nanBuilders.completionModel` is set ([issue #8](https://github.com/svg153/nan-vscode/issues/8)).
 - Local status-bar usage when the API returns OpenAI-compatible streaming usage metadata.
-- Account-wide monthly quota in the status bar via `GET /v1/usage` when an API key is configured, with local-session usage as fallback.
+- Account-wide credit usage in the status bar via `GET /v1/usage` when an API key is configured, with local-session usage as fallback.
 - Conservative handling of newly discovered model IDs that are not yet in the local metadata catalog.
 - Remote-workspace support: the provider prefers the workspace extension host and falls back to the local UI host.
 
@@ -74,7 +74,7 @@ Available settings:
 | --- | --- | --- |
 | `nanBuilders.apiBaseUrl` | `https://api.nan.builders/v1` | OpenAI-compatible API base URL. Change only for development or trusted compatible servers. |
 | `nanBuilders.modelCacheSeconds` | `300` | Model discovery cache duration. |
-| `nanBuilders.showStatusBar` | `true` | Show usage in the status bar: account-wide monthly quota % when an API key is configured, otherwise local session usage. |
+| `nanBuilders.showStatusBar` | `true` | Show usage in the status bar: plan-credit usage % when an API key is configured, otherwise local session usage. |
 | `nanBuilders.includeUnknownModels` | `false` | Expose unknown IDs without tool or vision metadata. |
 | `nanBuilders.completionModel` | `""` | Model ID for opt-in inline ghost-text completions; empty disables the feature and no completion request is sent. |
 
@@ -98,19 +98,19 @@ NaN chat models with compatible function tool calling are marked as supporting t
 
 Only model IDs returned by `/v1/models` are exposed. Known non-chat endpoints are removed. Unknown IDs are hidden by default so an embedding, image, or audio endpoint is not accidentally advertised as a chat model. Set `nanBuilders.includeUnknownModels` to `true` to expose unknown IDs conservatively while local metadata catches up.
 
-VS Code needs context-window, output-budget, image, and tool-calling metadata, while `/v1/models` is the authorization and discovery source. The extension therefore keeps a small local capability catalog and never exposes a catalogued model unless the API key can access it. Refresh the catalog when NaN changes model capabilities.
+VS Code needs context-window, output-budget, image, and tool-calling metadata, while `/v1/models` is the authorization and discovery source. The extension therefore keeps a small local capability catalog and never exposes a catalogued model unless the API key can access it. Refresh the catalog when NaN changes model capabilities. NaN's larger models (`kimi-k3.1-pro`, `qwen3.8-max`, `deepseek-v4-pro`, `hy4`, `glm5.3`) are appended with a `(larger model)` suffix in the picker because they bill more credits per token; `clef` is a decision endpoint on `POST /v1/systemone` and is never offered as a chat model.
 
 ## Usage and limitations
 
-With an API key configured, the status bar shows the account-wide monthly quota for the most restricted model you have actually used this month (`$(graph) NaN NN%`), read from `GET /v1/usage`. **NaN Builders: Show Usage** shows per-model monthly usage for the current month with a refresh button, the local session history, provider management, and the NaN dashboard. Without an API key, the status bar and command fall back to local session usage.
+With an API key configured, the status bar shows how much of the plan's credit allowance you have used this period (`$(graph) NaN NN%`), read from `GET /v1/usage`. **NaN Builders: Show Usage** shows the credit allowance, per-model credit usage for the current month, the local session history, provider management, and the NaN dashboard. Without an API key, the status bar and command fall back to local session usage.
 
 Account-wide usage details:
 
 - Requests are authenticated with the stored API key, never browser cookies or `nan-cli` sessions.
 - The window is the current calendar month (UTC), clamped client-side to the API's maximum of 90 days, with at most 500 rows per page and up to 3 pages merged.
-- Percentage labels come only from published monthly token caps (for example deepseek-v4-flash 3B, mimo-v2.6-flash 1B, glm5.3-flash 2B, qwen3.8-flash 500M). Models without a published monthly counter (qwen3.6, gemma4) show **No token counter**; glm5.3 shows its published caps but never a fabricated percentage.
-- The headline percentage is the most restricted monthly quota in use, never a sum across models.
-- `api_requests` counts are only meaningful from 2026-09-02, the API's data cutoff.
+- NaN bills metered models from one credits pool (7,000 credits on Inference, 20,000 on Premium, then optional credit packs), so per-model percentages are each model's share of that single allowance. Unmetered models (qwen3.6, gemma4, embeddings, rerank, audio, image) show **Does not draw credits**; a model with no billed credits in the window shows a note instead of a fabricated percentage.
+- The headline percentage is the plan-credit usage for the current billing period, never a sum across models.
+- Credits are billed and reported from 2026-11-10 onward, cached input tokens from 2026-11-11, and `api_requests` counts from 2026-09-02; earlier dates report 0.
 - Usage refreshes are throttled client-side (60s between automatic refreshes, plus a 30 requests/minute limiter). A 429 response surfaces its `Retry-After` hint.
 - Errors never clear the last good snapshot; they are reported in the tooltip and command output.
 - The shipped account-usage decision and its remaining deferrals are recorded in [Implementation decisions](https://github.com/svg153/nan-vscode/blob/main/docs/DECISIONS.md); the manual checks live in the [Validation checklist](https://github.com/svg153/nan-vscode/blob/main/docs/VALIDATION.md).

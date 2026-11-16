@@ -134,6 +134,83 @@ test("parses a valid usage report into camelCase", async () => {
   assert.equal(report.nextCursor, undefined);
 });
 
+test("parses the credit billing fields NaN added for usage from 2026-11-10", async () => {
+  const report = await fetchUsagePage({
+    baseUrl: BASE_URL,
+    apiKey: "k",
+    fetchImpl: async () =>
+      json(
+        reportPayload({
+          data: [
+            {
+              date: "2026-11-12",
+              model: "kimi-k3.1-pro",
+              prompt_tokens: 10,
+              completion_tokens: 5,
+              total_tokens: 15,
+              api_requests: 1,
+              credits: 0.4,
+              cached_tokens: 4,
+            },
+          ],
+          totals: {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            api_requests: 1,
+            credits: 0.4,
+            by_model: [
+              {
+                model: "kimi-k3.1-pro",
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+                api_requests: 1,
+                credits: 0.4,
+              },
+            ],
+          },
+          credits: {
+            period_end: "2026-12-01",
+            allowance: 7_000,
+            used: 0.4,
+            remaining: 6_999.6,
+            pack_credits: 1_000,
+            pack_expires_at: null,
+          },
+        }),
+      ),
+  });
+  assert.equal(report.rows[0].credits, 0.4);
+  assert.equal(report.rows[0].cachedTokens, 4);
+  assert.equal(report.totals.credits, 0.4);
+  assert.equal(report.totals.byModel[0].credits, 0.4);
+  assert.equal(report.credits?.periodEnd, "2026-12-01");
+  assert.equal(report.credits?.allowance, 7_000);
+  assert.equal(report.credits?.used, 0.4);
+  assert.equal(report.credits?.remaining, 6_999.6);
+  assert.equal(report.credits?.packCredits, 1_000);
+  assert.equal(report.credits?.packExpiresAt, undefined);
+});
+
+test("treats a null credits block as absent and rejects a malformed one", async () => {
+  const report = await fetchUsagePage({
+    baseUrl: BASE_URL,
+    apiKey: "k",
+    fetchImpl: async () => json(reportPayload({ credits: null })),
+  });
+  assert.equal(report.credits, undefined);
+  assert.equal(report.rows[0].credits, undefined);
+  await assert.rejects(
+    fetchUsagePage({
+      baseUrl: BASE_URL,
+      apiKey: "k",
+      fetchImpl: async () => json(reportPayload({ credits: { allowance: "lots" } })),
+    }),
+    (error: unknown) => error instanceof UsageApiError && error.kind === "malformed",
+  );
+});
+
 test("rejects a usage page that advertises more rows without a cursor", async () => {
   await assert.rejects(
     fetchUsagePage({
