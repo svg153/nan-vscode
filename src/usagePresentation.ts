@@ -1,7 +1,13 @@
-import { accountModelRows, type AccountUsageError, type AccountUsageSnapshot } from "./accountUsage";
+import { accountModelRows, windowCredits, type AccountUsageError, type AccountUsageSnapshot } from "./accountUsage";
+import { NAN_API_KEYS_URL, NAN_BILLING_URL, NAN_MODELS_DOCS_URL, NAN_TOKEN_PRICING_URL } from "./constants";
 import type { QuotaSummaryItem } from "./quotaCatalog";
 import { sanitizeUpstreamText } from "./text";
-import { API_REQUESTS_CUTOFF_DATE } from "./usageApi";
+import {
+  API_REQUESTS_CUTOFF_DATE,
+  CACHED_TOKENS_CUTOFF_DATE,
+  CREDITS_CUTOFF_DATE,
+  type UsageCredits,
+} from "./usageApi";
 import type { DailyUsage } from "./usageHistory";
 
 export interface TooltipInput {
@@ -29,16 +35,135 @@ export function formatPercent(value: number): string {
   return Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1);
 }
 
+/** Credits are billed with one decimal, so keep that precision without trailing zeros. */
+export function formatCredits(value: number): string {
+  const rounded = Number.isInteger(value) ? String(value) : value.toFixed(1);
+  const [whole, fraction] = rounded.split(".");
+  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return fraction ? `${grouped}.${fraction}` : grouped;
+}
+
+const DAY_MS = 86_400_000;
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Human-readable credit-pack expiry. NaN sends `pack_expires_at` as YYYY-MM-DD
+ * (or a full ISO timestamp); values that do not parse are returned verbatim so
+ * no date is fabricated.
+ */
+export function describePackExpiry(expiresAt: string, now: Date = new Date()): string {
+  const date = expiresAt.slice(0, 10);
+  const target = Date.parse(`${date}T00:00:00Z`);
+  if (!ISO_DATE.test(date) || Number.isNaN(target)) {
+    return expiresAt;
+  }
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const days = Math.round((target - today) / DAY_MS);
+  if (days < 0) {
+    return `expired on ${date}`;
+  }
+  if (days === 0) {
+    return `expires today (${date})`;
+  }
+  if (days === 1) {
+    return `expires tomorrow (${date})`;
+  }
+  return `expires ${date} (in ${days} days)`;
+}
+
+export interface UsageLink {
+  readonly label: string;
+  readonly description: string;
+  readonly url: string;
+}
+
+/** External actions offered from Show Usage, in display order. */
+export function usageLinks(): readonly UsageLink[] {
+  return [
+    {
+      label: "Open API keys",
+      description: "NaN Cloud Settings -> API Keys",
+      url: NAN_API_KEYS_URL,
+    },
+    {
+      label: "Open model docs",
+      description: "Model catalogue, limits and per-1M-token prices",
+      url: NAN_MODELS_DOCS_URL,
+    },
+    {
+      label: "Open billing & credit packs",
+      description: "Plan allowance, credit packs and invoices",
+      url: NAN_BILLING_URL,
+    },
+    {
+      label: "Open credits per 1M tokens",
+      description: "What each model costs from the shared credits pool",
+      url: NAN_TOKEN_PRICING_URL,
+    },
+  ];
+}
+
+/**
+ * Plan credits for the current billing period. The field is additive and only
+ * present on credit-billed accounts, so it yields no lines when absent.
+ */
+function creditsLines(credits: UsageCredits | undefined): string[] {
+  if (!credits) {
+    return [];
+  }
+  const lines: string[] = [];
+  if (credits.frozen) {
+    lines.push(
+      "- $(warning) Plan credits are frozen: credit-billed requests are refused until the subscription is active again.\n",
+    );
+  }
+  const parts: string[] = [];
+  if (credits.allowance !== undefined) {
+    parts.push(`allowance ${formatCredits(credits.allowance)}`);
+  }
+  if (credits.used !== undefined) {
+    parts.push(`used ${formatCredits(credits.used)}`);
+  }
+  if (credits.remaining !== undefined) {
+    parts.push(`remaining **${formatCredits(credits.remaining)}**`);
+  }
+  const range =
+    credits.periodStart && credits.periodEnd
+      ? `${escapeMarkdown(credits.periodStart)} → ${escapeMarkdown(credits.periodEnd)}`
+      : credits.periodEnd
+        ? `renews ${escapeMarkdown(credits.periodEnd)}`
+        : undefined;
+  if (range) {
+    parts.push(range);
+  }
+  if (parts.length) {
+    lines.push(`- Plan credits: ${parts.join(" · ")}\n`);
+  }
+  if (credits.packCredits) {
+    const expires = credits.packExpiresAt ? ` · ${escapeMarkdown(describePackExpiry(credits.packExpiresAt))}` : "";
+    lines.push(`- Credit pack: ${formatCredits(credits.packCredits)} credits${expires}\n`);
+  }
+  return lines;
+}
+
 export function escapeMarkdown(text: string): string {
   return sanitizeUpstreamText(text, Number.MAX_SAFE_INTEGER).replace(/([\\`*_[\]()])/g, "\\$1");
 }
 
 /**
- * Status-bar label: the most-restricted account-wide quota percentage when a
- * snapshot exists, otherwise the compact local session total, otherwise the
- * documented initial state.
+ * Status-bar label: the share of plan credits used this period when a snapshot
+ * exists, otherwise the compact local session total, otherwise the documented
+ * initial state. A frozen credit pool always wins: requests are being refused,
+ * so the percentage is no longer the actionable information.
  */
-export function statusBarText(headlinePercent: number | undefined, localTotal: number): string {
+export function statusBarText(
+  headlinePercent: number | undefined,
+  localTotal: number,
+  frozen = false,
+): string {
+  if (headlinePercent !== undefined && frozen) {
+    return "$(warning) NaN frozen";
+  }
   if (headlinePercent !== undefined) {
     return `$(graph) NaN ${formatPercent(headlinePercent)}%`;
   }
@@ -55,22 +180,35 @@ export function buildTooltipMarkdown(input: TooltipInput): string {
     lines.push(
       `- Window totals: **${report.totals.totalTokens.toLocaleString()} tokens** ` +
         `(${report.totals.promptTokens.toLocaleString()} prompt + ${report.totals.completionTokens.toLocaleString()} completion)` +
+        `${report.totals.cachedTokens ? `, ${report.totals.cachedTokens.toLocaleString()} of the prompt cached` : ""}` +
         ` · ${report.totals.apiRequests.toLocaleString()} API requests\n`,
     );
     lines.push(
       `- All-time: ${report.allTime.totalTokens.toLocaleString()} tokens · ` +
         `${report.allTime.apiRequests.toLocaleString()} API requests (cached at ${escapeMarkdown(report.allTime.cachedAt)})\n`,
     );
+    lines.push(...creditsLines(report.credits));
+    const windowCredit = windowCredits(report);
+    if (windowCredit !== undefined) {
+      lines.push(
+        `- Window credits: **${formatCredits(windowCredit)}** — approximate calendar-month sum of the per-model ` +
+          `rows; the billing-period used total can differ by tenths.\n`,
+      );
+    }
     for (const row of accountModelRows(report)) {
+      const credits = row.credits !== undefined ? ` · ${formatCredits(row.credits)} credits` : "";
       const suffix =
         row.percent !== undefined
-          ? ` · **${formatPercent(row.percent)}%** of monthly quota`
+          ? `${credits} · **${formatPercent(row.percent)}%** of plan credits`
           : row.note
-            ? ` · ${row.note}`
-            : "";
-      lines.push(`- ${escapeMarkdown(row.model)}: ${row.totalTokens.toLocaleString()} tokens${suffix}\n`);
+            ? `${credits} · ${escapeMarkdown(row.note)}`
+            : credits;
+      const cached = row.cachedTokens ? ` · ${row.cachedTokens.toLocaleString()} cached` : "";
+      lines.push(`- ${escapeMarkdown(row.model)}: ${row.totalTokens.toLocaleString()} tokens${cached}${suffix}\n`);
     }
     lines.push(`- Daily API-request counts are reported from ${API_REQUESTS_CUTOFF_DATE} onward; earlier days count 0.\n`);
+    lines.push(`- Credits are billed and reported from ${CREDITS_CUTOFF_DATE} onward; earlier days bill 0.\n`);
+    lines.push(`- Cached input tokens are reported from ${CACHED_TOKENS_CUTOFF_DATE} onward.\n`);
     lines.push(`- Last refresh: ${snapshot.fetchedAt}\n`);
     if (error) {
       lines.push(

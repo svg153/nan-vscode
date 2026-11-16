@@ -99,11 +99,11 @@ export class UsageTracker implements vscode.Disposable {
       "",
       ...this.quotaItems().map((item) => `${item.label}: ${item.description}`),
       "",
-      "Local usage is only what this VS Code extension observed this session; it is not account-wide usage or remaining quota.",
+      "Local usage is only what this VS Code extension observed this session; it is not account-wide usage or your credit balance.",
       "Local history (last 30 days):",
       formatHistory(this.history.slice(0, 20)),
       "",
-      "This is local session usage only, not your account-wide NaN quota.",
+      "This is local session usage only, not your account-wide NaN credits.",
     ].join("\n");
   }
 
@@ -115,13 +115,17 @@ export class UsageTracker implements vscode.Disposable {
   private render(): void {
     const headline = this.accountHeadlinePercent();
     const localTotal = this.promptTokens + this.completionTokens;
-    this.item.text = statusBarText(headline, localTotal);
+    this.item.text = statusBarText(headline, localTotal, this.accountCreditsFrozen());
     this.item.tooltip = this.buildTooltip();
   }
 
   private accountHeadlinePercent(): number | undefined {
     const snapshot = this.account?.snapshot;
     return snapshot ? accountHeadline(snapshot.report)?.percent : undefined;
+  }
+
+  private accountCreditsFrozen(): boolean {
+    return this.account?.snapshot?.report.credits?.frozen === true;
   }
 
   private buildTooltip(): vscode.MarkdownString {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  billingDescription,
   filterDiscoveredModelIds,
   filterDiscoveredModels,
   knownChatModelIds,
@@ -51,9 +52,26 @@ test("catalog follows NaN cluster changes: MiMo V2.5 removed, Qwen 3.8 Flash at 
   assert.deepEqual(filterDiscoveredModelIds(["qwen-image-2.1"], true), []);
 });
 
-test("premium model metadata is available when the API key reports it", () => {
+test("larger-model metadata is available when the API key reports it", () => {
   assert.ok(knownChatModelIds().includes("glm5.3"));
-  assert.equal(toDisplayMetadata("glm5.3").premium, true);
+  assert.equal(toDisplayMetadata("glm5.3").largerModel, true);
+});
+
+test("catalog covers the larger models NaN added on 2026-11-10", () => {
+  for (const id of ["kimi-k3.1-pro", "qwen3.8-max", "deepseek-v4-pro", "hy4"]) {
+    const model = toDisplayMetadata(id);
+    assert.ok(knownChatModelIds().includes(id), `${id} is a known chat model`);
+    assert.equal(model.largerModel, true, id);
+    assert.equal(model.contextWindow, 1_048_576, id);
+    assert.equal(model.toolCalling, true, id);
+  }
+  assert.equal(toDisplayMetadata("deepseek-v4-pro").imageInput, false);
+  assert.equal(toDisplayMetadata("kimi-k3.1-pro").reasoningEffortValues?.length, 0);
+  assert.deepEqual(toDisplayMetadata("qwen3.8-max").reasoningEffortValues, ["none", "low", "medium", "high", "max"]);
+});
+
+test("clef is a decision endpoint, not a chat model", () => {
+  assert.deepEqual(filterDiscoveredModelIds(["clef", "glm5.3-flash"], true), ["glm5.3-flash"]);
 });
 
 test("Mimo V2.6 Flash uses documented limits and supported chat capabilities", () => {
@@ -222,4 +240,12 @@ test("toDisplayMetadata respects catalog toolCalling=false for XML-only models",
   };
   const metadata = toDisplayMetadata("qwen3.8-flash", api);
   assert.equal(metadata.toolCalling, false, "catalog should override API for XML-only models");
+});
+
+test("billingDescription distinguishes larger models from the flash tier", () => {
+  const flash = toDisplayMetadata("deepseek-v4-flash");
+  const larger = toDisplayMetadata("kimi-k3.1-pro");
+  assert.match(billingDescription(flash), /^Billing: credits from the account-wide pool/);
+  assert.match(billingDescription(larger), /larger model/);
+  assert.match(billingDescription(larger), /uses credits faster/);
 });

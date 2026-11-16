@@ -5,7 +5,8 @@ export interface ModelMetadata {
   readonly maxOutputTokens: number;
   readonly imageInput: boolean;
   readonly toolCalling: boolean;
-  readonly premium?: boolean;
+  /** NaN's "larger model" tier: paid from the same credits pool but costing more per token. */
+  readonly largerModel?: boolean;
   /** Empty means the model accepts the parameter but manages reasoning depth itself. */
   readonly reasoningEffortValues?: readonly string[];
 }
@@ -92,8 +93,49 @@ const CHAT_MODELS: readonly ModelMetadata[] = [
     maxOutputTokens: 32_768,
     imageInput: false,
     toolCalling: true,
-    premium: true,
+    largerModel: true,
     reasoningEffortValues: ["low", "medium", "high", "max"],
+  },
+  {
+    id: "kimi-k3.1-pro",
+    name: "Kimi K3.1 Pro",
+    contextWindow: 1_048_576,
+    // NaN documents a 1M-token answer; a smaller cap keeps input headroom in the picker.
+    maxOutputTokens: 131_072,
+    imageInput: true,
+    toolCalling: true,
+    largerModel: true,
+    reasoningEffortValues: [],
+  },
+  {
+    id: "qwen3.8-max",
+    name: "Qwen 3.8 Max",
+    contextWindow: 1_048_576,
+    maxOutputTokens: 131_072,
+    imageInput: true,
+    toolCalling: true,
+    largerModel: true,
+    reasoningEffortValues: ["none", "low", "medium", "high", "max"],
+  },
+  {
+    id: "deepseek-v4-pro",
+    name: "DeepSeek V4 Pro",
+    contextWindow: 1_048_576,
+    maxOutputTokens: 393_216,
+    imageInput: false,
+    toolCalling: true,
+    largerModel: true,
+    reasoningEffortValues: [],
+  },
+  {
+    id: "hy4",
+    name: "Tencent Hunyuan 4",
+    contextWindow: 1_048_576,
+    maxOutputTokens: 65_536,
+    imageInput: true,
+    toolCalling: true,
+    largerModel: true,
+    reasoningEffortValues: ["none", "minimal", "low", "medium", "high", "max"],
   },
 ] as const;
 
@@ -104,6 +146,8 @@ const KNOWN_NON_CHAT_IDS = new Set([
   "whisper",
   "flux-2-klein",
   "qwen-image-2.1",
+  // Decision model served by POST /v1/systemone, not a chat completion model.
+  "clef",
 ]);
 
 /**
@@ -211,6 +255,16 @@ export function reasoningDescription(model: ModelMetadata): string {
     return "Reasoning depth is model-managed; effort levels are not user-adjustable.";
   }
   return `Documented reasoning effort levels: ${values.join(", ")}. Configurable via the nanBuilders.defaultReasoningEffort setting.`;
+}
+
+/**
+ * Billing line for the model picker. Every NaN chat model draws from the same
+ * credits pool; the larger ones cost more per token and empty it faster.
+ */
+export function billingDescription(model: ModelMetadata): string {
+  return model.largerModel
+    ? "Billing: credits, larger model - it costs more per token than the flash models, so it uses credits faster."
+    : "Billing: credits from the account-wide pool shared with every other NaN model.";
 }
 
 export function isKnownNonChatModel(id: string): boolean {
@@ -354,7 +408,7 @@ export function toDisplayMetadata(id: string, api?: DiscoveredModel): ModelMetad
     maxOutputTokens,
     imageInput,
     toolCalling,
-    premium: known?.premium,
+    largerModel: known?.largerModel,
     reasoningEffortValues: known?.reasoningEffortValues,
   };
 }
