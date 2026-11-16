@@ -36,6 +36,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   readonly onDidChangeLanguageModelChatInformation = this.changedEmitter.event;
 
   private cache: CachedModels | undefined;
+  private nativeBaseUrl: string | undefined;
 
   constructor(
     private readonly context: Pick<vscode.ExtensionContext, "secrets">,
@@ -48,13 +49,32 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   }
 
   async provideLanguageModelChatInformation(
-    options: { silent: boolean },
+    options: { silent: boolean; configuration?: Record<string, unknown> },
     token: vscode.CancellationToken,
   ): Promise<vscode.LanguageModelChatInformation[]> {
-    diagnostic("models.provide.begin", { silent: options.silent, cancelled: token.isCancellationRequested });
+    diagnostic("models.provide.begin", {
+      silent: options.silent,
+      cancelled: token.isCancellationRequested,
+      hasProviderConfiguration: options.configuration !== undefined,
+    });
     if (token.isCancellationRequested) {
       diagnostic("models.provide.cancelled");
       return [];
+    }
+
+    // VS Code >= 1.146 passes the native "Manage Models" provider configuration
+    // (declared in contributes.languageModelChatProviders.configuration) on every
+    // call. Adopt it into the storage the rest of the extension already reads.
+    const nativeApiKey = providerConfigString(options.configuration, "apiKey");
+    const nativeBaseUrl = providerConfigString(options.configuration, "apiBaseUrl");
+    if (nativeBaseUrl !== this.nativeBaseUrl) {
+      this.nativeBaseUrl = nativeBaseUrl;
+      this.cache = undefined;
+    }
+    if (nativeApiKey && nativeApiKey !== (await this.context.secrets.get(SECRET_API_KEY))) {
+      await this.context.secrets.store(SECRET_API_KEY, nativeApiKey);
+      this.cache = undefined;
+      this.changedEmitter.fire();
     }
 
     const cached = this.cache;
@@ -63,7 +83,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       return cached.models;
     }
 
-    const apiKey = await this.getApiKey(options.silent);
+    const apiKey = nativeApiKey ?? (await this.getApiKey(options.silent));
     if (!apiKey) {
       diagnostic("models.provide.noKey", { silent: options.silent });
       return [];
@@ -109,7 +129,8 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   ): Promise<void> {
     const startedAt = Date.now();
     diagnostic("chat.begin", { modelId: model.id, messageCount: messages.length, toolCount: options.tools?.length ?? 0 });
-    const apiKey = await this.getApiKey(false);
+    const modelConfiguration = (options as { modelConfiguration?: Record<string, unknown> }).modelConfiguration;
+    const apiKey = providerConfigString(modelConfiguration, "apiKey") ?? (await this.getApiKey(false));
     if (!apiKey) {
       diagnostic("chat.noKey", { modelId: model.id });
       throw new Error("NaN Builders API key is not configured. Run 'NaN Builders: Manage Provider'.");
@@ -391,10 +412,12 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   }
 
   private apiBaseUrl(): string {
-    return vscode.workspace
-      .getConfiguration("nanBuilders")
-      .get<string>("apiBaseUrl", DEFAULT_API_BASE_URL)
-      .replace(/\/+$/, "");
+    return (
+      this.nativeBaseUrl ??
+      vscode.workspace
+        .getConfiguration("nanBuilders")
+        .get<string>("apiBaseUrl", DEFAULT_API_BASE_URL)
+    ).replace(/\/+$/, "");
   }
 
   private userAgent(): string {
@@ -426,6 +449,16 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       },
     };
   }
+}
+
+/** Reads a non-empty trimmed string from the native provider `configuration` payload. */
+function providerConfigString(configuration: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = configuration?.[key];
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
 }
 
 function cancellationSignal(token: vscode.CancellationToken): { signal: AbortSignal; dispose: () => void } {

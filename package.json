@@ -47,7 +47,26 @@
       {
         "vendor": "nan-builders",
         "displayName": "NaN Builders",
-        "managementCommand": "nanBuilders.manage"
+        "icon": "./media/icon.png",
+        "managementCommand": "nanBuilders.manage",
+        "configuration": {
+          "type": "object",
+          "title": "NaN Builders",
+          "properties": {
+            "apiKey": {
+              "type": "string",
+              "title": "API Key",
+              "markdownDescription": "NaN Builders API key. Stored securely; leave empty to keep the key set via **NaN Builders: Manage Provider**.",
+              "secret": true
+            },
+            "apiBaseUrl": {
+              "type": "string",
+              "title": "API Base URL",
+              "markdownDescription": "OpenAI-compatible base URL. Leave empty to use the `nanBuilders.apiBaseUrl` setting.",
+              "pattern": "^https?://"
+            }
+          }
+        }
       }
     ],
     "commands": [

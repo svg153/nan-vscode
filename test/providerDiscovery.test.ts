@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import test from "node:test";
 import type * as vscode from "vscode";
+import { SECRET_API_KEY } from "../src/constants";
 import { MAX_ERROR_RESPONSE_BYTES, MAX_JSON_RESPONSE_BYTES, ResponseTooLargeError } from "../src/responseBody";
 import { MAX_SSE_LINE_CHARS, StreamLimitError } from "../src/openai/stream";
 
@@ -327,6 +328,84 @@ test("chat finalization emits a multibyte character split across response chunks
     harness.provider.dispose();
     globalThis.fetch = originalFetch;
     globalThis.TextDecoder = originalTextDecoder;
+  }
+});
+
+test("native provider configuration overrides the stored key and settings for discovery and chat", async () => {
+  const originalFetch = globalThis.fetch;
+  const storedSecrets = new Map<string, string>();
+  const secrets: vscode.SecretStorage = {
+    keys: async () => [...storedSecrets.keys()],
+    get: async (key) => storedSecrets.get(key),
+    store: async (key, value) => {
+      storedSecrets.set(key, value);
+    },
+    delete: async (key) => {
+      storedSecrets.delete(key);
+    },
+    onDidChange: () => ({ dispose: () => undefined }),
+  };
+  settings.clear();
+  settings.set("apiBaseUrl", "https://unit.test/v1/");
+  settings.set("includeUnknownModels", false);
+  settings.set("modelCacheSeconds", 300);
+  const calls: string[] = [];
+  const authorizations: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    calls.push(String(input));
+    const headers = init?.headers as { Authorization?: string } | undefined;
+    authorizations.push(String(headers?.Authorization));
+    return modelListResponse({ data: [{ id: "mimo-v2.6-flash" }] });
+  };
+  const provider = new NanChatModelProvider(
+    { secrets },
+    { record: async () => undefined },
+    { authorize: async () => undefined },
+  );
+  try {
+    const token = new TestCancellationToken();
+    const configuration = { apiKey: " native-key ", apiBaseUrl: "https://native.test/v1/" };
+    await provider.provideLanguageModelChatInformation({ silent: true, configuration }, token);
+    assert.deepEqual(calls, ["https://native.test/v1/models"]);
+    assert.equal(authorizations[0], "Bearer native-key");
+    assert.equal(storedSecrets.get(SECRET_API_KEY), "native-key");
+
+    const [model] = await provider.provideLanguageModelChatInformation({ silent: true, configuration }, token);
+    assert.ok(model);
+    await provider.provideLanguageModelChatResponse(
+      model,
+      [],
+      {
+        toolMode: 1 as vscode.LanguageModelChatToolMode,
+        modelConfiguration: { apiKey: "request-key" },
+      } as vscode.ProvideLanguageModelChatResponseOptions,
+      { report: () => undefined },
+      token,
+    );
+    assert.deepEqual(calls, ["https://native.test/v1/models", "https://native.test/v1/chat/completions"]);
+    assert.equal(authorizations[1], "Bearer request-key");
+  } finally {
+    provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("provider configuration changes invalidate the model cache", async () => {
+  const originalFetch = globalThis.fetch;
+  const harness = createHarness(async () => modelListResponse({ data: [{ id: "mimo-v2.6-flash" }] }));
+  try {
+    const token = new TestCancellationToken();
+    await harness.provider.provideLanguageModelChatInformation({ silent: true }, token);
+    await harness.provider.provideLanguageModelChatInformation({ silent: true }, token);
+    assert.equal(harness.calls.length, 1);
+    await harness.provider.provideLanguageModelChatInformation(
+      { silent: true, configuration: { apiBaseUrl: "https://other.test/v1" } },
+      token,
+    );
+    assert.deepEqual(harness.calls, ["https://unit.test/v1/models", "https://other.test/v1/models"]);
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
   }
 });
 

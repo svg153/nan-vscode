@@ -62,6 +62,8 @@ Install the generated `nan-builders-vscode-*.vsix` with **Extensions: Install fr
 4. Choose **Validate API key and refresh models**.
 5. In Chat or Agent mode, select a model under the **NaN Builders** provider.
 
+On recent VS Code builds the provider also shows its logo in the chat model picker and exposes native configuration: open **Manage Models**, expand **NaN Builders**, and set **API Key** (stored securely by VS Code) and **API Base URL** directly there. Values entered in Manage Models take precedence for chat and model discovery and the key is adopted into the extension's own SecretStorage; **NaN Builders: Manage Provider** keeps working on older VS Code versions and for the remaining commands.
+
 The model picker is intentionally limited to IDs returned by the key's `/v1/models` response. Run **NaN Builders: Refresh Models** after access changes. Provider extensions can also be found with the VS Code Marketplace filter:
 
 ```text
