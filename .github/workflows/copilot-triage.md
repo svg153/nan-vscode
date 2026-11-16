@@ -9,6 +9,18 @@ permissions:
 
 network: defaults
 
+# Cost guardrails: a triage run is a label check plus one assignment. The
+# default budget (1000 AIC = $10) is far above what this needs, so cap it.
+max-ai-credits: 150
+max-daily-ai-credits: 300
+
+# Draft (not enabled): run this workflow on Anthropic instead of Copilot.
+# Uncomment both lines and add the ANTHROPIC_API_KEY repository secret. See
+# docs/agentic-pipeline.md#swapping-the-model-provider-draft.
+# engine:
+#   id: claude
+#   model: claude-sonnet-5
+
 safe-outputs:
   assign-to-agent:
     name: copilot

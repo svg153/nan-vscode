@@ -10,6 +10,19 @@ permissions:
 
 network: defaults
 
+# Cost guardrails: the scout reads PRs, issues and diffs, so it needs more
+# budget than triage, but nowhere near the 1000 AIC default.
+max-ai-credits: 400
+max-daily-ai-credits: 400
+
+# Draft (not enabled): run this workflow on OpenAI instead of Copilot.
+# Uncomment both lines and add the OPENAI_API_KEY repository secret (or use
+# engine id: claude with ANTHROPIC_API_KEY). See
+# docs/agentic-pipeline.md#swapping-the-model-provider-draft.
+# engine:
+#   id: codex
+#   model: gpt-5.6-sol
+
 safe-outputs:
   create-issue:
     max: 3

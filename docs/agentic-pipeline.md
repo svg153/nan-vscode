@@ -44,6 +44,87 @@ graph LR
   (`scripts/run-insiders-integration.cjs`), and `npm run package` proves the
   VSIX builds.
 
+## Billing and model provider
+
+An agentic run has two independent costs: GitHub Actions minutes and AI
+inference. This repository is **public** and owned by a **user account**, which
+decides how each one is billed.
+
+| Cost | Public repository | Private repository |
+| --- | --- | --- |
+| Standard GitHub-hosted runner (`ubuntu-latest`) | Free and unlimited | Draws from included compute usage (~$0.006/min Linux) |
+| Copilot inference | Billed in **AI Credits** (1 AIC = $0.01) against the PAT owner's Copilot allowance | Same |
+| Anthropic / OpenAI / Google inference | Billed to that provider account | Same |
+
+Being public makes the **runner minutes** free. It does **not** make inference
+free: both workflows call Copilot, and Copilot usage is measured in AI Credits
+on every repository, public or private. The only genuinely free path is a
+deterministic workflow that never invokes an agent.
+
+### Cost guardrails
+
+Both workflows therefore declare a budget instead of inheriting the 1000 AIC
+($10) default per run:
+
+| Workflow | `max-ai-credits` | `max-daily-ai-credits` |
+| --- | --- | --- |
+| `copilot-triage` | 150 | 300 |
+| `feature-scout` | 400 | 400 |
+
+`max-ai-credits` is the AWF budget for a single run; AWF warns the agent at
+80/90/95/99%. `max-daily-ai-credits` sums the previous 24 hours of the same
+workflow and skips the agent job once the threshold is crossed. Both are
+top-level frontmatter fields, so recompile with `gh aw compile --strict` after
+changing them.
+
+Inference auth stays on the `COPILOT_GITHUB_TOKEN` PAT. The
+`permissions: copilot-requests: write` alternative authenticates with
+`${{ github.token }}` and needs no secret, but it bills inference to an
+**organization** Copilot tenant, so it does not apply to this user-owned
+repository.
+
+### Monitoring spend
+
+```powershell
+gh aw logs feature-scout --last 5          # AIC, duration, turns per run
+gh aw audit <run-id>                       # tokens, tool calls, AIC detail
+gh aw logs --start-date -30d --json | jq '.runs[] | {workflow: .workflow_name, aic: .aic}'
+```
+
+The AIC figure is computed from AWF pricing data and can differ from the
+provider invoice; confirm real charges in the billing dashboard.
+
+### Swapping the model provider (draft)
+
+`engine:` selects a different inference provider without touching the workflow
+body. Both workflows carry a commented draft block for exactly this:
+
+```yaml
+engine:
+  id: claude          # or: codex
+  model: claude-sonnet-5   # or: gpt-5.6-sol
+```
+
+| Engine | Repository secret | Billing |
+| --- | --- | --- |
+| `claude` | `ANTHROPIC_API_KEY` | Anthropic account |
+| `codex` | `OPENAI_API_KEY` (or `CODEX_API_KEY`) | OpenAI account |
+| Copilot (current) | `COPILOT_GITHUB_TOKEN` | Copilot AI Credits |
+
+Rules for enabling the draft:
+
+1. Uncomment the two `engine:` lines, keep the YAML indentation, and run
+   `gh aw compile <workflow> --strict`; the lock file is what actually runs.
+2. Add the provider secret before merging, otherwise activation fails.
+3. Keep Copilot-specific frontmatter out of the same edit. `safe-outputs:
+   assign-to-agent` is a Copilot coding-agent hand-off, so `copilot-triage`
+   should stay on the Copilot engine; the swap is only meaningful for
+   `feature-scout`, which is pure research.
+4. Do not use a provider-keyed engine on a `pull_request`/`fork` trigger:
+   workflows from fork PRs receive no secrets. Both workflows use `schedule`,
+   `workflow_dispatch` or `issues`, so they are unaffected today.
+5. `max-ai-credits` stays meaningful on any engine — AWF measures the routed
+   model — but the provider invoice, not the patched budget, is authoritative.
 ## Dependency updates & supply chain
 
 Renovate (Mend app, `app/renovate`) is the single version-update bot for npm
