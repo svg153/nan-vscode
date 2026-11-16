@@ -1,5 +1,5 @@
 import { accountModelRows, windowCredits, type AccountUsageError, type AccountUsageSnapshot } from "./accountUsage";
-import { NAN_API_KEYS_URL, NAN_MODELS_DOCS_URL } from "./constants";
+import { NAN_API_KEYS_URL, NAN_BILLING_URL, NAN_MODELS_DOCS_URL, NAN_TOKEN_PRICING_URL } from "./constants";
 import type { QuotaSummaryItem } from "./quotaCatalog";
 import { sanitizeUpstreamText } from "./text";
 import {
@@ -90,6 +90,16 @@ export function usageLinks(): readonly UsageLink[] {
       description: "Model catalogue, limits and per-1M-token prices",
       url: NAN_MODELS_DOCS_URL,
     },
+    {
+      label: "Open billing & credit packs",
+      description: "Plan allowance, credit packs and invoices",
+      url: NAN_BILLING_URL,
+    },
+    {
+      label: "Open credits per 1M tokens",
+      description: "What each model costs from the shared credits pool",
+      url: NAN_TOKEN_PRICING_URL,
+    },
   ];
 }
 
@@ -143,9 +153,17 @@ export function escapeMarkdown(text: string): string {
 /**
  * Status-bar label: the share of plan credits used this period when a snapshot
  * exists, otherwise the compact local session total, otherwise the documented
- * initial state.
+ * initial state. A frozen credit pool always wins: requests are being refused,
+ * so the percentage is no longer the actionable information.
  */
-export function statusBarText(headlinePercent: number | undefined, localTotal: number): string {
+export function statusBarText(
+  headlinePercent: number | undefined,
+  localTotal: number,
+  frozen = false,
+): string {
+  if (headlinePercent !== undefined && frozen) {
+    return "$(warning) NaN frozen";
+  }
   if (headlinePercent !== undefined) {
     return `$(graph) NaN ${formatPercent(headlinePercent)}%`;
   }

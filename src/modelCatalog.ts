@@ -206,6 +206,16 @@ export function reasoningDescription(model: ModelMetadata): string {
   return `Documented reasoning effort levels: ${values.join(", ")}. Configurable via the nanBuilders.defaultReasoningEffort setting.`;
 }
 
+/**
+ * Billing line for the model picker. Every NaN chat model draws from the same
+ * credits pool; the larger ones cost more per token and empty it faster.
+ */
+export function billingDescription(model: ModelMetadata): string {
+  return model.largerModel
+    ? "Billing: credits, larger model - it costs more per token than the flash models, so it uses credits faster."
+    : "Billing: credits from the account-wide pool shared with every other NaN model.";
+}
+
 export function isKnownNonChatModel(id: string): boolean {
   return KNOWN_NON_CHAT_IDS.has(id);
 }

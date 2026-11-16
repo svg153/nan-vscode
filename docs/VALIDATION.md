@@ -117,13 +117,14 @@ With a valid key configured, run **NaN Builders: Show Usage** and refresh.
 
 Expected:
 
-- The status bar headline becomes `$(graph) NaN NN%`, the share of the plan's credit allowance used this period, read from `GET /v1/usage`.
+- The status bar headline becomes `$(graph) NaN NN%`, the share of the plan's credit allowance used this period, read from `GET /v1/usage`. When the same snapshot reports `credits.frozen: true` the headline becomes `$(warning) NaN frozen` instead, because credit-billed requests are being refused; clearing the freeze restores the percentage on the next refresh.
 - The tooltip shows the served window (`start_date → end_date`), window totals, all-time totals with their cache timestamp, per-model rows, the plan-credit and credit-pack lines, and the API cutoff dates.
 - Window totals and per-model rows show the cached input tokens NaN reports (from 2026-11-11 onward) as a share of the prompt count, never added to the token total.
 - The plan-credit line ends with the billing period range (`period_start → period_end`) when the API reports one, or `renews <date>` otherwise; a frozen plan shows the frozen warning and the QuickPick label `$(warning) Plan credits (frozen)`.
 - The credit-pack line renders `pack_expires_at` as a readable date with the distance in days ("expires 2026-06-01 (in 12 days)", "expires today", "expired on 2026-05-01"), never as a raw ISO timestamp.
 - The QuickPick includes a `$(credit-card) Window credits (calendar month)` row whose detail states that the sum of the rounded per-model rows is approximate and can differ from the billing-period used total by tenths.
-- The QuickPick ends with an **Open** section: `Open API keys` goes to `https://cloud.nan.builders/#settings-api-keys` and `Open model docs` to `https://nan.builders/docs/models`; both open in the external browser, not inside VS Code.
+- The QuickPick ends with an **Open** section of four rows, each opening in the external browser, not inside VS Code: `Open API keys` → `https://cloud.nan.builders/#settings-api-keys`, `Open model docs` → `https://nan.builders/docs/models`, `Open billing & credit packs` → `https://cloud.nan.builders/#settings-billing`, and `Open credits per 1M tokens` → `https://cloud.nan.builders/tokens`.
+- In the model picker, every NaN entry's tooltip ends with a billing line: `Billing: credits from the account-wide pool shared with every other NaN model`, or for the larger models `Billing: credits, larger model - it costs more per token than the flash models, so it uses credits faster.` under the `(larger model)` name suffix.
 - Percentages appear only when the API reports a plan allowance and the model billed credits in the window. `qwen3.6` and `gemma4` say "Does not draw credits"; no percentage is fabricated.
 - A failed refresh keeps the previous snapshot and adds a "Last refresh failed" line; a 429 shows its `Retry-After` hint.
 - Automatic refreshes are throttled (60s between refreshes, 30 requests/minute limiter); a manual refresh bypasses the throttle.

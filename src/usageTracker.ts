@@ -115,13 +115,17 @@ export class UsageTracker implements vscode.Disposable {
   private render(): void {
     const headline = this.accountHeadlinePercent();
     const localTotal = this.promptTokens + this.completionTokens;
-    this.item.text = statusBarText(headline, localTotal);
+    this.item.text = statusBarText(headline, localTotal, this.accountCreditsFrozen());
     this.item.tooltip = this.buildTooltip();
   }
 
   private accountHeadlinePercent(): number | undefined {
     const snapshot = this.account?.snapshot;
     return snapshot ? accountHeadline(snapshot.report)?.percent : undefined;
+  }
+
+  private accountCreditsFrozen(): boolean {
+    return this.account?.snapshot?.report.credits?.frozen === true;
   }
 
   private buildTooltip(): vscode.MarkdownString {

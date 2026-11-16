@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  billingDescription,
   filterDiscoveredModelIds,
   filterDiscoveredModels,
   knownChatModelIds,
@@ -200,4 +201,12 @@ test("toDisplayMetadata respects catalog toolCalling=false for XML-only models",
   };
   const metadata = toDisplayMetadata("qwen3.8-flash", api);
   assert.equal(metadata.toolCalling, false, "catalog should override API for XML-only models");
+});
+
+test("billingDescription distinguishes larger models from the flash tier", () => {
+  const flash = toDisplayMetadata("deepseek-v4-flash");
+  const larger = toDisplayMetadata("kimi-k3.1-pro");
+  assert.match(billingDescription(flash), /^Billing: credits from the account-wide pool/);
+  assert.match(billingDescription(larger), /larger model/);
+  assert.match(billingDescription(larger), /uses credits faster/);
 });

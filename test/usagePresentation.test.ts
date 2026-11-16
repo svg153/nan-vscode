@@ -85,6 +85,12 @@ test("status bar prefers the plan-credit percentage when available", () => {
   assert.equal(statusBarText(42.5, 0), "$(graph) NaN 42.5%");
 });
 
+test("status bar replaces the percentage with a frozen warning when the credit pool is frozen", () => {
+  assert.equal(statusBarText(42, 1_500, true), "$(warning) NaN frozen");
+  // No credit headline means nothing to freeze: keep the local-total fallbacks.
+  assert.equal(statusBarText(undefined, 0, true), "$(sparkle) NaN");
+});
+
 test("compact formats magnitudes with one decimal below ten units", () => {
   assert.equal(compact(0), "0");
   assert.equal(compact(999), "999");
@@ -128,15 +134,25 @@ test("describePackExpiry accepts ISO timestamps and passes through unparsable va
   assert.equal(describePackExpiry("", now), "");
 });
 
-test("usageLinks points at the API-keys deep link and the model catalogue", () => {
+test("usageLinks points at the API-keys deep link, the model catalogue, billing and pricing", () => {
   const links = usageLinks();
   assert.deepEqual(
     links.map((link) => link.url),
-    ["https://cloud.nan.builders/#settings-api-keys", "https://nan.builders/docs/models"],
+    [
+      "https://cloud.nan.builders/#settings-api-keys",
+      "https://nan.builders/docs/models",
+      "https://cloud.nan.builders/#settings-billing",
+      "https://cloud.nan.builders/tokens",
+    ],
   );
   assert.deepEqual(
     links.map((link) => link.label),
-    ["Open API keys", "Open model docs"],
+    [
+      "Open API keys",
+      "Open model docs",
+      "Open billing & credit packs",
+      "Open credits per 1M tokens",
+    ],
   );
 });
 
