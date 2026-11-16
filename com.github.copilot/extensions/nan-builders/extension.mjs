@@ -6,7 +6,7 @@
 import { createServer } from "node:http";
 import { CanvasError, createCanvas, joinSession } from "@github/copilot-sdk/extension";
 import { configPath, loadConfig, saveApiKey, saveBaseUrl } from "./lib/config.mjs";
-import { NanError, createChatCompletion, fetchModels, fetchUsage, isChatModel, redactSecret } from "./lib/nan.mjs";
+import { DEFAULT_BASE_URL, NanError, createChatCompletion, fetchModels, fetchUsage, isChatModel, redactSecret } from "./lib/nan.mjs";
 import { compactTokens, getKnownModel, monthlyQuotaProgress, quotaCapLabel } from "./lib/quota.mjs";
 import { renderHtml } from "./ui.mjs";
 
@@ -74,6 +74,7 @@ async function buildSnapshot({ force = false } = {}) {
     hasKey: cfg.hasKey,
     keySource: cfg.keySource ?? null,
     baseUrl: cfg.baseUrl,
+    defaultBaseUrl: DEFAULT_BASE_URL,
     insecure: classifyInsecure(cfg),
     configPath: configPath(),
     error: undefined,

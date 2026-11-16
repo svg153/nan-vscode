@@ -102,13 +102,20 @@ export function renderHtml() {
       <button class="action" id="saveKey">Save key</button>
       <button class="action" id="clearKey">Clear key</button>
     </div>
-    <p class="muted">Stored locally at <code id="cfgPath"></code>. Override with the <code>NAN_BUILDERS_API_KEY</code> environment variable. The key never leaves your machine except as the Bearer header to the base URL below.</p>
-    <label for="urlInput">API base URL</label>
-    <input id="urlInput" type="url" spellcheck="false" />
-    <div class="row">
-      <button class="action" id="saveUrl">Save URL</button>
-      <span class="muted">default: https://api.nan.builders/v1</span>
-    </div>
+    <p class="muted">Saved only to <code id="cfgPath"></code>, a local file readable by your user account (never committed, never sent anywhere except as the Bearer header to the endpoint below). You can also provide it via the <code>NAN_BUILDERS_API_KEY</code> environment variable.</p>
+    <p class="label">API endpoint</p>
+    <p><code id="endpointText">https://api.nan.builders/v1</code> <span class="muted" id="endpointNote">built-in &mdash; nothing to configure</span></p>
+    <p class="muted">This is the official NaN Builders API used by all its clients. Only NaN's operators ever change it, so just save your key above.</p>
+    <details id="urlAdvanced">
+      <summary>Advanced: override the endpoint</summary>
+      <label for="urlInput">API base URL</label>
+      <input id="urlInput" type="url" spellcheck="false" />
+      <div class="row">
+        <button class="action" id="saveUrl">Save override</button>
+        <button class="action" id="resetUrl">Reset to default</button>
+      </div>
+      <p class="muted">Only for development against a trusted compatible server. Plain HTTP to a non-loopback host asks for confirmation because it would send your key unencrypted.</p>
+    </details>
   </section>
 </main>
 <dialog id="confirmDialog">
@@ -142,7 +149,14 @@ export function renderHtml() {
     chip.className = "chip " + (state.hasKey ? "ok" : "warn");
     document.getElementById("updated").textContent = state.usage && state.usage.fetchedAt ? "usage " + new Date(state.usage.fetchedAt).toLocaleTimeString() : "";
     document.getElementById("cfgPath").textContent = state.configPath || "";
-    if (tab === "settings") { document.getElementById("urlInput").value = state.baseUrl || ""; }
+    if (tab === "settings") {
+      document.getElementById("urlInput").value = state.baseUrl || "";
+      var def = state.defaultBaseUrl || "https://api.nan.builders/v1";
+      document.getElementById("endpointText").textContent = state.baseUrl || def;
+      var overridden = state.baseUrl && state.baseUrl !== def;
+      document.getElementById("endpointNote").textContent = overridden ? "overridden for this machine" : "built-in \u2014 nothing to configure";
+      if (overridden) { document.getElementById("urlAdvanced").open = true; }
+    }
     showError(state.error);
 
     var headline = document.getElementById("headline");
@@ -211,6 +225,10 @@ export function renderHtml() {
   document.getElementById("clearKey").addEventListener("click", function () { post("/api/key", { key: "" }); });
   document.getElementById("saveUrl").addEventListener("click", function () {
     saveUrl(document.getElementById("urlInput").value.trim(), false);
+  });
+  document.getElementById("resetUrl").addEventListener("click", function () {
+    var def = (state && state.defaultBaseUrl) || "https://api.nan.builders/v1";
+    post("/api/base-url", { url: def });
   });
   async function saveUrl(value, confirmInsecure) {
     var res = await fetch("/api/base-url", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: value, confirmInsecure: confirmInsecure }) });
