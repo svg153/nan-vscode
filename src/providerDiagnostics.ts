@@ -1,17 +1,36 @@
 import { PROVIDER_VENDOR } from "./constants";
 import { sanitizeErrorBody } from "./openai/request";
+import { sanitizeUpstreamText } from "./text";
 
 /**
  * Read-only troubleshooting helpers behind "Test Connection" and
  * "Show Diagnostics". Kept free of the `vscode` module so the report can be
- * unit-tested with a stubbed host model selector and settings reader.
+ * unit-tested with a pre-selected host model list and a stubbed settings reader.
  *
- * Secrets never enter the report: keys are reported as a count, and gateway
- * error text is reduced to structural identifiers by `sanitizeErrorBody`.
+ * Secrets never enter the report: keys are reported as a count, endpoint
+ * credentials are redacted for display, and gateway error text is reduced to
+ * structural identifiers by `sanitizeErrorBody`.
  */
 
 /** How many reachable model IDs the Test Connection notification lists. */
 export const MAX_REPORTED_MODEL_IDS = 20;
+
+/** Placeholder used in place of secrets and credential-bearing URL values. */
+const REDACTED = "******";
+
+/** Upper bound for an endpoint shown in a notification or report line. */
+const MAX_DISPLAY_URL_LENGTH = 500;
+
+/** Bounds a structured gateway detail echoed into a message. */
+const MAX_DISCOVERY_DETAIL_LENGTH = 200;
+
+/**
+ * Query and fragment parameter names whose values are credentials. Matching is
+ * deliberately broad: false positives only hide an endpoint parameter, while a
+ * miss would publish a secret.
+ */
+const CREDENTIAL_PARAM =
+  /^(?:api[-_]?key|key|token|access[-_]?token|refresh[-_]?token|id[-_]?token|auth|authorization|bearer|password|passwd|secret|client[-_]?secret|signature|sig)$/i;
 
 export interface HostModelLike {
   readonly id: string;
@@ -30,18 +49,35 @@ export interface ConfigurationReader {
   get<T>(key: string, defaultValue: T): T | undefined;
 }
 
+/**
+ * Model-discovery failure recorded at the HTTP boundary. The body never
+ * travels past that boundary: only the HTTP status and a bounded, sanitized
+ * structural summary are retained.
+ */
+export interface DiscoveryFailure {
+  /** HTTP status, when the endpoint returned a response. */
+  readonly status?: number;
+  /** Sanitized gateway identifiers (error type/code/param), if any survived. */
+  readonly detail?: string;
+}
+
 export interface DiagnosticsInput {
   readonly extensionVersion: string;
   readonly vscodeVersion: string;
   readonly baseUrl: string;
   readonly configuration: ConfigurationReader;
-  readonly lm: ChatModelSelector;
+  /**
+   * Host models selected immediately before this snapshot was taken. The
+   * caller selects them first because selection can trigger provider discovery
+   * and update the endpoint, stored key, cache, and discovery error.
+   */
+  readonly hostModels: readonly HostModelLike[];
   /** Names of the secrets this extension has stored; values are never read. */
   readonly secretKeys: readonly string[];
   /** Model IDs the extension knows locally: warm cache, else the curated catalog. */
   readonly trackedModels: readonly string[];
-  /** Last raw discovery error message, sanitized before it reaches the report. */
-  readonly lastDiscoveryError?: string;
+  /** Last model-discovery failure; raw text is still sanitized defensively. */
+  readonly lastDiscoveryError?: string | DiscoveryFailure;
   /** Override for tests; defaults to the current time. */
   readonly generatedAt?: string;
   readonly vendor?: string;
@@ -49,11 +85,12 @@ export interface DiagnosticsInput {
 
 /**
  * The full Markdown dump shown by "Show Diagnostics". Also written verbatim to
- * the output channel when the document cannot be opened.
+ * the output channel when the document cannot be opened. The caller selects the
+ * host models first, so this only formats an already-taken snapshot.
  */
-export async function collectDiagnostics(input: DiagnosticsInput): Promise<string> {
+export function collectDiagnostics(input: DiagnosticsInput): string {
   const vendor = input.vendor ?? PROVIDER_VENDOR;
-  const hostModels = await selectHostModels(input.lm, vendor);
+  const hostModels = input.hostModels;
   const discoveryMode = input.configuration.get<string>("discoveryMode", "curated") === "auto" ? "auto" : "curated";
   const includeUnknown = input.configuration.get<boolean>("includeUnknownModels", false) === true;
   const keyCount = input.secretKeys.length;
@@ -64,7 +101,7 @@ export async function collectDiagnostics(input: DiagnosticsInput): Promise<strin
     `- Generated: ${input.generatedAt ?? new Date().toISOString()}`,
     `- VS Code: ${input.vscodeVersion}`,
     `- Extension: ${input.extensionVersion}`,
-    `- Base URL: ${input.baseUrl}`,
+    `- Base URL: ${formatEndpointForDisplay(input.baseUrl)}`,
     `- Discovery mode: ${discoveryMode}`,
     `- Include unknown models: ${includeUnknown ? "yes" : "no"}`,
     `- API key configured: ${keyCount > 0 ? "yes" : "no"}`,
@@ -119,10 +156,13 @@ export function formatConnectionOk(modelIds: readonly string[]): string {
 }
 
 /** Actionable warning for a key that sees no models. */
-export function formatConnectionWarning(baseUrl: string, errorText?: string): string {
-  const detail = sanitizedDiscoveryDetail(errorText);
+export function formatConnectionWarning(
+  baseUrl: string,
+  failure?: string | DiscoveryFailure,
+): string {
+  const detail = sanitizedDiscoveryDetail(failure);
   return [
-    `NaN Builders found no models for the configured API key at ${baseUrl}.`,
+    `NaN Builders found no models for the configured API key at ${formatEndpointForDisplay(baseUrl)}.`,
     detail,
     "Check that the key can call GET /models (run 'NaN Builders: Manage Provider' → 'Validate API key and refresh models'), then run 'NaN Builders: Refresh Models'.",
   ]
@@ -131,29 +171,86 @@ export function formatConnectionWarning(baseUrl: string, errorText?: string): st
 }
 
 /**
+ * Display-only endpoint formatter for the report and the notifications. Userinfo
+ * is dropped and credential-bearing query/fragment values are replaced. This
+ * must never be applied to request URLs: discovery and chat must keep using the
+ * configured value unchanged.
+ */
+export function formatEndpointForDisplay(rawUrl: string): string {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    // Never echo a malformed value: it may itself contain credentials.
+    return "(unparseable base URL)";
+  }
+
+  url.username = "";
+  url.password = "";
+  url.search = redactCredentialParams(url.search);
+  if (url.hash) {
+    url.hash = redactCredentialParams(url.hash.slice(1));
+  }
+
+  // Catches a key pasted into the path and any control characters.
+  return sanitizeUpstreamText(url.toString(), MAX_DISPLAY_URL_LENGTH);
+}
+
+function redactCredentialParams(rawParams: string): string {
+  if (!rawParams) {
+    return "";
+  }
+  if (!rawParams.includes("=")) {
+    // An opaque fragment cannot be classified, so it is withheld entirely.
+    return REDACTED;
+  }
+  const params = new URLSearchParams(rawParams);
+  for (const name of [...params.keys()]) {
+    if (CREDENTIAL_PARAM.test(name)) {
+      params.set(name, REDACTED);
+    }
+  }
+  return params.toString();
+}
+
+/**
  * Gateway text is never shown raw. Only the structural identifiers kept by
  * `sanitizeErrorBody` (error type/code/param) survive; free-form messages,
  * which may echo a key or prompt, are dropped. The HTTP status is structural
- * data, so it is still reported when the body yields nothing safe.
+ * data, so it is still reported when the body yields nothing safe. Raw strings
+ * are accepted for defensive re-sanitization; the HTTP boundary already stores
+ * structured failures.
  */
-export function sanitizedDiscoveryDetail(errorText: string | undefined): string | undefined {
-  if (!errorText) {
+export function sanitizedDiscoveryDetail(failure: string | DiscoveryFailure | undefined): string | undefined {
+  if (!failure) {
     return undefined;
   }
-  const status = /HTTP\s+(\d{3})\b/.exec(errorText)?.[1];
-  const sanitized = sanitizeErrorBody(errorText);
+  if (typeof failure === "string") {
+    const status = /HTTP\s+(\d{3})\b/.exec(failure)?.[1];
+    return joinDiscoveryDetail(
+      status === undefined ? undefined : Number(status),
+      sanitizeErrorBody(failure) || undefined,
+    );
+  }
+  return joinDiscoveryDetail(failure.status, failure.detail);
+}
+
+function joinDiscoveryDetail(status: number | undefined, detail: string | undefined): string {
+  // The HTTP boundary already sanitized `detail`; re-sanitizing keeps a caller
+  // that constructs a failure by hand from leaking secrets.
+  const safeDetail = detail ? sanitizeUpstreamText(detail, MAX_DISCOVERY_DETAIL_LENGTH) : "";
   return [
-    status ? `The endpoint answered HTTP ${status}.` : undefined,
-    sanitized
-      ? `Gateway said: ${sanitized}.`
+    status === undefined ? undefined : `The endpoint answered HTTP ${status}.`,
+    safeDetail
+      ? `Gateway said: ${safeDetail}.`
       : "The gateway error detail was withheld because it could not be reduced to safe identifiers.",
   ]
     .filter((part): part is string => Boolean(part))
     .join(" ");
 }
 
-export function describeDiscovery(errorText: string | undefined): string {
-  const detail = sanitizedDiscoveryDetail(errorText);
+export function describeDiscovery(failure: string | DiscoveryFailure | undefined): string {
+  const detail = sanitizedDiscoveryDetail(failure);
   return detail ? `- Last discovery error: ${detail}` : "- Last discovery error: none recorded.";
 }
 

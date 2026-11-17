@@ -272,6 +272,53 @@ test("validateConfiguredKey still surfaces discovery errors for the manage comma
   }
 });
 
+test("discovery failures preserve the HTTP status and sanitized body identifiers", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const cases = [
+    {
+      name: "HTTP 401 keeps gateway identifiers",
+      status: 401,
+      body: JSON.stringify({
+        error: { type: "invalid_api_key", code: "bad_key", message: "Incorrect API key provided: sk-live-SENTINEL" },
+      }),
+      expectedDetail: "invalid_api_key bad_key",
+    },
+    {
+      name: "HTTP 503 keeps gateway identifiers",
+      status: 503,
+      body: JSON.stringify({ error: { type: "server_error", code: "upstream_unavailable" } }),
+      expectedDetail: "server_error upstream_unavailable",
+    },
+    {
+      name: "non-JSON body leaves only the status",
+      status: 502,
+      body: "sk-live-SENTINEL",
+      expectedDetail: undefined,
+    },
+  ];
+
+  try {
+    for (const testCase of cases) {
+        // oxlint-disable-next-line eslint/no-await-in-loop
+        await t.test(testCase.name, async () => {
+          const harness = createHarness(async () => new Response(testCase.body, { status: testCase.status }));
+          try {
+            // oxlint-disable-next-line eslint/no-await-in-loop
+            await assert.rejects(harness.provider.validateConfiguredKey(), new RegExp(`HTTP ${testCase.status}`));
+            const failure = harness.provider.discoveryError();
+            assert.equal(failure?.status, testCase.status);
+            assert.equal(failure?.detail, testCase.expectedDetail);
+            assert.equal(JSON.stringify(failure).includes("sk-live-SENTINEL"), false);
+          } finally {
+            harness.provider.dispose();
+          }
+        });
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("advertised input budget reserves a 10 percent tokenizer margin", async () => {
   const originalFetch = globalThis.fetch;
   const harness = createHarness(async () =>

@@ -3,8 +3,8 @@ import { NAN_DASHBOARD_URL, NAN_DOCS_URL, PROVIDER_VENDOR, SECRET_API_KEY, DEFAU
 import { configureDiagnosticFile, diagnostic } from "./diagnostics";
 import { HttpEndpointConsentDeniedError, HttpEndpointGuard } from "./httpEndpointGuard";
 import { NanInlineCompletionProvider } from "./inlineCompletionProvider";
-import { NanChatModelProvider } from "./provider";
-import { collectDiagnostics, formatConnectionOk, formatConnectionWarning } from "./providerDiagnostics";
+import { NanChatModelProvider, ModelDiscoveryError } from "./provider";
+import { collectDiagnostics, formatConnectionOk, formatConnectionWarning, selectHostModels } from "./providerDiagnostics";
 import { getKnownModel, resolveReasoningEffort } from "./modelCatalog";
 import { AccountUsageService, accountModelRows, windowCredits } from "./accountUsage";
 import { compactTokens } from "./quotaCatalog";
@@ -519,7 +519,14 @@ async function testConnection(context: vscode.ExtensionContext, provider: NanCha
     }
     diagnostic("testConnection.error", { errorName: error instanceof Error ? error.name : typeof error });
     vscode.window.showWarningMessage(
-      formatConnectionWarning(provider.getBaseUrl(), error instanceof Error ? error.message : String(error)),
+      formatConnectionWarning(
+        provider.getBaseUrl(),
+        error instanceof ModelDiscoveryError
+          ? error
+          : error instanceof Error
+            ? error.message
+            : String(error),
+      ),
     );
   }
 }
@@ -534,20 +541,32 @@ async function showDiagnostics(
   provider: NanChatModelProvider,
   channel: vscode.OutputChannel,
 ): Promise<void> {
+  let hostModels: Awaited<ReturnType<typeof selectHostModels>>;
+  try {
+    // Selecting host models can run provider discovery, which updates the
+    // native endpoint, stored key, cache, and discovery error. Select first so
+    // the snapshot below reflects the state the host models were produced from.
+    hostModels = await selectHostModels(vscode.lm, PROVIDER_VENDOR);
+  } catch (error) {
+    vscode.window.showErrorMessage(`NaN Builders diagnostics failed to read the host model list: ${errorMessage(error)}`);
+    return;
+  }
+
+  const secretKeys = await context.secrets.keys();
   let markdown: string;
   try {
-    markdown = await collectDiagnostics({
+    markdown = collectDiagnostics({
       extensionVersion: String(context.extension.packageJSON.version ?? "unknown"),
       vscodeVersion: vscode.version,
       baseUrl: provider.getBaseUrl(),
       configuration: vscode.workspace.getConfiguration("nanBuilders"),
-      lm: vscode.lm,
-      secretKeys: await context.secrets.keys(),
+      hostModels,
+      secretKeys,
       trackedModels: provider.trackedModelIds(),
       lastDiscoveryError: provider.discoveryError(),
     });
   } catch (error) {
-    vscode.window.showErrorMessage(`NaN Builders diagnostics failed to read the host model list: ${errorMessage(error)}`);
+    vscode.window.showErrorMessage(`NaN Builders diagnostics failed to build the report: ${errorMessage(error)}`);
     return;
   }
 

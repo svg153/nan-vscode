@@ -6,6 +6,7 @@ import {
   describeDiscovery,
   formatConnectionOk,
   formatConnectionWarning,
+  formatEndpointForDisplay,
   selectHostModels,
   type ChatModelSelector,
 } from "../src/providerDiagnostics";
@@ -19,6 +20,13 @@ function stubLm(models: ReadonlyArray<{ id: string; name?: string; vendor?: stri
   };
 }
 
+/** Host models as the extension passes them: selected before the report snapshot. */
+function hostModels(
+  models: ReadonlyArray<{ id: string; name?: string; vendor?: string; maxInputTokens?: number }>,
+) {
+  return selectHostModels(stubLm(models), "nan-builders");
+}
+
 function stubSettings(values: Record<string, unknown> = {}) {
   return {
     get<T>(key: string, defaultValue: T): T {
@@ -28,13 +36,13 @@ function stubSettings(values: Record<string, unknown> = {}) {
 }
 
 test("diagnostics report includes versions, endpoint, host models, key count, and tracked models", async () => {
-  const markdown = await collectDiagnostics({
+  const markdown = collectDiagnostics({
     generatedAt: "2026-11-16T22:00:00.000Z",
     extensionVersion: "1.5.1",
     vscodeVersion: "1.104.0",
     baseUrl: "https://api.nan.builders/v1",
     configuration: stubSettings({ discoveryMode: "auto", includeUnknownModels: true }),
-    lm: stubLm([
+    hostModels: await hostModels([
       { id: "glm5.3-flash", vendor: "nan-builders", maxInputTokens: 126_976 },
       { id: "gemma4", vendor: "nan-builders", maxInputTokens: 32_000 },
       { id: "gpt-4o", vendor: "copilot", maxInputTokens: 128_000 },
@@ -61,12 +69,12 @@ test("diagnostics report includes versions, endpoint, host models, key count, an
 });
 
 test("diagnostics report never contains a key value, even when the gateway echoes it", async () => {
-  const markdown = await collectDiagnostics({
+  const markdown = collectDiagnostics({
     extensionVersion: "1.5.1",
     vscodeVersion: "1.104.0",
     baseUrl: "https://api.nan.builders/v1",
     configuration: stubSettings(),
-    lm: stubLm([{ id: "glm5.3-flash", vendor: "nan-builders", maxInputTokens: 1_000 }]),
+    hostModels: await hostModels([{ id: "glm5.3-flash", vendor: "nan-builders", maxInputTokens: 1_000 }]),
     secretKeys: ["nanBuilders.apiKey"],
     trackedModels: ["glm5.3-flash"],
     lastDiscoveryError: JSON.stringify({
@@ -85,12 +93,12 @@ test("diagnostics report never contains a key value, even when the gateway echoe
 });
 
 test("diagnostics report explains an empty host model list", async () => {
-  const markdown = await collectDiagnostics({
+  const markdown = collectDiagnostics({
     extensionVersion: "1.5.1",
     vscodeVersion: "1.104.0",
     baseUrl: "https://api.nan.builders/v1",
     configuration: stubSettings(),
-    lm: stubLm([]),
+    hostModels: await hostModels([]),
     secretKeys: [],
     trackedModels: [],
   });
@@ -156,4 +164,67 @@ test("connection warning reports the HTTP status and withholds unsanitizable bod
   assert.match(warning, /error detail was withheld/);
   assert.match(describeDiscovery(`HTTP 503 ${SENTINEL_KEY}`), /HTTP 503/);
   assert.equal(describeDiscovery(`HTTP 503 ${SENTINEL_KEY}`).includes(SENTINEL_KEY), false);
+});
+
+test("formatEndpointForDisplay drops userinfo and redacts credential params only", () => {
+  const display = formatEndpointForDisplay(
+    `https://user:${SENTINEL_KEY}@api.nan.builders/v1?api_key=${SENTINEL_KEY}&region=eu#token=${SENTINEL_KEY}`,
+  );
+
+  assert.equal(display.includes(SENTINEL_KEY), false, "credentials must never reach the display form");
+  assert.equal(display.includes("user"), false, "userinfo must be removed");
+  assert.match(
+    display,
+    /^https:\/\/api\.nan\.builders\/v1\?api_key=\*{6}&region=eu#token=\*{6}$/,
+    "non-credential parameters stay readable",
+  );
+});
+
+test("formatEndpointForDisplay redacts key and token parameter aliases", () => {
+  const display = formatEndpointForDisplay("https://api.nan.builders/v1?key=abc&token=def&access_token=ghi&model=gpt");
+
+  assert.match(display, /^https:\/\/api\.nan\.builders\/v1\?key=\*{6}&token=\*{6}&access_token=\*{6}&model=gpt$/);
+});
+
+test("formatEndpointForDisplay never echoes a malformed URL", () => {
+  const display = formatEndpointForDisplay(`api.nan.builders/v1?api_key=${SENTINEL_KEY}`);
+
+  assert.equal(display.includes(SENTINEL_KEY), false);
+  assert.match(display, /unparseable base URL/);
+});
+
+test("diagnostics report and connection warning redact endpoint credentials", async () => {
+  const credentialUrl = `https://user:${SENTINEL_KEY}@api.nan.builders/v1?api_key=${SENTINEL_KEY}`;
+  const markdown = collectDiagnostics({
+    extensionVersion: "1.5.1",
+    vscodeVersion: "1.104.0",
+    baseUrl: credentialUrl,
+    configuration: stubSettings(),
+    hostModels: await hostModels([{ id: "glm5.3-flash", vendor: "nan-builders", maxInputTokens: 1_000 }]),
+    secretKeys: ["nanBuilders.apiKey"],
+    trackedModels: ["glm5.3-flash"],
+  });
+
+  assert.equal(markdown.includes(SENTINEL_KEY), false, "the report must never contain the URL credentials");
+  assert.match(markdown, /^- Base URL: https:\/\/api\.nan\.builders\/v1\?api_key=\*{6}$/m);
+
+  const warning = formatConnectionWarning(credentialUrl);
+  assert.equal(warning.includes(SENTINEL_KEY), false, "the warning must never contain the URL credentials");
+  assert.match(warning, /at https:\/\/api\.nan\.builders\/v1\?api_key=\*{6}\./);
+});
+
+test("structured discovery failures keep the HTTP status and sanitized detail", () => {
+  const warning = formatConnectionWarning("https://api.nan.builders/v1", {
+    status: 401,
+    detail: "invalid_api_key bad_key",
+  });
+
+  assert.match(warning, /The endpoint answered HTTP 401\./);
+  assert.match(warning, /Gateway said: invalid_api_key bad_key\./);
+
+  const noDetail = describeDiscovery({ status: 503 });
+  assert.match(noDetail, /The endpoint answered HTTP 503\./);
+  assert.match(noDetail, /error detail was withheld/);
+  assert.match(describeDiscovery({ detail: `bad_key ${SENTINEL_KEY}` }), /Gateway said: bad_key \*{6}\./);
+  assert.equal(describeDiscovery({ detail: `bad_key ${SENTINEL_KEY}` }).includes(SENTINEL_KEY), false);
 });
