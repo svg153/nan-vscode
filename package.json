@@ -179,11 +179,26 @@
                 "nanBuilders.reasoningEffortByModel": {
                   "type": "object",
                   "default": {},
-                  "markdownDescription": "Per-model reasoning effort overrides set by the `NaN Builders: Set Model Reasoning Effort` command. Keys are model IDs, values are effort levels; each value is remapped to the closest level the model documents.",
+                  "markdownDescription": "Per-model reasoning effort overrides and per-profile model routing, set by the `NaN Builders: Set Model Reasoning Effort` and `NaN Builders: Manage Provider` commands. A plain key is a model ID; a `profile::model` key assigns that model to a profile so its requests use that profile's API key. Values are effort levels remapped to the closest level the model documents, or `auto` for routing without an effort override.",
                   "additionalProperties": {
                     "type": "string",
-                    "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+                    "enum": ["auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"]
                   }
+                },
+                "nanBuilders.profiles": {
+                  "type": "array",
+                  "default": [],
+                  "scope": "machine",
+                  "items": {
+                    "type": "string"
+                  },
+                  "markdownDescription": "Profile IDs managed by `NaN Builders: Manage Provider`. Only IDs are stored here; each profile's API key lives in VS Code SecretStorage under `nanBuilders.profileKey.<profileId>`. With no profiles configured, the single `nanBuilders.apiKey` key keeps working as before."
+                },
+                "nanBuilders.activeProfile": {
+                  "type": "string",
+                  "default": "",
+                  "scope": "machine",
+                  "markdownDescription": "Profile whose API key serves every model without a `profile::model` entry in `nanBuilders.reasoningEffortByModel`. Empty selects the first profile. Ignored when no profiles are configured."
                 }
       }
     }
