@@ -219,6 +219,9 @@
     "release": "semantic-release",
     "prepare": "husky"
   },
+  "overrides": {
+    "npm": "^11.21.2"
+  },
   "devDependencies": {
     "@commitlint/cli": "^21.2.3",
     "@commitlint/config-conventional": "^21.2.3",
