@@ -34,5 +34,6 @@ The current lockfile audit reports one critical and four high vulnerable package
 | Date | Package | Change | Verification |
 |---|---|---|---|
 | 2026-11-17 | `brace-expansion` | `overrides.npm` set to `^11.21.2`; lockfile regenerated so the bundled copy moves from `5.0.9` to `5.0.12` (#146, #153) | `npm ls brace-expansion --all` reports `5.0.12` for both instances; `npm audit --package-lock-only` no longer lists `brace-expansion` |
+| 2026-11-17 | `minimatch` | Per-consumer `overrides` pin `@vscode/vsce`, `glob` and `test-exclude` to `minimatch@11.0.9`; lockfile regenerated (#148) | `npm ls minimatch --all` reports `11.0.9` for every instance reachable from the project; only the `npm` tarball's bundled `10.2.5` stays behind because it cannot be redirected |
 
 Packages nested inside a released tarball (`inBundle: true` in `package-lock.json`, as all of npm's own dependencies are) cannot be redirected by an `overrides` entry for that package: the file ships inside the dependency's tarball. Bumping the bundling package is the only lever, so the override is applied to `npm` rather than to `brace-expansion`.
