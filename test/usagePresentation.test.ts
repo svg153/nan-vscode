@@ -176,6 +176,47 @@ test("tooltip includes the plan-credit percentage and the reporting period", () 
   assert.match(md, /Last refresh: 2026-01-31T12:00:00\.000Z/);
 });
 
+test("tooltip labels a partially reported window credit sum", () => {
+  const md = buildTooltipMarkdown({
+    snapshot: snapshot({
+      totals: {
+        promptTokens: 1_000,
+        completionTokens: 2_000,
+        totalTokens: 8_000,
+        apiRequests: 9,
+        credits: 210,
+        byModel: [
+          {
+            model: "deepseek-v4-flash",
+            promptTokens: 1_000,
+            completionTokens: 2_000,
+            totalTokens: 3_000,
+            apiRequests: 7,
+            credits: 210,
+          },
+          {
+            model: "glm5.3",
+            promptTokens: 0,
+            completionTokens: 0,
+            totalTokens: 5_000,
+            apiRequests: 2,
+          },
+        ],
+      },
+    }),
+    requests: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    quotaItems,
+    history: [],
+  });
+  assert.match(
+    md,
+    /Window credits: \*\*210\*\* \(partial: some model rows report no credit data\) — approximate calendar-month sum/,
+  );
+  assert.match(md, /glm5\.3: 5[.,]?000 tokens · Credit data unavailable for this model/);
+});
+
 test("tooltip omits the credits block on accounts that are not billed in credits", () => {
   const md = buildTooltipMarkdown({
     snapshot: snapshot({ credits: undefined, totals: { promptTokens: 1, completionTokens: 0, totalTokens: 1, apiRequests: 1, byModel: [] } }),
