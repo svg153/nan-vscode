@@ -35,8 +35,11 @@ import { compactTokens } from "./quotaCatalog";
 import { API_REQUESTS_CUTOFF_DATE, CACHED_TOKENS_CUTOFF_DATE, CREDITS_CUTOFF_DATE, type UsageCredits } from "./usageApi";
 import { describePackExpiry, formatCredits, formatPercent, usageLinks, type UsageLink } from "./usagePresentation";
 import { UsageTracker } from "./usageTracker";
+import { FAILOVER_SETTING, FAILOVER_WARNING, failoverWarningPending } from "./failover";
 
 const USAGE_LINK_ICON = "$(link-external)";
+/** Global-state key recording that the own-accounts failover warning was shown. */
+const FAILOVER_WARNING_ACK = "nanBuilders.failoverWarningAcknowledged";
 
 /** Profile settings as the extension reads them; ids only, never keys. */
 function profileSettings(): ProfileSettings {
@@ -248,6 +251,20 @@ export function activate(context: vscode.ExtensionContext): {
 
   // Recorded once so the vendor id in use is visible in diagnostics (#118).
   diagnostic("activate.provider.vendor", { vendor: PROVIDER_VENDOR });
+  // Opt-in failover (#144) only ever uses accounts the user owns and pays for:
+  // NaN issues one personal, non-transferable key per member, so several keys
+  // are not a pooled allowance. The reminder appears once, on first enable.
+  const warnFailoverOnce = (): void => {
+    const acknowledged = context.globalState.get<boolean>(FAILOVER_WARNING_ACK, false) === true;
+    if (!failoverWarningPending(provider.failoverEnabled(), acknowledged)) {
+      return;
+    }
+    // Recorded before showing it so a reload can never repeat the warning.
+    void context.globalState.update(FAILOVER_WARNING_ACK, true);
+    diagnostic("activate.failover.enabled", { setting: FAILOVER_SETTING });
+    void vscode.window.showWarningMessage(FAILOVER_WARNING);
+  };
+  warnFailoverOnce();
   context.subscriptions.push(
     usage,
     provider,
@@ -328,6 +345,10 @@ export function activate(context: vscode.ExtensionContext): {
       }
       if (event.affectsConfiguration("nanBuilders.maxParallelRequests")) {
         slotQueues.refresh();
+      }
+      if (event.affectsConfiguration("nanBuilders.failoverOnThrottle")) {
+        provider.clearCooldowns();
+        warnFailoverOnce();
       }
       if (event.affectsConfiguration("nanBuilders.apiBaseUrl")) {
         endpointGuard.resetDenials();
@@ -1120,6 +1141,7 @@ async function showDiagnostics(
       profileAssignments: Object.keys(effortOverrides())
         .map((key) => parseProfileModelAssignment(key))
         .filter((assignment): assignment is { profileId: string; modelId: string } => assignment !== undefined),
+      failover: provider.failoverState(),
     });
   } catch (error) {
     vscode.window.showErrorMessage(`NaN Builders diagnostics failed to build the report: ${errorMessage(error)}`);

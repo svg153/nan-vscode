@@ -199,6 +199,12 @@
                   "default": "",
                   "scope": "machine",
                   "markdownDescription": "Profile whose API key serves every model without a `profile::model` entry in `nanBuilders.reasoningEffortByModel`. Empty selects the first profile. Ignored when no profiles are configured."
+                },
+                "nanBuilders.failoverOnThrottle": {
+                  "type": "boolean",
+                  "default": false,
+                  "scope": "machine",
+                  "markdownDescription": "Opt-in failover for chat requests. When a profile's key is rate limited (`rate_limit_exceeded`), the request is retried **once** with the next configured profile that has its own key, and the throttled key cools down for the gateway's `Retry-After` (60 s when absent, capped at 300 s). Off by default: routing stays fixed. Use it only with accounts you own and pay for — NaN issues one personal, non-transferable key per member, and several keys do not pool into a larger allowance. Billing failures (`insufficient_quota`) and authentication failures never fail over."
                 }
       }
     }
@@ -220,7 +226,16 @@
     "prepare": "husky"
   },
   "overrides": {
-    "npm": "^11.21.2"
+    "@vscode/vsce": {
+      "minimatch": "11.0.9"
+    },
+    "glob": {
+      "minimatch": "11.0.9"
+    },
+    "npm": "^12.2.1",
+    "test-exclude": {
+      "minimatch": "11.0.9"
+    }
   },
   "devDependencies": {
     "@commitlint/cli": "^21.2.3",
@@ -229,7 +244,7 @@
     "@semantic-release/commit-analyzer": "^13.0.1",
     "@semantic-release/exec": "^7.1.0",
     "@semantic-release/github": "^12.0.10",
-    "@semantic-release/npm": "^13.2.0",
+    "@semantic-release/npm": "^14.0.0-beta.2",
     "@semantic-release/release-notes-generator": "15.0.0-beta.3",
     "@types/node": "^26.0.0",
     "@types/vscode": "^1.104.0",

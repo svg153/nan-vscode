@@ -15,7 +15,7 @@ import {
 import { historyConversationKey, trimHistoryToBudget } from "./openai/historyTrim";
 import { convertMessages, convertTools } from "./openai/request";
 import { countContentTokens, estimateTokens } from "./openai/tokens";
-import type { SlotLease, SlotQueueRegistry } from "./openai/slotQueue";
+import { credentialId, type SlotLease, type SlotQueueRegistry } from "./openai/slotQueue";
 import { OpenAIStreamDecoder, StreamLimitError, type StreamEvent } from "./openai/stream";
 import {
   ChatTimeoutController,
@@ -38,10 +38,22 @@ import {
   readConfiguredCredential,
   resolveActiveProfile,
   resolveModelRoute,
+  resolveModelRouteCandidates,
   type ModelRoute,
   type ProfileRouteSource,
   type ProfileSettings,
 } from "./profiles";
+import {
+  FAILOVER_SETTING,
+  ThrottleCooldowns,
+  profileLabel,
+  resolveFailoverEnabled,
+  runWithFailover,
+  type FailoverCandidate,
+  type FailoverDiagnostics,
+  type FailoverPlan,
+  type ResolvedCredential,
+} from "./failover";
 import {
   MAX_ERROR_RESPONSE_BYTES,
   MAX_JSON_RESPONSE_BYTES,
@@ -89,6 +101,16 @@ interface CachedModels {
   readonly models: vscode.LanguageModelChatInformation[];
 }
 
+/** A chat key candidate: the routed key first, then the other profiles. */
+interface ChatKeyCandidate extends FailoverCandidate {
+  readonly primary: boolean;
+}
+
+/** A candidate's key plus the fingerprint the cooldowns are keyed by. */
+interface ChatKey extends ResolvedCredential {
+  readonly apiKey: string;
+}
+
 export class NanChatModelProvider implements vscode.LanguageModelChatProvider, vscode.Disposable {
   private readonly changedEmitter = new vscode.EventEmitter<void>();
   readonly onDidChangeLanguageModelChatInformation = this.changedEmitter.event;
@@ -98,6 +120,8 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   private lastDiscoveryError: DiscoveryFailure | undefined;
   /** Conversations already warned about, so the trim warning appears once. */
   private readonly warnedTrimmedConversations = new Set<string>();
+  /** Per-key cooldown applied by the opt-in throttle failover (#144). */
+  private readonly cooldowns = new ThrottleCooldowns();
 
   constructor(
     private readonly context: Pick<vscode.ExtensionContext, "secrets">,
@@ -222,7 +246,6 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       model.id,
       providerConfigString(modelConfiguration, "apiKey"),
     );
-    const apiKey = credential.apiKey;
 
     const toolMapping = convertTools(options.tools ?? [], options.toolMode === vscode.LanguageModelChatToolMode.Required);
     const history = convertMessages(
@@ -252,9 +275,6 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       stream: true,
       stream_options: { include_usage: true },
       max_tokens: model.maxOutputTokens || 4096,
-      // NaN can spend several minutes in silent reasoning unless this is bounded.
-      // The effort is remapped to the closest level the model actually documents.
-      reasoning_effort: this.resolveEffort(model.id, options.modelOptions, credential.profileId),
     };
 
     if (toolMapping.definitions.length > 0) {
@@ -262,6 +282,46 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       requestBody.tool_choice = toolMapping.toolChoice ?? "auto";
     }
 
+    // Fixed routing stays the default: one attempt with the resolved key and its
+    // error unchanged. With `nanBuilders.failoverOnThrottle` on, a throttle
+    // benches that key and retries the same logical request once on the next
+    // profile that has its own key (#144).
+    const plan = this.failoverPlan(model.id, credential);
+    await runWithFailover(plan, this.cooldowns, async (candidate, resolved, index) => {
+      if (index > 0) {
+        // The first attempt is already logged by `resolveCredential`.
+        diagnostic("chat.credential", {
+          modelId: model.id,
+          profile: profileLabel(candidate.profileId),
+          profileSource: "failover",
+          hasKey: true,
+        });
+      }
+      const attemptBody: Record<string, unknown> = {
+        ...requestBody,
+        // NaN can spend several minutes in silent reasoning unless this is
+        // bounded. The effort is remapped to the closest level the model
+        // actually documents, for the profile serving this attempt.
+        reasoning_effort: this.resolveEffort(model.id, options.modelOptions, candidate.profileId),
+      };
+      await this.streamChat(model, attemptBody, toolMapping, resolved.apiKey, progress, token, startedAt);
+    });
+  }
+
+  /**
+   * Sends one chat request with `apiKey` and streams the reply into `progress`.
+   * Extracted from the chat entry point so the opt-in failover can repeat the
+   * same logical request with another profile's key and its own slot.
+   */
+  private async streamChat(
+    model: vscode.LanguageModelChatInformation,
+    requestBody: Record<string, unknown>,
+    toolMapping: ReturnType<typeof convertTools>,
+    apiKey: string,
+    progress: vscode.Progress<vscode.LanguageModelResponsePart>,
+    token: vscode.CancellationToken,
+    startedAt: number,
+  ): Promise<void> {
     let timeoutController: ChatTimeoutController | undefined;
     const cancellation = cancellationSignal(token, () => timeoutController?.settle());
     timeoutController = new ChatTimeoutController(this.chatTimeouts(), (reason) => cancellation.abort(reason));
@@ -515,6 +575,76 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     return resolveModelRoute(this.profileSettings(), this.effortOverrides(), modelId);
   }
 
+  /** `nanBuilders.failoverOnThrottle`; off unless the user opted in. */
+  failoverEnabled(): boolean {
+    return resolveFailoverEnabled(
+      vscode.workspace.getConfiguration("nanBuilders").get<unknown>(FAILOVER_SETTING, false),
+    );
+  }
+
+  /** Cooldown state for *Show Diagnostics*: profile ids and seconds only. */
+  failoverState(): FailoverDiagnostics {
+    return { enabled: this.failoverEnabled(), cooling: this.cooldowns.snapshot(Date.now()) };
+  }
+
+  /** Drops every cooldown; turning the setting off must not leave keys benched. */
+  clearCooldowns(): void {
+    this.cooldowns.clear();
+  }
+
+  /**
+   * Key candidates for one chat request. The key `resolveCredential` already
+   * read comes first; the remaining configured profiles follow in settings
+   * order and are read lazily, so a request that never hops never touches
+   * another profile's secret. A native per-model key never hops: the user chose
+   * it for that model, and retrying elsewhere would spend a different account.
+   */
+  private failoverPlan(
+    modelId: string,
+    primary: { apiKey: string; profileId: string | undefined; source: ProfileRouteSource | "native" },
+  ): FailoverPlan<ChatKeyCandidate, ChatKey> {
+    const routed: ChatKeyCandidate = { profileId: primary.profileId, primary: true };
+    const candidates: ChatKeyCandidate[] = [routed];
+    if (primary.source !== "native") {
+      for (const route of resolveModelRouteCandidates(this.profileSettings(), this.effortOverrides(), modelId)) {
+        if (route.profileId !== primary.profileId) {
+          candidates.push({ profileId: route.profileId, primary: false });
+        }
+      }
+    }
+    return {
+      enabled: this.failoverEnabled(),
+      candidates,
+      resolve: async (candidate) => {
+        if (candidate.primary) {
+          return { apiKey: primary.apiKey, credentialId: credentialId(primary.apiKey) };
+        }
+        if (!candidate.profileId) {
+          return undefined;
+        }
+        const stored = await this.profileKey(candidate.profileId);
+        return stored ? { apiKey: stored, credentialId: credentialId(stored) } : undefined;
+      },
+      onHop: (hop) =>
+        diagnostic("chat.failover", {
+          modelId,
+          from: profileLabel(hop.from.profileId),
+          to: profileLabel(hop.to.profileId),
+          reason: hop.reason,
+          cooldownSeconds: hop.cooldownSeconds,
+        }),
+    };
+  }
+
+  /**
+   * The one place a profile key is read: SecretStorage, under its prefixed
+   * name. Kept as a helper so the failover retry reads a candidate's key
+   * through the same boundary as the routed one.
+   */
+  private async profileKey(profileId: string): Promise<string | undefined> {
+    return this.context.secrets.get(profileSecretName(profileId));
+  }
+
   /**
    * Resolves the key one chat request uses. A native per-model configuration
    * wins (VS Code "Manage Models"); otherwise `profile::model` routing and the
@@ -543,7 +673,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       diagnostic("chat.credential", { modelId, source: route.source });
       return { apiKey, profileId: undefined, source: route.source };
     }
-    const apiKey = await this.context.secrets.get(profileSecretName(route.profileId));
+    const apiKey = await this.profileKey(route.profileId);
     diagnostic("chat.credential", { modelId, ...describeRoute(route), hasKey: Boolean(apiKey) });
     if (!apiKey) {
       throw new ProfileKeyMissingError(route.profileId);
