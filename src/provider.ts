@@ -12,7 +12,8 @@ import {
   type DiscoveredModel,
   type ModelMetadata,
 } from "./modelCatalog";
-import { convertMessages, convertTools, estimateTokens, httpError, isImagePart } from "./openai/request";
+import { convertMessages, convertTools, httpError } from "./openai/request";
+import { countContentTokens, estimateTokens } from "./openai/tokens";
 import { OpenAIStreamDecoder, StreamLimitError, type StreamEvent } from "./openai/stream";
 import type { OpenAIUsage } from "./openai/types";
 import { sanitizeUpstreamText } from "./text";
@@ -282,17 +283,9 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       return estimateTokens(text);
     }
 
-    let characters = 0;
-    for (const part of text.content ?? []) {
-      if (part instanceof vscode.LanguageModelTextPart) {
-        characters += part.value.length;
-      } else if (isImagePart(part)) {
-        characters += Math.ceil(part.data.byteLength / 3);
-      } else {
-        characters += 64;
-      }
-    }
-    return Math.max(1, Math.ceil(characters / 4));
+    // Shares `src/openai/tokens.ts` with the history trimmer: images cost a flat
+    // IMAGE_TOKENS each and tool-call names/arguments are counted as text.
+    return countContentTokens(text.content ?? []);
   }
 
   async setApiKey(apiKey: string): Promise<void> {
