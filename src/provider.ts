@@ -12,6 +12,7 @@ import {
   type DiscoveredModel,
   type ModelMetadata,
 } from "./modelCatalog";
+import { historyConversationKey, trimHistoryToBudget } from "./openai/historyTrim";
 import { convertMessages, convertTools } from "./openai/request";
 import { countContentTokens, estimateTokens } from "./openai/tokens";
 import { OpenAIStreamDecoder, StreamLimitError, type StreamEvent } from "./openai/stream";
@@ -68,6 +69,8 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   private cache: CachedModels | undefined;
   private nativeBaseUrl: string | undefined;
   private lastDiscoveryError: DiscoveryFailure | undefined;
+  /** Conversations already warned about, so the trim warning appears once. */
+  private readonly warnedTrimmedConversations = new Set<string>();
 
   constructor(
     private readonly context: Pick<vscode.ExtensionContext, "secrets">,
@@ -190,13 +193,27 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     }
 
     const toolMapping = convertTools(options.tools ?? [], options.toolMode === vscode.LanguageModelChatToolMode.Required);
-    const openaiMessages = convertMessages(
+    const history = convertMessages(
       messages.map((message) => ({
         role: message.role === vscode.LanguageModelChatMessageRole.User ? "user" : "assistant",
         content: message.content ?? [],
       })),
       toolMapping.originalToSanitized,
     );
+    const trimmed = trimHistoryToBudget(history, this.inputBudgetTokens(model));
+    if (trimmed.trimmed) {
+      // Counts only: message content never reaches the diagnostic log.
+      diagnostic("chat.history.trimmed", {
+        modelId: model.id,
+        unitCount: trimmed.unitCount,
+        discardedUnits: trimmed.discardedUnits,
+        tokensBefore: trimmed.tokensBefore,
+        tokensAfter: trimmed.tokensAfter,
+        fits: trimmed.fits,
+      });
+      this.warnHistoryTrimmed(historyConversationKey(history));
+    }
+    const openaiMessages = trimmed.messages;
     const requestBody: Record<string, unknown> = {
       model: model.id,
       messages: openaiMessages,
@@ -336,6 +353,33 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     // Shares `src/openai/tokens.ts` with the history trimmer: images cost a flat
     // IMAGE_TOKENS each and tool-call names/arguments are counted as text.
     return countContentTokens(text.content ?? []);
+  }
+
+  /**
+   * Input budget the model advertises, already reduced from the context window
+   * by `toModelInfo`. Unknown or non-positive values disable trimming.
+   */
+  private inputBudgetTokens(model: vscode.LanguageModelChatInformation): number {
+    const budget = model.maxInputTokens;
+    return typeof budget === "number" && Number.isFinite(budget) && budget > 0
+      ? Math.floor(budget)
+      : Number.POSITIVE_INFINITY;
+  }
+
+  /** One interruption per conversation; later trims only reach the log. */
+  private warnHistoryTrimmed(conversationKey: string): void {
+    if (this.warnedTrimmedConversations.has(conversationKey)) {
+      return;
+    }
+    // Bound the set so a long-lived window cannot accumulate keys forever.
+    if (this.warnedTrimmedConversations.size >= 64) {
+      this.warnedTrimmedConversations.clear();
+    }
+    this.warnedTrimmedConversations.add(conversationKey);
+    void vscode.window.showWarningMessage(
+      "NaN Builders trimmed the middle of this conversation to fit the model's input limit, keeping the first turn and the current request. " +
+        "Start a new chat if the model needs those earlier details.",
+    );
   }
 
   async setApiKey(apiKey: string): Promise<void> {

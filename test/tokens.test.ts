@@ -3,6 +3,8 @@ import test from "node:test";
 import {
   IMAGE_TOKENS,
   countContentTokens,
+  countOpenAIMessageTokens,
+  countOpenAIMessagesTokens,
   estimateHistoryTokens,
   estimateTokens,
   flattenToolResult,
@@ -108,6 +110,43 @@ test("keeps the previous fixed allowance for unrecognized parts", () => {
 
 test("floors an empty message at one token", () => {
   assert.equal(countContentTokens([]), 1);
+});
+
+test("the request-side estimator agrees with the host counting path per message", () => {
+  const image = { mimeType: "image/png", data: new Uint8Array([1, 2, 3]) };
+  const toolCall = { callId: "call-1", name: "lookup", input: { q: "x" } };
+  const toolContent = [{ value: "result" }, image];
+
+  const textTokens = countContentTokens([{ value: "hello world" }]);
+  assert.equal(countOpenAIMessageTokens({ role: "user", content: "hello world" }), textTokens);
+  assert.equal(countOpenAIMessageTokens({ role: "assistant", content: [{ type: "text", text: "hello world" }] }), textTokens);
+
+  assert.equal(countOpenAIMessageTokens({ role: "user", content: [{ type: "image_url", image_url: { url: "data:x" } }] }), IMAGE_TOKENS);
+
+  const callTokens = countContentTokens([toolCall]);
+  assert.equal(
+    countOpenAIMessageTokens({
+      role: "assistant",
+      content: null,
+      tool_calls: [{ id: "call-1", type: "function", function: { name: "lookup", arguments: '{"q":"x"}' } }],
+    }),
+    callTokens,
+  );
+
+  assert.equal(
+    countOpenAIMessageTokens({ role: "tool", tool_call_id: "call-1", content: flattenToolResult(toolContent) }),
+    countContentTokens([{ callId: "call-1", content: toolContent }]),
+  );
+
+  const messages = [
+    { role: "user" as const, content: "hello world" },
+    { role: "assistant" as const, content: null, tool_calls: [{ id: "call-1", type: "function" as const, function: { name: "lookup", arguments: '{"q":"x"}' } }] },
+  ];
+  assert.equal(
+    countOpenAIMessagesTokens(messages),
+    countOpenAIMessageTokens(messages[0]) + countOpenAIMessageTokens(messages[1]),
+  );
+  assert.equal(countOpenAIMessageTokens({ role: "assistant", content: null }), 1);
 });
 
 test("the history estimator and the host counting path agree on the same payload", () => {
