@@ -145,6 +145,13 @@
           "default": true,
           "description": "Show NaN usage in the VS Code status bar: plan-credit usage % when an API key is configured, otherwise local session usage."
         },
+        "nanBuilders.lowCreditWarningPercent": {
+          "type": "number",
+          "default": 10,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Warn once when the remaining share of the plan's credit allowance falls to this percentage or below, with a Show Usage action and a warning-styled status bar while credits stay low. Set to 0 to disable. Ignored when the usage report has no remaining credits or no known allowance."
+        },
         "nanBuilders.diagnostics.enabled": {
           "type": "boolean",
           "default": false,

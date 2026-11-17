@@ -33,7 +33,15 @@ import { getKnownModel, resolveReasoningEffort } from "./modelCatalog";
 import { AccountUsageService, accountModelRows, windowCredits } from "./accountUsage";
 import { compactTokens } from "./quotaCatalog";
 import { API_REQUESTS_CUTOFF_DATE, CACHED_TOKENS_CUTOFF_DATE, CREDITS_CUTOFF_DATE, type UsageCredits } from "./usageApi";
-import { describePackExpiry, formatCredits, formatPercent, usageLinks, type UsageLink } from "./usagePresentation";
+import {
+  describePackExpiry,
+  formatCredits,
+  formatPercent,
+  LowCreditWatcher,
+  usageLinks,
+  type RemainingCredits,
+  type UsageLink,
+} from "./usagePresentation";
 import { UsageTracker } from "./usageTracker";
 import { FAILOVER_SETTING, FAILOVER_WARNING, failoverWarningPending } from "./failover";
 
@@ -219,9 +227,27 @@ export function activate(context: vscode.ExtensionContext): {
   syncInlineCompletions();
   diagnostic("activate.provider.created");
 
+  // At most one low-credit warning per threshold crossing, per extension session.
+  const lowCreditWatcher = new LowCreditWatcher();
+  const notifyLowCredits = (): void => {
+    const threshold = vscode.workspace
+      .getConfiguration("nanBuilders")
+      .get<number>("lowCreditWarningPercent", 10);
+    const decision = lowCreditWatcher.update(account.snapshot?.report.credits, threshold);
+    diagnostic("refreshAccountUsage.lowCredits", {
+      warn: decision.warn,
+      low: decision.low,
+      percent: decision.remaining?.percent ?? "unavailable",
+    });
+    if (decision.warn && decision.remaining) {
+      void warnLowCredits(decision.remaining);
+    }
+  };
+
   const refreshAccountUsage = async (options: { force?: boolean; manual?: boolean } = {}): Promise<void> => {
     try {
       await account.refresh({ force: options.force ?? false });
+      notifyLowCredits();
     } catch (error) {
       if (isAbortError(error)) {
         return;
@@ -1272,6 +1298,22 @@ function creditsItems(credits: UsageCredits | undefined): vscode.QuickPickItem[]
     });
   }
   return items;
+}
+
+const SHOW_USAGE_ACTION = "Show Usage";
+
+/** One warning per threshold crossing; "Show Usage" opens the account-usage QuickPick. */
+async function warnLowCredits(remaining: RemainingCredits): Promise<void> {
+  const percent = formatPercent(Math.round(remaining.percent * 10) / 10);
+  const choice = await vscode.window.showWarningMessage(
+    `NaN Builders: only ${percent}% of your plan credits remain ` +
+      `(${formatCredits(remaining.remaining)} of ${formatCredits(remaining.allowance)}). ` +
+      `Agent requests fail once the allowance is used up.`,
+    SHOW_USAGE_ACTION,
+  );
+  if (choice === SHOW_USAGE_ACTION) {
+    await vscode.commands.executeCommand("nanBuilders.showUsage");
+  }
 }
 
 function errorMessage(error: unknown): string {
