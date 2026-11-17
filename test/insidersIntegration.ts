@@ -215,7 +215,9 @@ export async function run(): Promise<void> {
         globalThis.fetch = async () => new Response(null, { status, statusText: "Rejected" });
         await assert.rejects(
           activeTestApi.validateModelsTest(),
-          /NaN Builders rejected the API key\. Update it with 'NaN Builders: Manage Provider'\./,
+          new RegExp(
+            `NaN Builders rejected the API key \\(HTTP ${status}\\)\\. Update it with 'NaN Builders: Manage Provider'\\.`,
+          ),
         );
       };
       await assertAuthStatus(401);
