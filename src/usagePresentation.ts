@@ -160,14 +160,80 @@ export function statusBarText(
   headlinePercent: number | undefined,
   localTotal: number,
   frozen = false,
+  lowCredits = false,
 ): string {
   if (headlinePercent !== undefined && frozen) {
     return "$(warning) NaN frozen";
   }
   if (headlinePercent !== undefined) {
-    return `$(graph) NaN ${formatPercent(headlinePercent)}%`;
+    return `${lowCredits ? "$(warning)" : "$(graph)"} NaN ${formatPercent(headlinePercent)}%`;
   }
   return localTotal > 0 ? `$(graph) NaN ${compact(localTotal)}` : "$(sparkle) NaN";
+}
+
+/** Plan credits still available, with the exact (unrounded) share of the allowance. */
+export interface RemainingCredits {
+  readonly remaining: number;
+  readonly allowance: number;
+  readonly percent: number;
+}
+
+/**
+ * Remaining plan credits, or undefined when the account reports no remaining
+ * amount or the allowance is unknown/invalid. Both cases mean "do not warn":
+ * a missing value is unavailable data, not zero credits.
+ */
+export function remainingCredits(credits: UsageCredits | undefined): RemainingCredits | undefined {
+  const remaining = credits?.remaining;
+  const allowance = credits?.allowance;
+  if (remaining === undefined || !Number.isFinite(remaining)) {
+    return undefined;
+  }
+  if (allowance === undefined || !Number.isFinite(allowance) || allowance <= 0) {
+    return undefined;
+  }
+  return { remaining, allowance, percent: (remaining / allowance) * 100 };
+}
+
+/** True while remaining plan credits are at or below an enabled threshold (0 disables). */
+export function lowCreditsActive(credits: UsageCredits | undefined, thresholdPercent: number): boolean {
+  if (!Number.isFinite(thresholdPercent) || thresholdPercent <= 0) {
+    return false;
+  }
+  const level = remainingCredits(credits);
+  return level !== undefined && level.percent <= thresholdPercent;
+}
+
+export interface LowCreditDecision {
+  /** True only on the refresh that crosses into the low-credit band. */
+  readonly warn: boolean;
+  /** True whenever remaining credits are at or below an enabled threshold. */
+  readonly low: boolean;
+  readonly remaining?: RemainingCredits;
+}
+
+/**
+ * Warns at most once per threshold crossing. A successful refresh below the
+ * threshold sets `warn` once; later refreshes at the same level stay quiet, and
+ * recovering above the threshold re-arms the warning for the next drop.
+ * Unavailable credit data neither warns nor re-arms.
+ */
+export class LowCreditWatcher {
+  private belowThreshold = false;
+
+  update(credits: UsageCredits | undefined, thresholdPercent: number): LowCreditDecision {
+    if (!Number.isFinite(thresholdPercent) || thresholdPercent <= 0) {
+      return { warn: false, low: false, remaining: remainingCredits(credits) };
+    }
+    const level = remainingCredits(credits);
+    if (!level) {
+      return { warn: false, low: false };
+    }
+    const low = level.percent <= thresholdPercent;
+    const crossing = low && !this.belowThreshold;
+    this.belowThreshold = low;
+    return { warn: crossing, low, remaining: level };
+  }
 }
 
 export function buildTooltipMarkdown(input: TooltipInput): string {

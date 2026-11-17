@@ -4,7 +4,7 @@ import { diagnostic } from "./diagnostics";
 import type { OpenAIUsage } from "./openai/types";
 import { quotaSummaryItems, type QuotaSummaryItem } from "./quotaCatalog";
 import { addUsage, formatHistory, normalizeHistory, type DailyUsage } from "./usageHistory";
-import { buildTooltipMarkdown, statusBarText } from "./usagePresentation";
+import { buildTooltipMarkdown, lowCreditsActive, statusBarText } from "./usagePresentation";
 
 const HISTORY_KEY = "nanBuilders.localUsageHistory";
 
@@ -115,8 +115,18 @@ export class UsageTracker implements vscode.Disposable {
   private render(): void {
     const headline = this.accountHeadlinePercent();
     const localTotal = this.promptTokens + this.completionTokens;
-    this.item.text = statusBarText(headline, localTotal, this.accountCreditsFrozen());
+    const frozen = this.accountCreditsFrozen();
+    const low = this.lowCredits();
+    this.item.text = statusBarText(headline, localTotal, frozen, low);
+    this.item.backgroundColor = low ? new vscode.ThemeColor("statusBarItem.warningBackground") : undefined;
     this.item.tooltip = this.buildTooltip();
+  }
+
+  private lowCredits(): boolean {
+    const threshold = vscode.workspace
+      .getConfiguration("nanBuilders")
+      .get<number>("lowCreditWarningPercent", 10);
+    return lowCreditsActive(this.account?.snapshot?.report.credits, threshold);
   }
 
   private accountHeadlinePercent(): number | undefined {

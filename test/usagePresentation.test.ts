@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { AccountUsageSnapshot } from "../src/accountUsage";
 import type { QuotaSummaryItem } from "../src/quotaCatalog";
-import type { UsageReport } from "../src/usageApi";
+import type { UsageCredits, UsageReport } from "../src/usageApi";
 import { normalizeHistory } from "../src/usageHistory";
 import {
   buildTooltipMarkdown,
@@ -11,6 +11,9 @@ import {
   escapeMarkdown,
   formatCredits,
   formatPercent,
+  LowCreditWatcher,
+  lowCreditsActive,
+  remainingCredits,
   statusBarText,
   usageLinks,
 } from "../src/usagePresentation";
@@ -392,4 +395,75 @@ test("history loading keeps only valid stored records", () => {
   );
   assert.equal(kept.length, 1);
   assert.equal(kept[0].modelId, "deepseek-v4-flash");
+});
+
+function credits(overrides: Partial<UsageCredits> = {}): UsageCredits {
+  return { allowance: 7_000, used: 6_440, remaining: 560, periodEnd: "2026-02-01", ...overrides };
+}
+
+test("low-credit watcher warns once when remaining credits fall to the threshold", () => {
+  const watcher = new LowCreditWatcher();
+  const first = watcher.update(credits(), 10);
+  assert.equal(first.warn, true);
+  assert.equal(first.low, true);
+  assert.equal(first.remaining?.percent, 8);
+  assert.equal(first.remaining?.remaining, 560);
+  assert.equal(first.remaining?.allowance, 7_000);
+});
+
+test("low-credit watcher stays quiet while credits remain at the same low level", () => {
+  const watcher = new LowCreditWatcher();
+  assert.equal(watcher.update(credits(), 10).warn, true);
+  const again = watcher.update(credits(), 10);
+  assert.equal(again.warn, false);
+  assert.equal(again.low, true);
+  const lower = watcher.update(credits({ used: 6_790, remaining: 210 }), 10);
+  assert.equal(lower.warn, false);
+  assert.equal(lower.low, true);
+});
+
+test("low-credit watcher re-arms after credits recover above the threshold", () => {
+  const watcher = new LowCreditWatcher();
+  assert.equal(watcher.update(credits(), 10).warn, true);
+  const recovered = watcher.update(credits({ used: 3_500, remaining: 3_500 }), 10);
+  assert.equal(recovered.warn, false);
+  assert.equal(recovered.low, false);
+  assert.equal(watcher.update(credits(), 10).warn, true);
+});
+
+test("low-credit watcher never warns without remaining credits or a known allowance", () => {
+  const watcher = new LowCreditWatcher();
+  const noRemaining = watcher.update({ allowance: 7_000, used: 6_900 }, 10);
+  assert.deepEqual([noRemaining.warn, noRemaining.low], [false, false]);
+  const noAllowance = watcher.update({ used: 100, remaining: 5 }, 10);
+  assert.deepEqual([noAllowance.warn, noAllowance.low], [false, false]);
+  const zeroAllowance = watcher.update({ allowance: 0, used: 0, remaining: 0 }, 10);
+  assert.deepEqual([zeroAllowance.warn, zeroAllowance.low], [false, false]);
+  // Unavailable data must not consume the crossing: the next real low reading still warns.
+  assert.equal(watcher.update(credits(), 10).warn, true);
+});
+
+test("low-credit watcher is disabled by a zero threshold", () => {
+  const watcher = new LowCreditWatcher();
+  const decision = watcher.update(credits(), 0);
+  assert.equal(decision.warn, false);
+  assert.equal(decision.low, false);
+  assert.equal(lowCreditsActive(credits(), 0), false);
+});
+
+test("remaining credits separate unavailable data from zero and keep an exact percent", () => {
+  assert.equal(remainingCredits(undefined), undefined);
+  assert.equal(remainingCredits({ allowance: 7_000 }), undefined);
+  assert.equal(remainingCredits({ remaining: 100 }), undefined);
+  assert.equal(remainingCredits({ allowance: -1, remaining: 100 }), undefined);
+  const depleted = remainingCredits({ allowance: 7_000, remaining: 0 });
+  assert.equal(depleted?.percent, 0);
+  assert.equal(lowCreditsActive({ allowance: 7_000, remaining: 0 }, 10), true);
+});
+
+test("status bar shows a warning style while credits are low and keeps frozen ahead of it", () => {
+  assert.equal(statusBarText(92, 0, false, true), "$(warning) NaN 92%");
+  assert.equal(statusBarText(92, 0, false, false), "$(graph) NaN 92%");
+  assert.equal(statusBarText(92, 0, true, true), "$(warning) NaN frozen");
+  assert.equal(statusBarText(undefined, 1_500, false, true), "$(graph) NaN 1.5K");
 });
