@@ -74,6 +74,40 @@ test("catalog covers the larger models NaN added on 2026-11-10", () => {
   assert.deepEqual(toDisplayMetadata("qwen3.8-max").reasoningEffortValues, ["none", "low", "medium", "high", "max"]);
 });
 
+test("catalog covers the additional November models qwen4-max and hy4-flash", () => {
+  const qwen4 = toDisplayMetadata("qwen4-max");
+  assert.ok(knownChatModelIds().includes("qwen4-max"));
+  assert.equal(qwen4.name, "Qwen 4 Max");
+  assert.equal(qwen4.contextWindow, 1_048_576);
+  assert.equal(qwen4.maxOutputTokens, 131_072);
+  assert.equal(qwen4.imageInput, true);
+  assert.equal(qwen4.toolCalling, true);
+  assert.equal(qwen4.largerModel, true);
+  assert.deepEqual(qwen4.reasoningEffortValues, ["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
+  assert.match(billingDescription(qwen4), /larger model/);
+
+  const hy4Flash = toDisplayMetadata("hy4-flash");
+  assert.ok(knownChatModelIds().includes("hy4-flash"));
+  assert.equal(hy4Flash.name, "Tencent Hunyuan 4 Flash");
+  assert.equal(hy4Flash.contextWindow, 1_048_576);
+  assert.equal(hy4Flash.maxOutputTokens, 65_536);
+  assert.equal(hy4Flash.imageInput, true);
+  assert.equal(hy4Flash.toolCalling, true);
+  // Metered from the shared credits pool, but not one of the larger models.
+  assert.notEqual(hy4Flash.largerModel, true);
+  assert.match(billingDescription(hy4Flash), /^Billing: credits from the account-wide pool/);
+  // Docs publish no per-level ladder for this November model, so like kimi/deepseek-pro it is model-managed.
+  assert.deepEqual(hy4Flash.reasoningEffortValues, []);
+  assert.match(reasoningDescription(hy4Flash), /model-managed/);
+});
+
+test("new November models keep catalog-first discovery working", () => {
+  assert.deepEqual(
+    filterDiscoveredModels([{ id: "qwen4-max" }, { id: "hy4-flash" }], false).map((model) => model.id),
+    ["qwen4-max", "hy4-flash"],
+  );
+});
+
 test("clef is a decision endpoint, not a chat model", () => {
   assert.deepEqual(filterDiscoveredModelIds(["clef", "glm5.3-flash"], true), ["glm5.3-flash"]);
 });

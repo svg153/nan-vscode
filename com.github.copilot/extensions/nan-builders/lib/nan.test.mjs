@@ -41,6 +41,8 @@ test("isChatModel follows metadata, denylist and known catalog (conservative def
   assert.equal(isChatModel({ id: "mystery", is_chat: true }), true); // explicit metadata
   assert.equal(isChatModel({ id: "mystery", model_type: "embedding" }), false);
   assert.equal(isChatModel({ id: "qwen3.8-flash" }), true); // known catalog fallback
+  assert.equal(isChatModel({ id: "qwen4-max" }), true); // known catalog fallback
+  assert.equal(isChatModel({ id: "hy4-flash" }), true); // known catalog fallback
   assert.equal(isChatModel({ id: "mystery" }), false); // unknown without metadata
 });
 

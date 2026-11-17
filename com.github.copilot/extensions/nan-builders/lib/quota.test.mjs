@@ -88,6 +88,11 @@ test("unmetered models carry the published note, never a percentage", () => {
   assert.equal(unmeteredNote("glm5.3"), undefined);
   assert.equal(quotaCapLabel("glm5.3"), "Paid from plan credits");
   assert.equal(quotaCapLabel("brand-new-model"), "Billed in credits; no documented allowance");
+  // qwen4-max and hy4-flash are metered from the shared pool, like the other November models.
+  for (const model of ["qwen4-max", "hy4-flash", "kimi-k3.1-pro", "qwen3.8-max", "deepseek-v4-pro", "hy4"]) {
+    assert.equal(unmeteredNote(model), undefined, model);
+    assert.equal(quotaCapLabel(model), "Paid from plan credits", model);
+  }
   assert.equal(creditsNote("gemma4", 0), "Does not draw credits");
   assert.equal(creditsNote("gemma4", undefined), "Does not draw credits");
   assert.equal(creditsNote("glm5.3", 0), "No credits billed in this window");

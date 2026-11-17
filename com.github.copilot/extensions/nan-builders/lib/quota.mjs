@@ -28,7 +28,13 @@ export const KNOWN_CHAT_MODELS = [
   { id: "mimo-v2.6-flash", name: "Xiaomi MiMo V2.6 Flash", contextWindow: 1_048_576, maxOutputTokens: 32_768, imageInput: true, toolCalling: true },
   { id: "gemma4", name: "Gemma 4", contextWindow: 262_144, maxOutputTokens: 65_536, imageInput: true, toolCalling: false },
   { id: "qwen3.6", name: "Qwen 3.6", contextWindow: 262_144, maxOutputTokens: 65_536, imageInput: true, toolCalling: false },
-  { id: "glm5.3", name: "GLM 5.3", contextWindow: 1_048_576, maxOutputTokens: 32_768, imageInput: false, toolCalling: true, premium: true },
+  { id: "glm5.3", name: "GLM 5.3", contextWindow: 1_048_576, maxOutputTokens: 32_768, imageInput: false, toolCalling: true, largerModel: true },
+  { id: "kimi-k3.1-pro", name: "Kimi K3.1 Pro", contextWindow: 1_048_576, maxOutputTokens: 131_072, imageInput: true, toolCalling: true, largerModel: true },
+  { id: "qwen3.8-max", name: "Qwen 3.8 Max", contextWindow: 1_048_576, maxOutputTokens: 131_072, imageInput: true, toolCalling: true, largerModel: true },
+  { id: "qwen4-max", name: "Qwen 4 Max", contextWindow: 1_048_576, maxOutputTokens: 131_072, imageInput: true, toolCalling: true, largerModel: true },
+  { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", contextWindow: 1_048_576, maxOutputTokens: 393_216, imageInput: false, toolCalling: true, largerModel: true },
+  { id: "hy4", name: "Tencent Hunyuan 4", contextWindow: 1_048_576, maxOutputTokens: 65_536, imageInput: true, toolCalling: true, largerModel: true },
+  { id: "hy4-flash", name: "Tencent Hunyuan 4 Flash", contextWindow: 1_048_576, maxOutputTokens: 65_536, imageInput: true, toolCalling: true },
 ];
 
 const BY_ID = new Map(KNOWN_CHAT_MODELS.map((model) => [model.id, model]));
