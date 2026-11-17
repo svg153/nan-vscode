@@ -4,6 +4,7 @@ import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
+import { supportsNativeChatUsage } from "../src/nativeChatUsage";
 
 export async function run(): Promise<void> {
   let chatRequest: Record<string, unknown> | undefined;
@@ -283,7 +284,7 @@ export async function run(): Promise<void> {
       }
     }
     assert.equal(optedInText, "NAN_OK");
-    if (/^1\\.(?:14[6-9]|1[5-9]\\d|[2-9]\\d\\d)\\./.test(vscode.version)
+    if (supportsNativeChatUsage(vscode.version)
       && typeof (vscode as unknown as { LanguageModelDataPart?: unknown }).LanguageModelDataPart === "function") {
       assert.equal(usageParts.length, 1, "Enabled supported host must receive exactly one usage part.");
       assert.deepEqual(JSON.parse(new TextDecoder().decode(usageParts[0])), {
