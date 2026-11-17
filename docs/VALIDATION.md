@@ -134,6 +134,18 @@ Expected: a slow stream that keeps emitting chunks is never aborted, regardless 
 
 Unit tests use a fake clock to cover re-arming on chunks, firing on silence, firing on missing headers, and clearing both timers on cancellation.
 
+## Transparent retries
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `nanBuilders.maxRetries` | `2` | Extra attempts for a retryable failure that happens before the stream starts. `0` disables retries. |
+
+Temporarily point `nanBuilders.apiBaseUrl` at a stub that answers the first request with `429` and a `Retry-After: 1` header, then streams normally.
+
+Expected: the reply arrives after a visible pause of about one second, the Output channel logs one `chat.retry` diagnostic naming the model, attempt, wait and error code, and the request is counted once in the queue rather than holding a slot during the wait. Canceling from Chat during the pause stops the retry immediately and releases the slot. With `maxRetries: 0` the same stub shows the throttle error instead of retrying, and the error still triggers `nanBuilders.failoverOnThrottle` when that is enabled.
+
+Unit tests use a fake clock to cover a `Retry-After` wait, backoff doubling with jitter, the 8 s cap, exhausted retries reporting the mapped error, an `insufficient_quota` 429 that is never retried, cancellation during the wait, and the retry-before-failover ordering.
+
 ## Cancellation
 
 Start a long request and cancel it from Chat.

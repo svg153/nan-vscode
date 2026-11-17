@@ -140,6 +140,13 @@
           "maximum": 7,
           "description": "Chat requests and inline completions allowed to run at once for one API key. NaN serves up to 7 concurrent requests per key and answers more with HTTP 429, so extra requests wait in a first-in-first-out queue instead. Lower it to leave headroom for other editors or terminals using the same key. Values above 7 are capped at the gateway limit."
         },
+        "nanBuilders.maxRetries": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 5,
+          "description": "Times a chat request is retried transparently when it fails before the response stream emits its first byte: throttling (429 with Retry-After), gateway errors (502/503/504 and other 5xx), connect timeouts, and network failures. The first retry waits for the gateway's Retry-After (capped at 8 s) or 0.5-1 s of jittered exponential backoff, doubling per retry and capped at 8 s. Set to 0 to disable retries and see every failure immediately. Retries reuse the same key; exhausted-credit (insufficient_quota) and other 4xx responses are never retried, and a request is never retried once the stream has started."
+        },
         "nanBuilders.showStatusBar": {
           "type": "boolean",
           "default": true,

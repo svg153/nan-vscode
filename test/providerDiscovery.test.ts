@@ -5,6 +5,7 @@ import type * as vscode from "vscode";
 import { SECRET_API_KEY } from "../src/constants";
 import { RequestTimeoutError } from "../src/openai/request";
 import { DEFAULT_MAX_PARALLEL_REQUESTS, SlotQueueRegistry, credentialId } from "../src/openai/slotQueue";
+import { ProviderError } from "../src/providerErrors";
 import { MAX_ERROR_RESPONSE_BYTES, MAX_JSON_RESPONSE_BYTES, ResponseTooLargeError } from "../src/responseBody";
 import { MAX_SSE_LINE_CHARS, StreamLimitError } from "../src/openai/stream";
 
@@ -1021,7 +1022,9 @@ test("a failed chat response releases its slot for the next request", async () =
     }
     chatAttempts += 1;
     if (chatAttempts === 1) {
-      return new Response("rate limited", { status: 429 });
+      // A 4xx other than an exhausted-credit 429 is never retried, so the
+      // failure stays visible and this test keeps asserting slot release.
+      return new Response("bad request", { status: 400 });
     }
     return new Response(ssePayload("hi"));
   }, undefined, slots);
@@ -1037,6 +1040,242 @@ test("a failed chat response releases its slot for the next request", async () =
     assert.equal(chatAttempts, 2);
   } finally {
     harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("retries a throttled chat request after Retry-After and streams the retried reply", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const originalFetch = globalThis.fetch;
+  let chatAttempts = 0;
+  const harness = createHarness(async (input) => {
+    if (String(input).endsWith("/models")) {
+      return modelListResponse({ data: [{ id: "mimo-v2.6-flash" }] });
+    }
+    chatAttempts += 1;
+    if (chatAttempts === 1) {
+      return new Response(JSON.stringify({ error: { code: "rate_limit_exceeded" } }), {
+        status: 429,
+        headers: { "Retry-After": "1" },
+      });
+    }
+    return new Response(ssePayload("hi"));
+  });
+  try {
+    const model = await discoverChatModel(harness.provider);
+    const reported: unknown[] = [];
+    const outcome = chatOutcome(harness.provider, model, reported);
+    await flushAsyncWork();
+    assert.equal(chatAttempts, 1);
+
+    // Nothing is retried before the gateway's Retry-After has elapsed.
+    t.mock.timers.tick(999);
+    await flushAsyncWork();
+    assert.equal(chatAttempts, 1);
+
+    t.mock.timers.tick(1);
+    await flushAsyncWork();
+    assert.equal(await outcome, undefined);
+    assert.equal(chatAttempts, 2);
+    assert.equal(reported.length, 1);
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("stops at maxRetries for a persistent gateway error and reports the mapped failure", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const originalFetch = globalThis.fetch;
+  let chatAttempts = 0;
+  const harness = createHarness(async (input) => {
+    if (String(input).endsWith("/models")) {
+      return modelListResponse({ data: [{ id: "mimo-v2.6-flash" }] });
+    }
+    chatAttempts += 1;
+    return new Response("upstream unavailable", { status: 503 });
+  });
+  try {
+    const model = await discoverChatModel(harness.provider);
+    const outcome = chatOutcome(harness.provider, model, []);
+    for (let step = 0; step < 8; step += 1) {
+      // oxlint-disable-next-line eslint/no-await-in-loop
+      await flushAsyncWork();
+      t.mock.timers.tick(1_000);
+    }
+    const error = await outcome;
+    assert.ok(error instanceof ProviderError);
+    assert.equal(error.code, "gateway_error");
+    // One request plus the two retries `nanBuilders.maxRetries` allows by default.
+    assert.equal(chatAttempts, 3);
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("never retries a 429 that reports an exhausted credit pool", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const originalFetch = globalThis.fetch;
+  let chatAttempts = 0;
+  const harness = createHarness(async (input) => {
+    if (String(input).endsWith("/models")) {
+      return modelListResponse({ data: [{ id: "mimo-v2.6-flash" }] });
+    }
+    chatAttempts += 1;
+    return new Response(JSON.stringify({ error: { code: "insufficient_quota" } }), {
+      status: 429,
+      headers: { "Retry-After": "1" },
+    });
+  });
+  try {
+    const model = await discoverChatModel(harness.provider);
+    const error = await chatOutcome(harness.provider, model, []);
+    t.mock.timers.tick(30_000);
+    await flushAsyncWork();
+    assert.ok(error instanceof ProviderError);
+    assert.equal(error.code, "insufficient_quota");
+    assert.equal(chatAttempts, 1);
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("cancelling during a retry backoff sends no further request and frees the slot", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const originalFetch = globalThis.fetch;
+  const slots = new SlotQueueRegistry(1);
+  let chatAttempts = 0;
+  const harness = createHarness(
+    async (input) => {
+      if (String(input).endsWith("/models")) {
+        return modelListResponse({ data: [{ id: "mimo-v2.6-flash" }] });
+      }
+      chatAttempts += 1;
+      return new Response("upstream unavailable", { status: 503 });
+    },
+    undefined,
+    slots,
+  );
+  const keySlots = () => slots.forCredential(credentialId("unit-test-key"));
+  try {
+    const model = await discoverChatModel(harness.provider);
+    const token = new TestCancellationToken();
+    const reported: unknown[] = [];
+    const outcome = chatOutcome(harness.provider, model, reported, token);
+    await flushAsyncWork();
+    assert.equal(chatAttempts, 1);
+    // The failed request already released its slot, so the backoff holds none.
+    assert.equal(keySlots().inUse, 0);
+
+    token.cancel();
+    assert.equal(await outcome, undefined);
+    await flushAsyncWork();
+    assert.equal(chatAttempts, 1);
+    assert.equal(keySlots().inUse, 0);
+
+    t.mock.timers.tick(60_000);
+    await flushAsyncWork();
+    assert.equal(chatAttempts, 1);
+    assert.deepEqual(reported, []);
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("nanBuilders.maxRetries 0 restores one request per turn and no retry wait", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const originalFetch = globalThis.fetch;
+  let chatAttempts = 0;
+  const harness = createHarness(async (input) => {
+    if (String(input).endsWith("/models")) {
+      return modelListResponse({ data: [{ id: "mimo-v2.6-flash" }] });
+    }
+    chatAttempts += 1;
+    return new Response(JSON.stringify({ error: { code: "rate_limit_exceeded" } }), {
+      status: 429,
+      headers: { "Retry-After": "1" },
+    });
+  });
+  try {
+    const model = await discoverChatModel(harness.provider);
+    settings.set("maxRetries", 0);
+    const error = await chatOutcome(harness.provider, model, []);
+    t.mock.timers.tick(30_000);
+    await flushAsyncWork();
+    assert.ok(error instanceof ProviderError);
+    assert.equal(error.code, "rate_limit_exceeded");
+    assert.equal(chatAttempts, 1);
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("retries on the same key before the opt-in failover hops to another profile", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const originalFetch = globalThis.fetch;
+  settings.clear();
+  settings.set("apiBaseUrl", "https://unit.test/v1/");
+  settings.set("includeUnknownModels", false);
+  settings.set("modelCacheSeconds", 300);
+  settings.set("profiles", ["personal", "work"]);
+  settings.set("activeProfile", "personal");
+  settings.set("failoverOnThrottle", true);
+  const profileKeys: Record<string, string> = {
+    "nanBuilders.profileKey.personal": "personal-key",
+    "nanBuilders.profileKey.work": "work-key",
+  };
+  const usedKeys: string[] = [];
+  globalThis.fetch = async (input, init) => {
+    if (String(input).endsWith("/models")) {
+      return modelListResponse({ data: [{ id: "mimo-v2.6-flash" }] });
+    }
+    const authorization = new Headers(init?.headers).get("Authorization") ?? "";
+    usedKeys.push(authorization);
+    if (authorization === "Bearer personal-key") {
+      return new Response(JSON.stringify({ error: { code: "rate_limit_exceeded" } }), {
+        status: 429,
+        headers: { "Retry-After": "1" },
+      });
+    }
+    return new Response(ssePayload("hi"));
+  };
+  const secrets: vscode.SecretStorage = {
+    keys: async () => Object.keys(profileKeys),
+    get: async (key) => profileKeys[key],
+    store: async () => undefined,
+    delete: async () => undefined,
+    onDidChange: () => ({ dispose: () => undefined }),
+  };
+  const provider = new NanChatModelProvider(
+    { secrets },
+    { record: async () => undefined },
+    { authorize: async () => undefined },
+    new SlotQueueRegistry(1),
+  );
+  try {
+    const model = await discoverChatModel(provider);
+    const reported: unknown[] = [];
+    const outcome = chatOutcome(provider, model, reported);
+    for (let step = 0; step < 10; step += 1) {
+      // oxlint-disable-next-line eslint/no-await-in-loop
+      await flushAsyncWork();
+      t.mock.timers.tick(1_000);
+    }
+    assert.equal(await outcome, undefined);
+    // #151 exhausts the retries on the routed key first; only then may #144 hop.
+    assert.deepEqual(usedKeys, [
+      "Bearer personal-key",
+      "Bearer personal-key",
+      "Bearer personal-key",
+      "Bearer work-key",
+    ]);
+    assert.equal(reported.length, 1);
+  } finally {
+    provider.dispose();
     globalThis.fetch = originalFetch;
   }
 });
