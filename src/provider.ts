@@ -12,9 +12,11 @@ import {
   type DiscoveredModel,
   type ModelMetadata,
 } from "./modelCatalog";
-import { convertMessages, convertTools, estimateTokens, httpError, isImagePart } from "./openai/request";
+import { convertMessages, convertTools } from "./openai/request";
+import { countContentTokens, estimateTokens } from "./openai/tokens";
 import { OpenAIStreamDecoder, StreamLimitError, type StreamEvent } from "./openai/stream";
 import type { OpenAIUsage } from "./openai/types";
+import { httpError, parseRetryAfter, toProviderError } from "./providerErrors";
 import { sanitizeUpstreamText } from "./text";
 import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
 import type { UsageTracker } from "./usageTracker";
@@ -264,7 +266,9 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
         cancelled: token.isCancellationRequested,
       });
       if (!token.isCancellationRequested && !isAbortError(error)) {
-        throw error;
+        // Transport failures (timeouts, DNS, refused connections) become
+        // actionable messages here; application errors pass through unchanged.
+        throw toProviderError(error);
       }
     } finally {
       reader?.releaseLock();
@@ -282,17 +286,9 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       return estimateTokens(text);
     }
 
-    let characters = 0;
-    for (const part of text.content ?? []) {
-      if (part instanceof vscode.LanguageModelTextPart) {
-        characters += part.value.length;
-      } else if (isImagePart(part)) {
-        characters += Math.ceil(part.data.byteLength / 3);
-      } else {
-        characters += 64;
-      }
-    }
-    return Math.max(1, Math.ceil(characters / 4));
+    // Shares `src/openai/tokens.ts` with the history trimmer: images cost a flat
+    // IMAGE_TOKENS each and tool-call names/arguments are counted as text.
+    return countContentTokens(text.content ?? []);
   }
 
   async setApiKey(apiKey: string): Promise<void> {
@@ -422,13 +418,23 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
         delete fallback.stream_options;
         response = await send(fallback);
       } else {
-        throw httpError(response.status, response.statusText, text);
+        throw httpError(
+          response.status,
+          response.statusText,
+          text,
+          parseRetryAfter(response.headers.get("Retry-After")),
+        );
       }
     }
 
     if (!response.ok) {
       const text = await readChatErrorText(response);
-      throw httpError(response.status, response.statusText, text);
+      throw httpError(
+        response.status,
+        response.statusText,
+        text,
+        parseRetryAfter(response.headers.get("Retry-After")),
+      );
     }
     return response;
   }

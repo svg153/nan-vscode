@@ -9,6 +9,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      released: ${{ steps.tag.outputs.released }}
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -21,15 +24,35 @@ jobs:
       - run: npm run release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Detect the release semantic-release created
+        id: tag
+        shell: bash
+        # semantic-release does not commit version bumps, so the only proof of a
+        # release is a tag pointing at HEAD. Commits that produce no release
+        # (docs-only, for example) must not republish a preview version.
+        run: |
+          git fetch --tags --force origin
+          tag=$(git tag --points-at HEAD --list 'v[0-9]*' | sort -V | tail -n 1)
+          if [ -z "$tag" ]; then
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::This commit produced no release, so the preview channel is unchanged."
+            exit 0
+          fi
+          echo "released=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Released $tag"
 
-  # Rolling preview channel: every merge to main publishes an installable
-  # prerelease VSIX to the fixed `preview` GitHub release. Validate it with
-  # "Install from VSIX"; promotion to the Marketplace stays manual
-  # (see publish-stable.yml).
+  # Marketplace pre-release channel: every merge that cuts a release publishes a
+  # preview version, so "Switch to Pre-Release Version" in VS Code installs
+  # exactly what `main` builds. Publishing stable stays gated behind
+  # publish-stable.yml.
   preview:
+    needs: release
+    if: needs.release.outputs.released == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -38,25 +61,72 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run compile
-      - name: Stamp preview version
+      - name: Stamp the Marketplace pre-release version
+        id: version
         shell: bash
+        env:
+          STABLE_TAG: ${{ needs.release.outputs.tag }}
         run: |
-          node -e '
+          # The Marketplace has no semver prerelease tags and needs a version
+          # distinct from the stable one: v1.12.0 -> 1.12.1000.
+          preview=$(node scripts/marketplace-version.cjs "${STABLE_TAG#v}")
+          echo "version=$preview" >> "$GITHUB_OUTPUT"
+          PREVIEW_VERSION="$preview" STABLE_TAG="$STABLE_TAG" node -e '
             const fs = require("fs");
-            const pkg = JSON.parse(fs.readFileSync("package.json"));
-            pkg.version = `${pkg.version}-preview.${process.env.GITHUB_RUN_ID}.${process.env.GITHUB_RUN_ATTEMPT}`;
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            pkg.version = process.env.PREVIEW_VERSION;
             fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
-            console.log(pkg.version);
-          ' > preview-version.txt
-          cat preview-version.txt
+            console.log(`Preview version ${pkg.version} (stable ${process.env.STABLE_TAG})`);
+          '
       - name: Package preview VSIX
         # Fixed asset name so --clobber replaces the previous preview build
         # instead of accumulating stale VSIXes on the rolling release.
         run: npx vsce package --no-dependencies --pre-release --out nan-builders-vscode-preview.vsix
-      - name: Attach to rolling preview release
+      - name: Detect Marketplace credentials
+        id: creds
+        shell: bash
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          TRUSTED_PUBLISHING: ${{ vars.MARKETPLACE_TRUSTED_PUBLISHING }}
+          PREVIEW_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # Missing credentials must not fail every merge: the rolling preview
+          # release still ships the VSIX, so validation stays possible while
+          # the publisher setup is pending.
+          if [ "$TRUSTED_PUBLISHING" = "true" ] || [ -n "$VSCE_PAT" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "configured=false" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Marketplace pre-release skipped"
+            echo ""
+            echo "No Marketplace credentials are configured, so \`$PREVIEW_VERSION\` was **not** published."
+            echo ""
+            echo "Fix: set the \`VSCE_PAT\` repository secret, or add trusted-publishing policies and set \`MARKETPLACE_TRUSTED_PUBLISHING=true\`. See \`docs/agentic-pipeline.md\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning::Marketplace credentials are not configured; preview $PREVIEW_VERSION was not published."
+      - name: Publish the pre-release to the VS Code Marketplace
+        if: steps.creds.outputs.configured == 'true'
+        shell: bash
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          TRUSTED_PUBLISHING: ${{ vars.MARKETPLACE_TRUSTED_PUBLISHING }}
+        run: |
+          # --skip-duplicate keeps workflow re-runs idempotent: the same commit
+          # always resolves to the same preview version.
+          args=(--packagePath nan-builders-vscode-preview.vsix --no-dependencies --pre-release --skip-duplicate)
+          if [ "$TRUSTED_PUBLISHING" = "true" ]; then
+            npx vsce publish "${args[@]}" --oidc
+          else
+            npx vsce verify-pat svg153
+            npx vsce publish "${args[@]}"
+          fi
+      - name: Attach to the rolling preview release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREVIEW_VERSION: ${{ steps.version.outputs.version }}
         run: |
           shopt -s nullglob
           vsix=(nan-builders-vscode-*.vsix)
@@ -64,13 +134,15 @@ jobs:
             echo "::error::Expected exactly one preview VSIX, found ${#vsix[@]}."
             exit 1
           fi
+          notes="Rolling preview VSIX ($PREVIEW_VERSION) from the latest merge to main. The same build is on the Marketplace pre-release channel: install it with 'Extensions: Install from VSIX', or enable pre-release versions for this extension and update normally."
           if ! gh release view preview --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release create preview \
               --repo "$GITHUB_REPOSITORY" \
               --prerelease \
               --title "Preview builds" \
-              --notes "Rolling preview VSIX from the latest merge to main. Not published to the Marketplace; install via 'Extensions: Install from VSIX' to validate before promotion." \
+              --notes "$notes" \
               "${vsix[0]}"
           else
             gh release upload preview --repo "$GITHUB_REPOSITORY" --clobber "${vsix[0]}"
+            gh release edit preview --repo "$GITHUB_REPOSITORY" --notes "$notes"
           fi
