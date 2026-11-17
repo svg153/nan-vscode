@@ -33,7 +33,8 @@ const NON_CHAT_MODEL_IDS = new Set([
 
 const KNOWN_CHAT_IDS = new Set([
   "deepseek-v4-flash", "glm5.3-flash", "qwen3.8-flash", "mimo-v2.6-flash",
-  "gemma4", "qwen3.6", "glm5.3",
+  "gemma4", "qwen3.6", "glm5.3", "kimi-k3.1-pro", "qwen3.8-max", "qwen4-max",
+  "deepseek-v4-pro", "hy4", "hy4-flash",
 ]);
 
 const CHAT_MODEL_TYPES = new Set(["chat", "llm", "text"]);

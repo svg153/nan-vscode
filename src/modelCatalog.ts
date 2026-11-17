@@ -133,6 +133,19 @@ const CHAT_MODELS: readonly ModelMetadata[] = [
     reasoningEffortValues: ["none", "low", "medium", "high", "max"],
   },
   {
+    id: "qwen4-max",
+    name: "Qwen 4 Max",
+    contextWindow: 1_048_576,
+    maxOutputTokens: 131_072,
+    imageInput: true,
+    toolCalling: true,
+    largerModel: true,
+    // Docs name `none` as the off switch and `minimal`..`max` as the levels; the
+    // November models are outside the "Controlling reasoning" ladder table, so
+    // only that enumeration is treated as documented.
+    reasoningEffortValues: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+  },
+  {
     id: "deepseek-v4-pro",
     name: "DeepSeek V4 Pro",
     contextWindow: 1_048_576,
@@ -151,6 +164,19 @@ const CHAT_MODELS: readonly ModelMetadata[] = [
     toolCalling: true,
     largerModel: true,
     reasoningEffortValues: ["none", "minimal", "low", "medium", "high", "max"],
+  },
+  {
+    id: "hy4-flash",
+    name: "Tencent Hunyuan 4 Flash",
+    contextWindow: 1_048_576,
+    maxOutputTokens: 65_536,
+    imageInput: true,
+    toolCalling: true,
+    // Docs say it reasons by default with no default level and only document
+    // `none` as the off switch. Like kimi-k3.1-pro/deepseek-v4-pro (November
+    // models outside the ladder table), no per-level contract is published, so
+    // the depth is declared model-managed instead of inventing a ladder.
+    reasoningEffortValues: [],
   },
 ] as const;
 
@@ -375,6 +401,8 @@ const REASONING_LEVEL_NOTES: readonly (readonly [string, string])[] = [
   ["qwen3.6", "Qwen3.6: both 'none' and 'minimal' disable reasoning; on Chat Completions levels cap the reasoning phase at 2,048-32,768 tokens."],
   ["glm5.3-flash", "GLM always reasons; there is no off switch and 'none' is applied as 'minimal'."],
   ["glm5.3", "GLM always reasons; there is no off switch and 'none' is applied as 'minimal'."],
+  ["qwen4-max", "Qwen4 Max: 'max_tokens' bounds reasoning plus answer (up to 131,000); a small budget can be spent entirely on reasoning."],
+  ["hy4-flash", "Hy4 Flash: reasons by default with no default level; 'none' turns it off and 'max_tokens' bounds reasoning plus answer (up to 64,000)."],
 ];
 
 export function reasoningLevelNotes(id: string): string | undefined {
