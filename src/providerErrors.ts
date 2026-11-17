@@ -279,7 +279,10 @@ function statusPrefix(status: number, statusText: string, summary: string): stri
 
 function classifyStructuralCode(body: string): ProviderErrorCode | undefined {
   const fields = readErrorFields(body);
-  for (const value of [fields.type, fields.code, fields.param]) {
+  // `code` is the narrower identifier: gateways pair a broad `rate_limit_exceeded`
+  // type with `insufficient_quota` to say the credits pool is empty, and that
+  // must not be reported as a retryable throttle.
+  for (const value of [fields.code, fields.type, fields.param]) {
     const code = classifyCode(value);
     if (code) {
       return code;

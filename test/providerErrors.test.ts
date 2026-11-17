@@ -40,6 +40,18 @@ test("classifies 429 with insufficient_quota as credits, not a throttle", () => 
   assert.match(info.message, /NaN Builders: Show Usage/);
 });
 
+test("prefers a specific error.code over a broader error.type on a 429", () => {
+  const info = mapProviderError({
+    status: 429,
+    statusText: "Too Many Requests",
+    body: '{"error":{"type":"rate_limit_exceeded","code":"insufficient_quota"}}',
+  });
+  assert.equal(info.code, "insufficient_quota");
+  assert.equal(info.retryable, false);
+  assert.match(info.message, /NaN Builders: Show Usage/);
+  assert.equal(info.message.includes("Wait a moment before retrying"), false);
+});
+
 test("classifies a plain 429 as a retryable throttle", () => {
   const info = mapProviderError({ status: 429, statusText: "Too Many Requests", body: "" });
   assert.equal(info.code, "rate_limit_exceeded");
