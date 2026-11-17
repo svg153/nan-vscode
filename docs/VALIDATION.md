@@ -158,6 +158,36 @@ Make at least one request from VS Code.
 
 Expected: the status bar shows `NaN` and local token usage when the API returns streaming usage metadata. The tooltip must state that this is local VS Code session usage, not the account-wide NaN credit balance.
 
+## Experimental native Chat token usage (VS Code 1.146+)
+
+The setting `nanBuilders.experimentalNativeChatUsage` defaults to `false`. It
+uses the **undocumented** `LanguageModelDataPart` with MIME type `usage`
+observed in microsoft/vscode#317187. It is not a stable API contract and must
+not be enabled by default without an explicit maintainer decision.
+
+1. With the setting off, send a prompt; verify local usage history and the
+   status bar are unchanged and no experimental usage part is emitted.
+2. On VS Code Insiders 1.146+, enable the setting. With a real provider response
+   that reports non-estimated token counts, check native Chat usage is non-zero.
+   Record editor version, extension version and harness (Local versus Copilot
+   Agent Host); test both separately. A successful raw LM stream test does **not**
+   establish that the Chat UI or Agent Host consumes the part correctly.
+3. Run `npm run test:insiders` with its mock gateway (no real NaN key). It
+   checks the raw usage data part when available and normal local persistence.
+4. Test a response without a `usage` chunk, cancelled streams, NaN
+   reasoning-only truncation and malformed counts: none should produce a
+   misleading native success token count.
+5. Confirm older VS Code versions remain functional with the opt-in feature
+   skipped, and that experimental part failures never fail a chat request.
+
+Do not infer cached input or reasoning tokens from prompt/completion counts.
+Agent Host cache forwarding is separately tracked by microsoft/vscode#348390.
+The account-wide **credits** view is a different metric and must not change.
+
+Upstream: [issue #317187](https://github.com/microsoft/vscode/issues/317187),
+[typed API proposal #319686](https://github.com/microsoft/vscode/pull/319686),
+[alternative proposal #320550](https://github.com/microsoft/vscode/pull/320550).
+
 ## Account-wide usage API
 
 With a valid key configured, run **NaN Builders: Show Usage** and refresh.

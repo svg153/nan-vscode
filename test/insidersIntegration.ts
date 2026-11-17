@@ -132,6 +132,7 @@ export async function run(): Promise<void> {
   } | undefined;
   let previousBaseUrl: string | undefined;
   let previousCompletionModel: string | undefined;
+  let previousExperimentalNativeUsage: boolean | undefined;
   let config: vscode.WorkspaceConfiguration | undefined;
   let source: vscode.CancellationTokenSource | undefined;
   let timeout: NodeJS.Timeout | undefined;
@@ -159,7 +160,9 @@ export async function run(): Promise<void> {
     config = vscode.workspace.getConfiguration("nanBuilders");
     previousBaseUrl = config.get<string>("apiBaseUrl");
     previousCompletionModel = config.get<string>("completionModel");
+    previousExperimentalNativeUsage = config.get<boolean>("experimentalNativeChatUsage");
     await config.update("completionModel", "", vscode.ConfigurationTarget.Global);
+    await config.update("experimentalNativeChatUsage", false, vscode.ConfigurationTarget.Global);
     testApi = await extension.activate();
     assert.ok(testApi, `Test hook missing (extension path ${extension.extensionPath}).`);
     const activeTestApi = testApi;
@@ -261,6 +264,35 @@ export async function run(): Promise<void> {
       completionTokens: 1,
     }]);
 
+    // Opt-in smoke test. Inspect the raw stream data part only when the host
+    // exposes the experimental constructor; native UI rendering still requires
+    // manual Local and Copilot Agent Host verification.
+    await config.update("experimentalNativeChatUsage", true, vscode.ConfigurationTarget.Global);
+    const optedInResponse = await model.sendRequest(
+      [vscode.LanguageModelChatMessage.User("Reply with exactly NAN_OK.")], {}, source.token,
+    );
+    let optedInText = "";
+    const usageParts: Uint8Array[] = [];
+    for await (const part of optedInResponse.stream) {
+      if (part instanceof vscode.LanguageModelTextPart) {
+        optedInText += part.value;
+      }
+      const candidate = part as unknown as { mimeType?: string; data?: Uint8Array };
+      if (candidate.mimeType === "usage" && candidate.data instanceof Uint8Array) {
+        usageParts.push(candidate.data);
+      }
+    }
+    assert.equal(optedInText, "NAN_OK");
+    if (/^1\\.(?:14[6-9]|1[5-9]\\d|[2-9]\\d\\d)\\./.test(vscode.version)
+      && typeof (vscode as unknown as { LanguageModelDataPart?: unknown }).LanguageModelDataPart === "function") {
+      assert.equal(usageParts.length, 1, "Enabled supported host must receive exactly one usage part.");
+      assert.deepEqual(JSON.parse(new TextDecoder().decode(usageParts[0])), {
+        prompt_tokens: 2, completion_tokens: 1, total_tokens: 3,
+      });
+    } else {
+      assert.equal(usageParts.length, 0, "Unsupported host must not receive experimental usage.");
+    }
+    await config.update("experimentalNativeChatUsage", false, vscode.ConfigurationTarget.Global);
     assert.equal(await testApi.clearTestUsageHistory(), true);
     assert.deepEqual(testApi.readTestUsageHistory(), []);
 
@@ -402,6 +434,7 @@ export async function run(): Promise<void> {
     if (config) {
       await config.update("apiBaseUrl", previousBaseUrl, vscode.ConfigurationTarget.Global);
       await config.update("completionModel", previousCompletionModel, vscode.ConfigurationTarget.Global);
+      await config.update("experimentalNativeChatUsage", previousExperimentalNativeUsage, vscode.ConfigurationTarget.Global);
     }
     if (originalGlobalFetch) {
       globalThis.fetch = originalGlobalFetch;

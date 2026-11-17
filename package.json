@@ -147,6 +147,11 @@
           "maximum": 5,
           "description": "Times a chat request is retried transparently when it fails before the response stream emits its first byte: throttling (429 with Retry-After), gateway errors (502/503/504 and other 5xx), connect timeouts, and network failures. The first retry waits for the gateway's Retry-After (capped at 8 s) or 0.5-1 s of jittered exponential backoff, doubling per retry and capped at 8 s. Set to 0 to disable retries and see every failure immediately. Retries reuse the same key; exhausted-credit (insufficient_quota) and other 4xx responses are never retried, and a request is never retried once the stream has started."
         },
+        "nanBuilders.experimentalNativeChatUsage": {
+          "type": "boolean",
+          "default": false,
+          "description": "EXPERIMENTAL: send real, provider-reported token counts to native VS Code Chat on 1.146+ using an undocumented usage data part. Disabled by default; may stop working or differ across Local and Copilot Agent Host."
+        },
         "nanBuilders.showStatusBar": {
           "type": "boolean",
           "default": true,
