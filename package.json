@@ -220,7 +220,16 @@
     "prepare": "husky"
   },
   "overrides": {
-    "npm": "^11.21.2"
+    "@vscode/vsce": {
+      "minimatch": "11.0.9"
+    },
+    "glob": {
+      "minimatch": "11.0.9"
+    },
+    "npm": "^11.21.2",
+    "test-exclude": {
+      "minimatch": "11.0.9"
+    }
   },
   "devDependencies": {
     "@commitlint/cli": "^21.2.3",
