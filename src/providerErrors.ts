@@ -366,6 +366,7 @@ function isTimeoutError(error: unknown): boolean {
   return (
     candidate.name === "TimeoutError" ||
     candidate.name === "ProviderTimeoutError" ||
+    candidate.name === "RequestTimeoutError" ||
     candidate.code === "timeout" ||
     candidate.code === "ETIMEDOUT"
   );

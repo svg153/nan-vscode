@@ -99,6 +99,19 @@ With `deepseek-v4-flash`, attach a simple image and ask for a one-sentence descr
 
 Expected: the request succeeds and the model describes the image. Repeat with `glm5.3` and confirm VS Code does not offer image input for that model.
 
+## Chat request timeouts
+
+Chat requests run two independent timers instead of one overall deadline:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `nanBuilders.connectTimeoutSeconds` | `20` | Deadline for the response headers of a chat request. |
+| `nanBuilders.streamIdleTimeoutSeconds` | `120` | Maximum silence between streamed chunks; the timer restarts on every chunk. |
+
+Expected: a slow stream that keeps emitting chunks is never aborted, regardless of total duration. A gateway that accepts the connection and never sends headers fails after `connectTimeoutSeconds` with a timeout error, and a stream that stays silent for `streamIdleTimeoutSeconds` is aborted, its slot is released, and the error message names the corresponding setting. Canceling the request from Chat still reports cancellation rather than a timeout, and no timer survives the request.
+
+Unit tests use a fake clock to cover re-arming on chunks, firing on silence, firing on missing headers, and clearing both timers on cancellation.
+
 ## Cancellation
 
 Start a long request and cancel it from Chat.
