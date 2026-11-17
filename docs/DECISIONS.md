@@ -167,3 +167,21 @@ Details:
 **Decision:** Per-model. `qwen4-max` declares `["none","minimal","low","medium","high","xhigh","max"]` because its bullet enumerates `none` plus `minimal`..`max`. `hy4-flash` declares `[]` because no per-level contract is published, matching `kimi-k3.1-pro` and `deepseek-v4-pro`; an empty ladder keeps VS Code's depth control away from an undocumented surface while `defaultReasoningEffortForModel([])` still resolves to `low`, which is inside the documented range.
 
 **Follow-up:** Replace `[]` with the enumerated ladder once NaN publishes the levels for `hy4-flash` or adds the November models to the ladder table, and add a validation step that compares picker depth choices with the published levels.
+
+## PENDING-DECISION: vendor id vs. the nan-builders collision
+
+**Question:** `PROVIDER_VENDOR` is `nan-builders`, and `SrScorpio/nan-bridge` registers the same vendor id (#118), so the two extensions can expose duplicate models. Should the vendor id stay `nan-builders`, be renamed now, or be frozen as a contract?
+
+**Options:**
+
+- (A) Keep `nan-builders` and document the coexistence problem only.
+- (B) Rename to `svg153-nan-builders` now.
+- (C) Keep `nan-builders` and treat the string as an immutable contract, recording the naming/brand-handover implications in the entry with an explicit follow-up for a future handover.
+
+**Research:** The vendor id reaches the API surface in four places: `src/constants.ts` (`PROVIDER_VENDOR`), `src/extension.ts` (`vscode.lm.registerLanguageModelChatProvider`), `package.json` (`contributes.languageModelChatProviders[0].vendor`, a separate literal rather than a derived value) and `test/insidersIntegration.ts` (`selectChatModels({ vendor: "nan-builders" })`). The token is also overloaded inside this repository: the Copilot app plugin at `com.github.copilot/extensions/nan-builders` uses `nan-builders` as its plugin name in a different namespace. Issue #118 reports that VS Code treats `(vendor, model id)` as model identity, which is why a shared vendor can duplicate model entries.
+
+*Assumption (not verifiable in this repository):* VS Code persists model selections and chat-history model references against the provider that produced them, so renaming the vendor id would silently break stored selections. The repository contains no code that reads or migrates that store, so option B would need a migration design before it ships.
+
+**Decision:** Pending maintainer approval (recorded 2026-11-16). Recommendation: option C. It keeps today's stored selections working, treats the collision as a coexistence/documentation problem instead of a data-loss risk, and leaves a rename possible later only through a documented migration. The vendor id is an internal identifier rather than the product name, so a future brand handover or rebrand does not require changing it.
+
+**Follow-up:** If C is approved, open a child issue for (a) a documented rename/migration procedure if coexistence proves unacceptable in practice, (b) the runtime duplicate-provider warning from #118 option (c), and (c) a public note about the shared vendor id once concurrent README edits are safe. Any handover agreement must state whether the vendor id transfers with the extension identity.
