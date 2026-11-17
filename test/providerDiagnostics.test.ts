@@ -10,6 +10,7 @@ import {
   selectHostModels,
   type ChatModelSelector,
 } from "../src/providerDiagnostics";
+import { profileSecretName } from "../src/profiles";
 
 const SENTINEL_KEY = "sk-live-SENTINEL-8f4c2b";
 
@@ -108,6 +109,66 @@ test("diagnostics report explains an empty host model list", async () => {
   assert.match(markdown, /^- Configured keys\/profiles: 0/m);
   assert.match(markdown, /- Count: 0/);
   assert.match(markdown, /- Last discovery error: none recorded\./);
+});
+
+test("diagnostics report shows the failover setting and any key cooldown with ids only", async () => {
+  const off = collectDiagnostics({
+    extensionVersion: "1.5.1",
+    vscodeVersion: "1.104.0",
+    baseUrl: "https://api.nan.builders/v1",
+    configuration: stubSettings(),
+    hostModels: await hostModels([]),
+    secretKeys: [],
+    trackedModels: [],
+  });
+  assert.match(off, /^- Failover on throttle: off \(fixed routing\)$/m);
+  assert.doesNotMatch(off, /Cooldown after a rate limit/);
+
+  const on = collectDiagnostics({
+    extensionVersion: "1.5.1",
+    vscodeVersion: "1.104.0",
+    baseUrl: "https://api.nan.builders/v1",
+    configuration: stubSettings(),
+    hostModels: await hostModels([]),
+    secretKeys: [profileSecretName("work"), profileSecretName("personal")],
+    profiles: ["personal", "work"],
+    activeProfile: "personal",
+    failover: {
+      enabled: true,
+      cooling: [
+        { profileId: "work", remainingSeconds: 42 },
+        { profileId: undefined, remainingSeconds: 7 },
+      ],
+    },
+    trackedModels: [],
+  });
+
+  assert.match(on, /^- Failover on throttle: on \(one hop per request\)$/m);
+  assert.match(on, /Cooldown after a rate limit:/);
+  assert.match(on, /- `work`: cooling down, 42s left/);
+  assert.match(on, /- `\(shared key\)`: cooling down, 7s left/);
+  // A report is shareable: ids and seconds, never a key or its secret name.
+  assert.equal(on.includes(SENTINEL_KEY), false);
+  assert.doesNotMatch(on, new RegExp(profileSecretName("work")));
+});
+
+test("diagnostics report hides cooldowns while the failover is off", async () => {
+  const markdown = collectDiagnostics({
+    extensionVersion: "1.5.1",
+    vscodeVersion: "1.104.0",
+    baseUrl: "https://api.nan.builders/v1",
+    configuration: stubSettings(),
+    hostModels: await hostModels([]),
+    secretKeys: [],
+    profiles: ["personal", "work"],
+    activeProfile: "personal",
+    // A window that was turned off after a key was benched must not leak state.
+    failover: { enabled: false, cooling: [{ profileId: "work", remainingSeconds: 42 }] },
+    trackedModels: [],
+  });
+
+  assert.match(markdown, /^- Failover on throttle: off \(fixed routing\)$/m);
+  assert.doesNotMatch(markdown, /cooling down/);
 });
 
 test("selectHostModels maps the host list to id and maxInputTokens", async () => {

@@ -25,6 +25,7 @@ import {
   renameProfileAssignments,
   resolveActiveProfile,
   resolveModelRoute,
+  resolveModelRouteCandidates,
 } from "../src/profiles";
 
 const SENTINEL_KEY = "sk-profile-SENTINEL-6d1a9";
@@ -58,6 +59,35 @@ test("assigning work::glm5.3 routes that model to the work key and everything el
   // Routing alone never changes the reasoning effort of the assigned model.
   assert.equal(effortOverride(overrides, "glm5.3", "work"), undefined);
   assert.equal(overrides["work::glm5.3"], AUTO_EFFORT);
+});
+
+test("failover candidates put the routed profile first and keep settings order after it", () => {
+  const threeProfiles = { profiles: ["personal", "work", "spare"], activeProfile: "personal" };
+  const overrides = assignModelToProfile({}, "work", "glm5.3");
+
+  assert.deepEqual(resolveModelRouteCandidates(threeProfiles, overrides, "glm5.3"), [
+    { profileId: "work", source: "assignment" },
+    { profileId: "personal", source: "failover" },
+    { profileId: "spare", source: "failover" },
+  ]);
+  // Without an assignment the active profile leads and the rest follow.
+  assert.deepEqual(resolveModelRouteCandidates(threeProfiles, overrides, "gemma4"), [
+    { profileId: "personal", source: "active" },
+    { profileId: "work", source: "failover" },
+    { profileId: "spare", source: "failover" },
+  ]);
+  // A stale active profile falls back to the first id, exactly like the route.
+  assert.deepEqual(
+    resolveModelRouteCandidates({ profiles: ["personal", "work"], activeProfile: "gone" }, {}, "glm5.3").map(
+      (route) => route.source,
+    ),
+    ["first", "failover"],
+  );
+  // One profile, or none, yields exactly the route `resolveModelRoute` picks.
+  assert.deepEqual(resolveModelRouteCandidates({ profiles: ["work"] }, {}, "glm5.3"), [
+    { profileId: "work", source: "first" },
+  ]);
+  assert.deepEqual(resolveModelRouteCandidates({ profiles: [] }, {}, "glm5.3"), [{ source: "legacy" }]);
 });
 
 test("without profiles the legacy shared key keeps serving every model", () => {
