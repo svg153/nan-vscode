@@ -67,7 +67,7 @@ Install the generated `nan-builders-vscode-*.vsix` with **Extensions: Install fr
 
 1. Open the Command Palette.
 2. Run **NaN Builders: Manage Provider**.
-3. Choose **Set or replace API key** and paste a NaN API key.
+3. Choose **Set or replace API key** and paste a NaN API key (with profiles configured, this sets the active profile's key; see [API key profiles](#api-key-profiles)).
 4. Choose **Validate API key and refresh models**.
 5. In Chat or Agent mode, select a model under the **NaN Builders** provider.
 
@@ -88,17 +88,48 @@ Available settings:
 | `nanBuilders.showStatusBar` | `true` | Show usage in the status bar: plan-credit usage % when an API key is configured, otherwise local session usage. |
 | `nanBuilders.includeUnknownModels` | `false` | Expose unknown IDs without tool or vision metadata. |
 | `nanBuilders.defaultReasoningEffort` | `auto` | Fallback reasoning level for models that expose adjustable effort. `auto` uses each model's documented default (medium when supported, otherwise the central documented level); explicit levels act as the global fallback. |
-| `nanBuilders.reasoningEffortByModel` | `{}` | Per-model reasoning overrides set by **NaN Builders: Set Model Reasoning Effort** (for example `"glm-5.3-flash": "high"`). Overrides win over the global setting; removing an entry resets that model to `auto`. |
+| `nanBuilders.reasoningEffortByModel` | `{}` | Per-model reasoning overrides set by **NaN Builders: Set Model Reasoning Effort** (for example `"glm-5.3-flash": "high"`). Overrides win over the global setting; removing an entry resets that model to `auto`. A `profile::model` key (for example `"work::glm-5.3-flash"`) instead assigns that model to a profile; its value is the effort for that model on that profile, and `auto` keeps the routing without overriding the effort. |
+| `nanBuilders.profiles` | `[]` | Profile IDs managed by **NaN Builders: Manage Provider**. Only IDs are stored here; each profile's API key lives in VS Code SecretStorage under `nanBuilders.profileKey.<profileId>`. Empty keeps the single shared key working, see [API key profiles](#api-key-profiles). |
+| `nanBuilders.activeProfile` | `""` | Profile whose API key serves every model without a `profile::model` assignment. Empty selects the first configured profile. Ignored when no profiles are configured. |
 | `nanBuilders.discoveryMode` | `"curated"` | `auto` lists every chat ID returned by `GET /models` from a trusted custom endpoint, except obvious non-chat names (embeddings, rerank, speech, transcription, moderation/guard, image/video generation, minimax-only endpoints). Endpoint-declared capability fields take precedence; models without metadata get conservative defaults. In `curated` mode, if `GET /models` fails or returns no chat IDs, the picker falls back to the static catalog marked "not live-verified". |
 | `nanBuilders.completionModel` | `""` | Model ID for opt-in inline ghost-text completions; empty disables the feature and no completion request is sent. |
 | `nanBuilders.maxParallelRequests` | `7` | Requests allowed in flight per API key, shared by chat and inline completions. NaN serves 7 per key and answers more with HTTP 429, so extra requests wait in a FIFO queue. Values above 7 are capped at the gateway limit. |
+
+## API key profiles
+
+When you hold more than one NaN API key (for example a work key and a personal key), profiles let one model use one key and everything else use another.
+
+**Set up a profile:**
+
+1. Run **NaN Builders: Manage Provider** and choose **Manage profiles** → **Add profile**.
+2. Enter a profile ID (`work`, `team.eu-1`, up to 32 characters) and its API key. The ID goes to `nanBuilders.profiles`; the key goes to VS Code SecretStorage under `nanBuilders.profileKey.<profileId>` and is never written to settings.
+3. Add the second profile the same way.
+
+**Route a model to a profile:** **NaN Builders: Manage Provider** → **Assign a model to a profile**, pick the profile, then the model. This writes a `profile::model` entry into `nanBuilders.reasoningEffortByModel` (for example `"work::glm-5.3": "auto"`). The assignment can also carry that model's reasoning effort: pick the level, or `auto` for routing only. **Remove a model assignment** drops the entry, so the model falls back to the active profile.
+
+**Everything else** uses the profile marked active: **Manage profiles**, pick a profile, **Use as active profile** (stored in `nanBuilders.activeProfile`; empty means the first configured profile).
+
+Key resolution per request, first match wins:
+
+1. The native **Manage Models → API Key** value, when VS Code supplies one.
+2. The `profile::model` assignment for that model.
+3. The active profile.
+4. The legacy shared key `nanBuilders.apiKey`, used only when no profile is configured.
+
+Notes:
+
+- **A profile without a key fails loudly.** The request stops before any gateway call with an error naming the profile, so a typo is not mistaken for an invalid key. Inline completions never raise notifications, so for them a missing profile key only yields no ghost text and one diagnostic line.
+- **Deleting or renaming a profile keeps things consistent.** Delete removes the profile ID, its SecretStorage key, and every `profile::model` assignment for it, so no later request can resolve to it. Rename moves the key and the assignments to the new ID.
+- **Per-key concurrency still applies.** Each request carries the key it resolved to, and `nanBuilders.maxParallelRequests` (default `7`) caps requests per key, so two profiles may run up to seven requests each.
+- **No profiles, no change.** With `nanBuilders.profiles` empty, the extension behaves exactly as before and the single `nanBuilders.apiKey` keeps working; no migration is required.
+- **One vendor, several providers.** Profiles are read from this extension's settings and SecretStorage. If another extension registers the same `nan-builders` vendor, VS Code can list duplicate model entries and the two extensions do not share profile configuration (see [docs/DECISIONS.md](docs/DECISIONS.md)).
 
 ## Diagnostics
 
 Two read-only commands help when the model picker is empty or a request fails. Neither sends a chat request, and neither prints an API key, token, or `Authorization` header.
 
 - **NaN Builders: Test Connection** runs model discovery silently and reports either `OK — N model(s) reachable (id, ...)` or an actionable warning naming the base URL, the HTTP status, the sanitized gateway error, and the command to run next.
-- **NaN Builders: Show Diagnostics** opens a Markdown report with the VS Code and extension versions, the effective base URL, the discovery mode, the models this VS Code host exposes through `vscode.lm.selectChatModels` (ID and `maxInputTokens`), the number of configured keys/profiles (count only; values are never read), and the locally tracked model IDs. When the report cannot be opened as a document, the same text is written to the output channel.
+- **NaN Builders: Show Diagnostics** opens a Markdown report with the VS Code and extension versions, the effective base URL, the discovery mode, the models this VS Code host exposes through `vscode.lm.selectChatModels` (ID and `maxInputTokens`), the number of configured keys/profiles (count only; values are never read), the configured profile IDs with whether each has a key (`configured`/`missing`) and which model is routed to which profile, and the locally tracked model IDs. When the report cannot be opened as a document, the same text is written to the output channel.
 
 Both commands print a display-only form of the base URL: embedded credentials (`user:password@`) are removed and the values of credential-bearing query or fragment parameters (`api_key`, `key`, `token`, and similar) are replaced with `******`, so a shared report never leaks a secret. An unparseable base URL is reported as `(unparseable base URL)` instead of being echoed.
 

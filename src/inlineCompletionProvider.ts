@@ -8,6 +8,7 @@ import {
   waitForInlineCompletionDebounce,
 } from "./inlineCompletion";
 import type { SlotQueueRegistry } from "./openai/slotQueue";
+import { describeRoute, normalizeProfileIds, profileSecretName, resolveModelRoute } from "./profiles";
 
 /**
  * Opt-in inline ghost-text completions through the legacy `POST /completions`
@@ -49,7 +50,7 @@ export class NanInlineCompletionProvider implements vscode.InlineCompletionItemP
       if (!model || controller.signal.aborted) {
         return undefined;
       }
-      const apiKey = await this.secrets.get(SECRET_API_KEY);
+      const apiKey = await this.completionApiKey(model);
       if (!apiKey || controller.signal.aborted) {
         return undefined;
       }
@@ -108,6 +109,29 @@ export class NanInlineCompletionProvider implements vscode.InlineCompletionItemP
         this.activeRequest = undefined;
       }
     }
+  }
+
+  /**
+   * Key for the configured completion model: its `profile::model` assignment
+   * wins, else the active profile, else the legacy shared key. Inline ghost text
+   * never raises a notification, so a missing profile key only logs here; the
+   * chat entry check is what names the profile to the user.
+   */
+  private async completionApiKey(model: string): Promise<string | undefined> {
+    const configuration = vscode.workspace.getConfiguration("nanBuilders");
+    const route = resolveModelRoute(
+      {
+        profiles: normalizeProfileIds(configuration.get<unknown>("profiles", [])),
+        activeProfile: configuration.get<string>("activeProfile", ""),
+      },
+      configuration.get<Record<string, unknown>>("reasoningEffortByModel", {}) ?? {},
+      model,
+    );
+    const apiKey = await this.secrets.get(
+      route.profileId ? profileSecretName(route.profileId) : SECRET_API_KEY,
+    );
+    diagnostic("inline.credential", { model, ...describeRoute(route), hasKey: Boolean(apiKey) });
+    return apiKey;
   }
 }
 

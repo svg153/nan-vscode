@@ -50,6 +50,28 @@ Expected: the extension is loaded in an isolated Insiders profile, discovers the
 
 Important: treat `/v1/models` as the definitive API-key-filtered list. A model must not be exposed just because it exists in the local metadata catalog. In particular, the larger models (`glm5.3`, `kimi-k3.1-pro`, `qwen3.8-max`, `qwen4-max`, `deepseek-v4-pro`, `hy4`) should only appear for keys whose `/v1/models` response contains them.
 
+## API key profiles
+
+1. Run **NaN Builders: Manage Provider** and confirm the profile actions appear
+   only after a first API key exists, and that they never print a key.
+2. Add profiles `work` and `personal`, set a different mock key for each,
+   and set the active profile to `personal`.
+3. Assign `glm5.3` to `work` from the provider management flow and confirm
+   `nanBuilders.reasoningEffortByModel` gains a `work::glm5.3` entry.
+4. Send one message to `glm5.3` and one to another model. The first request
+   must carry the `work` key and the second the `personal` key (check the
+   gateway logs for the key suffix only, never the full key).
+5. Clear the active profile key and confirm the next request fails before any
+   gateway call with a message naming the profile.
+6. Delete `work` and confirm its SecretStorage entry disappears, its
+   `work::model` overrides are removed, and `glm5.3` falls back to the
+   active profile.
+7. **NaN Builders: Show Diagnostics** must list profile IDs and `key: set` /
+   `key: missing` only. No SecretStorage value may appear in diagnostics,
+   `settings.json`, or the extension log.
+8. With no profiles configured, the legacy `nanBuilders.apiKey` keeps working
+   unchanged; no migration prompt appears.
+
 ## Basic streaming chat
 
 Run a short prompt with `deepseek-v4-flash`:

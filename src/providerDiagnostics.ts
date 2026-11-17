@@ -1,4 +1,5 @@
 import { PROVIDER_VENDOR } from "./constants";
+import { profileKeyPresence } from "./profiles";
 import { sanitizeErrorBody } from "./providerErrors";
 import { sanitizeUpstreamText } from "./text";
 
@@ -78,6 +79,12 @@ export interface DiagnosticsInput {
   readonly trackedModels: readonly string[];
   /** Last model-discovery failure; raw text is still sanitized defensively. */
   readonly lastDiscoveryError?: string | DiscoveryFailure;
+  /** Configured profile ids. Ids only: keys live in SecretStorage. */
+  readonly profiles?: readonly string[];
+  /** Profile used for models without a `profile::model` assignment. */
+  readonly activeProfile?: string;
+  /** `profile::model` routing entries, already reduced to profile/model pairs. */
+  readonly profileAssignments?: ReadonlyArray<{ profileId: string; modelId: string }>;
   /** Override for tests; defaults to the current time. */
   readonly generatedAt?: string;
   readonly vendor?: string;
@@ -128,6 +135,10 @@ export function collectDiagnostics(input: DiagnosticsInput): string {
 
   lines.push(
     "",
+    "## Profiles",
+    "",
+    ...describeProfiles(input),
+    "",
     "## Locally tracked models",
     "",
     `- Count: ${input.trackedModels.length}`,
@@ -145,6 +156,39 @@ export function collectDiagnostics(input: DiagnosticsInput): string {
   );
 
   return lines.join("\n");
+}
+
+/**
+ * Profiles section of the report. Only ids, routing, and key *presence* are
+ * printed; the secret values are never read here, so a report can be shared.
+ */
+function describeProfiles(input: DiagnosticsInput): string[] {
+  const profiles = input.profiles ?? [];
+  if (profiles.length === 0) {
+    return [
+      "- No profiles configured: every model uses the shared `nanBuilders.apiKey` key.",
+      "- Add profiles in **NaN Builders: Manage Provider** → **Profiles**.",
+    ];
+  }
+  const activeProfile = input.activeProfile && input.activeProfile.trim() ? input.activeProfile.trim() : profiles[0];
+  const presence = profileKeyPresence(profiles, input.secretKeys);
+  const assignments = input.profileAssignments ?? [];
+  return [
+    `- Active profile: \`${activeProfile}\``,
+    `- Configured profiles: ${presence.length}`,
+    ...presence.map(
+      ({ profileId, hasKey }) =>
+        `- \`${profileId}\`${profileId === activeProfile ? " (active)" : ""}: key ${hasKey ? "configured" : "missing (requests fail and name the profile)"}`,
+    ),
+    ...(assignments.length > 0
+      ? [
+          "",
+          "Model routing (`nanBuilders.reasoningEffortByModel`):",
+          "",
+          ...assignments.map(({ profileId, modelId }) => `- \`${modelId}\` → profile \`${profileId}\``),
+        ]
+      : ["", "- No `profile::model` assignments: every model uses the active profile."]),
+  ];
 }
 
 /** "OK — N models reachable (ids)". */

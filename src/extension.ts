@@ -6,6 +6,25 @@ import { NanInlineCompletionProvider } from "./inlineCompletionProvider";
 import { NanChatModelProvider, ModelDiscoveryError } from "./provider";
 import { collectDiagnostics, formatConnectionOk, formatConnectionWarning, selectHostModels } from "./providerDiagnostics";
 import {
+  AUTO_EFFORT,
+  MAX_PROFILE_ID_LENGTH,
+  assignModelToProfile,
+  assignedProfileForModel,
+  effortOverride,
+  isValidProfileId,
+  nextActiveProfile,
+  normalizeProfileIds,
+  parseProfileModelAssignment,
+  profileSecretName,
+  readConfiguredCredential,
+  removeModelAssignment,
+  removeProfileAssignments,
+  renameProfileAssignments,
+  resolveActiveProfile,
+  resolveModelRoute,
+  type ProfileSettings,
+} from "./profiles";
+import {
   DEFAULT_MAX_PARALLEL_REQUESTS,
   SlotQueueRegistry,
   resolveMaxParallelRequests,
@@ -18,6 +37,30 @@ import { describePackExpiry, formatCredits, formatPercent, usageLinks, type Usag
 import { UsageTracker } from "./usageTracker";
 
 const USAGE_LINK_ICON = "$(link-external)";
+
+/** Profile settings as the extension reads them; ids only, never keys. */
+function profileSettings(): ProfileSettings {
+  const configuration = vscode.workspace.getConfiguration("nanBuilders");
+  return {
+    profiles: normalizeProfileIds(configuration.get<unknown>("profiles", [])),
+    activeProfile: configuration.get<string>("activeProfile", ""),
+  };
+}
+
+function effortOverrides(): Record<string, unknown> {
+  return vscode.workspace.getConfiguration("nanBuilders").get<Record<string, unknown>>("reasoningEffortByModel", {}) ?? {};
+}
+
+/**
+ * Writes `profiles` and `activeProfile` together, profile list first: a request
+ * resolving between the two writes then sees the new list with a stale active
+ * id, which falls back to the first profile instead of a removed one.
+ */
+async function writeProfileSettings(profiles: readonly string[], activeProfile: string): Promise<void> {
+  const configuration = vscode.workspace.getConfiguration("nanBuilders");
+  await configuration.update("profiles", profiles, vscode.ConfigurationTarget.Global);
+  await configuration.update("activeProfile", activeProfile, vscode.ConfigurationTarget.Global);
+}
 
 function usageLinkLabel(link: UsageLink): string {
   return `${USAGE_LINK_ICON} ${link.label}`;
@@ -101,8 +144,14 @@ export function activate(context: vscode.ExtensionContext): {
   }
 
   const account = new AccountUsageService(async () => {
-    const apiKey = await context.secrets.get(SECRET_API_KEY);
-    if (!apiKey) {
+    // Account usage belongs to the credential the models use by default: the
+    // active profile key when profiles are configured, else the shared key.
+    const credential = await readConfiguredCredential(
+      profileSettings(),
+      (name) => context.secrets.get(name),
+      SECRET_API_KEY,
+    );
+    if (!credential.apiKey) {
       return undefined;
     }
     return {
@@ -110,7 +159,7 @@ export function activate(context: vscode.ExtensionContext): {
         .getConfiguration("nanBuilders")
         .get<string>("apiBaseUrl", DEFAULT_API_BASE_URL)
         .replace(/\/+$/, ""),
-      apiKey,
+      apiKey: credential.apiKey,
     };
   }, endpointGuard);
   const usage = new UsageTracker(context.globalState, account);
@@ -209,7 +258,7 @@ export function activate(context: vscode.ExtensionContext): {
       provider.refresh();
       vscode.window.showInformationMessage("NaN Builders model list refreshed.");
     }),
-    vscode.commands.registerCommand("nanBuilders.testConnection", () => testConnection(context, provider)),
+    vscode.commands.registerCommand("nanBuilders.testConnection", () => testConnection(provider)),
     vscode.commands.registerCommand("nanBuilders.showDiagnostics", () =>
       showDiagnostics(context, provider, reportOutputChannel()),
     ),
@@ -369,7 +418,14 @@ async function setModelReasoningEffort(provider: NanChatModelProvider): Promise<
   const entry = { id: selected.model.id, ladder: selected.ladder };
   const configuration = vscode.workspace.getConfiguration("nanBuilders");
   const overrides = configuration.get<Record<string, unknown>>("reasoningEffortByModel", {});
-  const perModel = typeof overrides?.[entry.id] === "string" ? (overrides[entry.id] as string) : undefined;
+  // The write targets the entry that actually governs the request: the
+  // `profile::model` assignment when the model is routed to a profile, else the
+  // plain model id.
+  const route = resolveModelRoute(profileSettings(), overrides, entry.id);
+  const overrideKey =
+    route.source === "assignment" && route.profileId ? `${route.profileId}::${entry.id}` : entry.id;
+  const routedTo = route.source === "assignment" ? route.profileId : undefined;
+  const perModel = effortOverride(overrides, entry.id, route.profileId);
   const current = resolveReasoningEffort({
     perModelOverride: perModel,
     globalDefault: configuration.get<string>("defaultReasoningEffort", "auto"),
@@ -384,24 +440,50 @@ async function setModelReasoningEffort(provider: NanChatModelProvider): Promise<
       })),
       { label: "Reset to auto", description: perModel ? "clears the per-model override" : "no override set", detail: "Use the global default / model default." },
     ],
-    { title: `${modelPick.label}: reasoning effort`, placeHolder: "Choose a level (values outside the model ladder are remapped to the closest one)" },
+    {
+      title: `${modelPick.label}: reasoning effort${routedTo ? ` (profile "${routedTo}")` : ""}`,
+      placeHolder: "Choose a level (values outside the model ladder are remapped to the closest one)",
+    },
   );
   if (!levelPick) {
     return;
   }
   const next: Record<string, unknown> = { ...overrides };
   if (levelPick.label === "Reset to auto") {
-    delete next[entry.id];
+    // A routed model keeps its `profile::model` entry (routing is not an
+    // effort), so the entry is reset to `auto` instead of being removed.
+    if (routedTo) {
+      next[overrideKey] = AUTO_EFFORT;
+    } else {
+      delete next[overrideKey];
+    }
   } else {
-    next[entry.id] = levelPick.label;
+    next[overrideKey] = levelPick.label;
   }
   await configuration.update("reasoningEffortByModel", next, vscode.ConfigurationTarget.Global);
   provider.refresh();
-  vscode.window.showInformationMessage(
+  const message =
     levelPick.label === "Reset to auto"
       ? `NaN Builders: ${modelPick.label} reasoning effort reset to auto.`
-      : `NaN Builders: ${modelPick.label} reasoning effort set to ${levelPick.label}.`,
+      : `NaN Builders: ${modelPick.label} reasoning effort set to ${levelPick.label}.`;
+  vscode.window.showInformationMessage(
+    routedTo ? `${message} The model still uses profile "${routedTo}".` : message,
   );
+}
+
+type ProviderAction =
+  | "set"
+  | "validate"
+  | "clear"
+  | "profiles"
+  | "assign"
+  | "unassign"
+  | "dashboard"
+  | "docs";
+
+/** The credential Manage Provider acts on: the active profile, else the shared key. */
+function credentialScope(activeProfile: string | undefined): string {
+  return activeProfile ? `profile "${activeProfile}"` : "shared key";
 }
 
 async function manageProvider(
@@ -409,20 +491,60 @@ async function manageProvider(
   provider: NanChatModelProvider,
   onKeyChanged?: () => Promise<void>,
 ): Promise<void> {
-  const existing = await context.secrets.get(SECRET_API_KEY);
+  const settings = profileSettings();
+  const activeProfile = resolveActiveProfile(settings);
+  const credential = await readConfiguredCredential(settings, (name) => context.secrets.get(name), SECRET_API_KEY);
+  const existing = credential.apiKey;
+  const scope = credentialScope(activeProfile);
+  const assignments = Object.keys(effortOverrides()).filter((key) => parseProfileModelAssignment(key) !== undefined);
 
-  type Action = "set" | "validate" | "clear" | "dashboard" | "docs";
-  const items: Array<vscode.QuickPickItem & { action: Action }> = [
+  const items: Array<vscode.QuickPickItem & { action?: ProviderAction }> = [
     {
       label: "$(key) Set or replace API key",
-      description: existing ? "A key is currently configured" : "No key configured",
+      description: existing ? `A key is configured for the ${scope}` : `No key configured for the ${scope}`,
       action: "set",
     },
     {
       label: "$(check) Validate API key and refresh models",
-      description: existing ? "Check the current key against /v1/models" : "Configure a key first",
+      description: existing ? `Check the ${scope} against /v1/models` : "Configure a key first",
       action: "validate",
     },
+  ];
+
+  if (existing) {
+    items.push({
+      label: "$(trash) Clear API key",
+      description: `Remove the ${scope} from VS Code SecretStorage`,
+      action: "clear",
+    });
+  }
+
+  items.push(
+    { kind: vscode.QuickPickItemKind.Separator, label: "Profiles" },
+    {
+      label: "$(account) Manage profiles",
+      description: settings.profiles.length
+        ? `${settings.profiles.length} configured · active: ${activeProfile ?? "none"}`
+        : "No profiles configured; models use the shared key",
+      action: "profiles",
+    },
+    {
+      label: "$(symbol-namespace) Assign a model to a profile",
+      description: settings.profiles.length
+        ? "Route one model with a profile::model entry"
+        : "Add a profile first",
+      action: "assign",
+    },
+    ...(assignments.length > 0
+      ? [
+          {
+            label: "$(close) Remove a model assignment",
+            description: `${assignments.length} profile::model assignment(s) configured`,
+            action: "unassign" as ProviderAction,
+          },
+        ]
+      : []),
+    { kind: vscode.QuickPickItemKind.Separator, label: "Links" },
     {
       label: "$(link-external) Open NaN Builders dashboard",
       action: "dashboard",
@@ -431,29 +553,23 @@ async function manageProvider(
       label: "$(book) Open NaN Builders documentation",
       action: "docs",
     },
-  ];
-
-  if (existing) {
-    items.splice(2, 0, {
-      label: "$(trash) Clear API key",
-      description: "Remove it from VS Code SecretStorage",
-      action: "clear",
-    });
-  }
+  );
 
   const choice = await vscode.window.showQuickPick(items, {
     title: "NaN Builders",
     placeHolder: "Manage the VS Code language model provider",
   });
-  if (!choice) {
+  if (!choice?.action) {
     return;
   }
 
   switch (choice.action) {
     case "set": {
       const value = await vscode.window.showInputBox({
-        title: "NaN Builders API Key",
-        prompt: "Paste your API key. It is stored in VS Code SecretStorage.",
+        title: activeProfile ? `NaN Builders API Key for profile "${activeProfile}"` : "NaN Builders API Key",
+        prompt: activeProfile
+          ? `Paste the API key for profile "${activeProfile}". It is stored in VS Code SecretStorage under ${profileSecretName(activeProfile)}.`
+          : "Paste your API key. It is stored in VS Code SecretStorage.",
         password: true,
         ignoreFocusOut: true,
         placeHolder: "sk-...",
@@ -461,15 +577,21 @@ async function manageProvider(
       if (!value?.trim()) {
         return;
       }
-      await provider.setApiKey(value.trim());
+      if (activeProfile) {
+        await provider.setProfileKey(activeProfile, value.trim());
+      } else {
+        await provider.setApiKey(value.trim());
+      }
       try {
         const count = await provider.validateConfiguredKey();
-        vscode.window.showInformationMessage(`NaN Builders API key saved. ${count} model IDs are currently available to this API key.`);
+        vscode.window.showInformationMessage(
+          `NaN Builders API key saved for the ${scope}. ${count} model IDs are currently available to this API key.`,
+        );
         await onKeyChanged?.();
       } catch (error) {
         if (error instanceof HttpEndpointConsentDeniedError) {
           vscode.window.showInformationMessage(
-            "The API key was saved, but it was not validated because HTTP endpoint access was declined.",
+            `The API key was saved for the ${scope}, but it was not validated because HTTP endpoint access was declined.`,
           );
         } else if (!isAbortError(error)) {
           vscode.window.showErrorMessage(errorMessage(error));
@@ -481,7 +603,9 @@ async function manageProvider(
       try {
         const count = await provider.validateConfiguredKey();
         provider.refresh();
-        vscode.window.showInformationMessage(`NaN Builders API key is valid. ${count} model IDs are currently available to this API key.`);
+        vscode.window.showInformationMessage(
+          `NaN Builders API key is valid for the ${scope}. ${count} model IDs are currently available to this API key.`,
+        );
       } catch (error) {
         if (error instanceof HttpEndpointConsentDeniedError) {
           vscode.window.showInformationMessage("Validation was canceled because HTTP endpoint access was declined.");
@@ -492,8 +616,23 @@ async function manageProvider(
       return;
     }
     case "clear":
-      await provider.clearApiKey();
-      vscode.window.showInformationMessage("NaN Builders API key removed from VS Code SecretStorage.");
+      if (activeProfile) {
+        await provider.clearProfileKey(activeProfile);
+      } else {
+        await provider.clearApiKey();
+      }
+      vscode.window.showInformationMessage(
+        `NaN Builders API key removed from VS Code SecretStorage (${scope}).`,
+      );
+      return;
+    case "profiles":
+      await manageProfiles(context, provider, onKeyChanged);
+      return;
+    case "assign":
+      await assignModelProfile(provider);
+      return;
+    case "unassign":
+      await clearModelAssignment(provider);
       return;
     case "dashboard":
       await vscode.env.openExternal(vscode.Uri.parse(NAN_DASHBOARD_URL));
@@ -504,16 +643,408 @@ async function manageProvider(
   }
 }
 
+/** Models worth offering for an assignment, live discovery first. */
+async function assignableModelIds(provider: NanChatModelProvider): Promise<string[]> {
+  const cancellation = new vscode.CancellationTokenSource();
+  try {
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, cancellation.token);
+    const ids = models.map((model) => model.id);
+    return ids.length > 0 ? ids : provider.trackedModelIds();
+  } finally {
+    cancellation.dispose();
+  }
+}
+
+async function pickAssignmentModel(
+  provider: NanChatModelProvider,
+  title: string,
+): Promise<{ id: string; ladder: readonly string[] } | undefined> {
+  const ids = await assignableModelIds(provider);
+  if (ids.length === 0) {
+    vscode.window.showInformationMessage("No NaN Builders models are available to assign yet.");
+    return undefined;
+  }
+  const overrides = effortOverrides();
+  const profiles = profileSettings().profiles;
+  const picked = await vscode.window.showQuickPick(
+    ids.map((id) => {
+      const assigned = assignedProfileForModel(overrides, id, profiles);
+      return {
+        id,
+        label: id,
+        description: assigned ? `profile "${assigned}"` : undefined,
+        detail: assigned ? "Already assigned; picking it keeps the model on one profile." : undefined,
+      };
+    }),
+    { title, placeHolder: "Choose a model" },
+  );
+  if (!picked) {
+    return undefined;
+  }
+  return { id: picked.id, ladder: getKnownModel(picked.id)?.reasoningEffortValues ?? [] };
+}
+
+/**
+ * `profile::model` assignment: the model's requests then use that profile's
+ * key. The entry lives in `nanBuilders.reasoningEffortByModel`, whose value is
+ * the reasoning effort for that model under that profile (`auto` = routing only).
+ */
+async function assignModelProfile(provider: NanChatModelProvider): Promise<void> {
+  const settings = profileSettings();
+  if (settings.profiles.length === 0) {
+    vscode.window.showInformationMessage(
+      "Add a profile first: NaN Builders: Manage Provider → Profiles → Add profile.",
+    );
+    return;
+  }
+  const activeProfile = resolveActiveProfile(settings);
+  const profilePick = await vscode.window.showQuickPick(
+    settings.profiles.map((profileId) => ({
+      label: profileId,
+      description: profileId === activeProfile ? "active profile" : undefined,
+    })),
+    { title: "NaN Builders: profile serving one model", placeHolder: "Choose the profile whose API key the model uses" },
+  );
+  if (!profilePick) {
+    return;
+  }
+  const model = await pickAssignmentModel(provider, `Model served by profile "${profilePick.label}"`);
+  if (!model) {
+    return;
+  }
+  const effortPick = await vscode.window.showQuickPick(
+    [
+      {
+        label: AUTO_EFFORT,
+        description: "routing only",
+        detail: "Keep the model's normal reasoning effort resolution.",
+      },
+      ...model.ladder.map((level) => ({
+        label: level,
+        description: "effort for this profile",
+        detail: `${model.id} on profile "${profilePick.label}" runs at ${level}.`,
+      })),
+    ],
+    {
+      title: `${model.id} on profile "${profilePick.label}"`,
+      placeHolder: "Reasoning effort stored with the assignment",
+    },
+  );
+  if (!effortPick) {
+    return;
+  }
+  const next = assignModelToProfile(effortOverrides(), profilePick.label, model.id, effortPick.label);
+  await vscode.workspace
+    .getConfiguration("nanBuilders")
+    .update("reasoningEffortByModel", next, vscode.ConfigurationTarget.Global);
+  provider.refresh();
+  vscode.window.showInformationMessage(
+    `NaN Builders: ${model.id} now uses profile "${profilePick.label}".`,
+  );
+}
+
+/** Removes one `profile::model` entry, falling the model back to the active profile. */
+async function clearModelAssignment(provider: NanChatModelProvider): Promise<void> {
+  const overrides = effortOverrides();
+  const entries = Object.keys(overrides)
+    .map((key) => parseProfileModelAssignment(key))
+    .filter((assignment): assignment is { profileId: string; modelId: string } => assignment !== undefined);
+  if (entries.length === 0) {
+    vscode.window.showInformationMessage("No NaN Builders model assignments are configured.");
+    return;
+  }
+  const picked = await vscode.window.showQuickPick(
+    entries.map((assignment) => ({
+      label: assignment.modelId,
+      description: `profile "${assignment.profileId}"`,
+      modelId: assignment.modelId,
+      profileId: assignment.profileId,
+    })),
+    { title: "NaN Builders: remove a model assignment", placeHolder: "The model falls back to the active profile" },
+  );
+  if (!picked) {
+    return;
+  }
+  await vscode.workspace
+    .getConfiguration("nanBuilders")
+    .update("reasoningEffortByModel", removeModelAssignment(overrides, picked.modelId), vscode.ConfigurationTarget.Global);
+  provider.refresh();
+  vscode.window.showInformationMessage(
+    `NaN Builders: ${picked.modelId} is no longer assigned to profile "${picked.profileId}".`,
+  );
+}
+
+/** Per-profile actions: activate, key, rename, delete. */
+async function manageProfiles(
+  context: vscode.ExtensionContext,
+  provider: NanChatModelProvider,
+  onKeyChanged?: () => Promise<void>,
+): Promise<void> {
+  const settings = profileSettings();
+  const activeProfile = resolveActiveProfile(settings);
+  const secretKeys = await context.secrets.keys();
+  const items: Array<vscode.QuickPickItem & { action?: "add" | "open"; profileId?: string }> = settings.profiles.map(
+    (profileId) => ({
+      label: `${profileId === activeProfile ? "$(check)" : "$(account)"} ${profileId}`,
+      description: [
+        profileId === activeProfile ? "active" : undefined,
+        secretKeys.includes(profileSecretName(profileId)) ? "key configured" : "no key",
+      ]
+        .filter((part): part is string => part !== undefined)
+        .join(" · "),
+      action: "open",
+      profileId,
+    }),
+  );
+  if (items.length > 0) {
+    items.push({ kind: vscode.QuickPickItemKind.Separator, label: "" });
+  }
+  items.push({ label: "$(add) Add profile", action: "add" });
+
+  const choice = await vscode.window.showQuickPick(items, {
+    title: "NaN Builders: profiles",
+    placeHolder: "Select a profile to change it, or add one",
+  });
+  if (!choice?.action) {
+    return;
+  }
+  if (choice.action === "add") {
+    await addProfile(provider, onKeyChanged);
+    return;
+  }
+  if (choice.profileId) {
+    await manageOneProfile(context, provider, choice.profileId, onKeyChanged);
+  }
+}
+
+async function addProfile(
+  provider: NanChatModelProvider,
+  onKeyChanged?: () => Promise<void>,
+): Promise<void> {
+  const settings = profileSettings();
+  const enteredId = await vscode.window.showInputBox({
+    title: "NaN Builders: add profile",
+    prompt:
+      `Profile id (letters, digits, ".", "_" or "-"; up to ${MAX_PROFILE_ID_LENGTH} characters). ` +
+      "Settings store the id only; the key goes to VS Code SecretStorage.",
+    placeHolder: "work",
+    ignoreFocusOut: true,
+    validateInput: (value) => {
+      const trimmed = value.trim();
+      if (!trimmed) {
+        return "Enter a profile id.";
+      }
+      if (!isValidProfileId(trimmed)) {
+        return `Use up to ${MAX_PROFILE_ID_LENGTH} characters: letters, digits, ".", "_" or "-", starting with a letter or digit.`;
+      }
+      if (settings.profiles.includes(trimmed)) {
+        return `Profile "${trimmed}" already exists.`;
+      }
+      return undefined;
+    },
+  });
+  const profileId = enteredId?.trim();
+  if (!profileId) {
+    return;
+  }
+  const key = await vscode.window.showInputBox({
+    title: `NaN Builders: API key for profile "${profileId}"`,
+    prompt: "Paste the API key. It is stored in VS Code SecretStorage and never written to settings.",
+    password: true,
+    ignoreFocusOut: true,
+    placeHolder: "sk-...",
+  });
+  const profiles = [...settings.profiles, profileId];
+  await writeProfileSettings(profiles, nextActiveProfile(profiles, settings.activeProfile));
+  if (key?.trim()) {
+    await provider.setProfileKey(profileId, key.trim());
+  }
+  provider.refresh();
+  await onKeyChanged?.();
+  vscode.window.showInformationMessage(
+    key?.trim()
+      ? `NaN Builders profile "${profileId}" added with its API key.`
+      : `NaN Builders profile "${profileId}" added without an API key. Requests that resolve to it fail and name the profile until you set one.`,
+  );
+}
+
+async function manageOneProfile(
+  context: vscode.ExtensionContext,
+  provider: NanChatModelProvider,
+  profileId: string,
+  onKeyChanged?: () => Promise<void>,
+): Promise<void> {
+  const settings = profileSettings();
+  const activeProfile = resolveActiveProfile(settings);
+  const hasKey = (await context.secrets.keys()).includes(profileSecretName(profileId));
+  type ProfileAction = "activate" | "setKey" | "clearKey" | "rename" | "delete";
+  const items: Array<vscode.QuickPickItem & { action: ProfileAction }> = [
+    {
+      label: "$(check) Use as active profile",
+      description: profileId === activeProfile ? "already active" : "default for models without an assignment",
+      action: "activate",
+    },
+    {
+      label: "$(key) Set or replace API key",
+      description: hasKey ? "A key is stored for this profile" : "No key stored for this profile",
+      action: "setKey",
+    },
+  ];
+  if (hasKey) {
+    items.push({ label: "$(trash) Clear API key", description: "Remove it from SecretStorage", action: "clearKey" });
+  }
+  items.push(
+    { label: "$(pencil) Rename profile", description: "Moves the key and its model assignments", action: "rename" },
+    {
+      label: "$(trash) Delete profile",
+      description: "Removes its key and every profile::model assignment",
+      action: "delete",
+    },
+  );
+
+  const choice = await vscode.window.showQuickPick(items, {
+    title: `NaN Builders profile "${profileId}"`,
+    placeHolder: "Choose an action",
+  });
+  if (!choice) {
+    return;
+  }
+  switch (choice.action) {
+    case "activate": {
+      await writeProfileSettings(settings.profiles, profileId);
+      provider.refresh();
+      vscode.window.showInformationMessage(`NaN Builders: profile "${profileId}" is now the active profile.`);
+      return;
+    }
+    case "setKey": {
+      const value = await vscode.window.showInputBox({
+        title: `NaN Builders API Key for profile "${profileId}"`,
+        prompt: `Paste the API key for profile "${profileId}". It is stored in VS Code SecretStorage.`,
+        password: true,
+        ignoreFocusOut: true,
+        placeHolder: "sk-...",
+      });
+      if (!value?.trim()) {
+        return;
+      }
+      await provider.setProfileKey(profileId, value.trim());
+      await onKeyChanged?.();
+      vscode.window.showInformationMessage(`NaN Builders: API key saved for profile "${profileId}".`);
+      return;
+    }
+    case "clearKey":
+      await provider.clearProfileKey(profileId);
+      vscode.window.showInformationMessage(
+        `NaN Builders: API key removed for profile "${profileId}". Requests that resolve to it now fail and name the profile.`,
+      );
+      return;
+    case "rename":
+      await renameProfile(provider, profileId, onKeyChanged);
+      return;
+    case "delete":
+      await deleteProfile(context, provider, profileId, onKeyChanged);
+      return;
+  }
+}
+
+async function renameProfile(
+  provider: NanChatModelProvider,
+  profileId: string,
+  onKeyChanged?: () => Promise<void>,
+): Promise<void> {
+  const settings = profileSettings();
+  const enteredId = await vscode.window.showInputBox({
+    title: `NaN Builders: rename profile "${profileId}"`,
+    prompt: "New profile id. Its API key and model assignments move with it.",
+    value: profileId,
+    ignoreFocusOut: true,
+    validateInput: (value) => {
+      const trimmed = value.trim();
+      if (!trimmed) {
+        return "Enter a profile id.";
+      }
+      if (!isValidProfileId(trimmed)) {
+        return `Use up to ${MAX_PROFILE_ID_LENGTH} characters: letters, digits, ".", "_" or "-", starting with a letter or digit.`;
+      }
+      if (trimmed !== profileId && settings.profiles.includes(trimmed)) {
+        return `Profile "${trimmed}" already exists.`;
+      }
+      return undefined;
+    },
+  });
+  const nextId = enteredId?.trim();
+  if (!nextId || nextId === profileId) {
+    return;
+  }
+  const profiles = settings.profiles.map((entry) => (entry === profileId ? nextId : entry));
+  // The key moves before the settings do: if the secret move fails, nothing
+  // points at an id whose key was never written.
+  await provider.renameProfileSecret(profileId, nextId);
+  await writeProfileSettings(profiles, nextActiveProfile(profiles, settings.activeProfile));
+  await vscode.workspace
+    .getConfiguration("nanBuilders")
+    .update(
+      "reasoningEffortByModel",
+      renameProfileAssignments(effortOverrides(), profileId, nextId),
+      vscode.ConfigurationTarget.Global,
+    );
+  provider.refresh();
+  await onKeyChanged?.();
+  vscode.window.showInformationMessage(
+    `NaN Builders: profile "${profileId}" renamed to "${nextId}" (key and model assignments moved).`,
+  );
+}
+
+async function deleteProfile(
+  context: vscode.ExtensionContext,
+  provider: NanChatModelProvider,
+  profileId: string,
+  onKeyChanged?: () => Promise<void>,
+): Promise<void> {
+  const settings = profileSettings();
+  const overrides = effortOverrides();
+  const assignedModels = Object.keys(overrides)
+    .map((key) => parseProfileModelAssignment(key))
+    .filter((assignment) => assignment?.profileId === profileId)
+    .map((assignment) => assignment!.modelId);
+  const confirmed = await vscode.window.showWarningMessage(
+    `Delete NaN Builders profile "${profileId}"? Its API key is removed from SecretStorage and ` +
+      `${assignedModels.length} model assignment(s) are cleared, so no request uses it afterwards.`,
+    { modal: true },
+    "Delete profile",
+  );
+  if (confirmed !== "Delete profile") {
+    return;
+  }
+  const profiles = settings.profiles.filter((entry) => entry !== profileId);
+  // Settings first: while the profile is gone from settings nothing can resolve
+  // to it, even if a secret or an assignment is still being removed below.
+  await writeProfileSettings(profiles, nextActiveProfile(profiles, settings.activeProfile));
+  await provider.clearProfileKey(profileId);
+  await vscode.workspace
+    .getConfiguration("nanBuilders")
+    .update("reasoningEffortByModel", removeProfileAssignments(overrides, profileId), vscode.ConfigurationTarget.Global);
+  provider.refresh();
+  await onKeyChanged?.();
+  const remaining = resolveActiveProfile(profileSettings());
+  vscode.window.showInformationMessage(
+    `NaN Builders: profile "${profileId}" deleted with its API key and model assignments. ` +
+      (remaining ? `Active profile: "${remaining}".` : "Models use the shared API key again."),
+  );
+}
+
 /**
  * "Test Connection": silent, read-only model discovery for the stored key.
  * A missing key, no reachable models, or a gateway error each produce an
  * actionable warning; gateway text is sanitized before it is displayed.
  */
-async function testConnection(context: vscode.ExtensionContext, provider: NanChatModelProvider): Promise<void> {
-  const apiKey = await context.secrets.get(SECRET_API_KEY);
-  if (!apiKey) {
+async function testConnection(provider: NanChatModelProvider): Promise<void> {
+  const credential = await provider.configuredCredential();
+  if (!credential.apiKey) {
     vscode.window.showWarningMessage(
-      "No NaN Builders API key is configured. Run 'NaN Builders: Manage Provider' to add one, then test the connection again.",
+      credential.profileId
+        ? `NaN Builders profile "${credential.profileId}" has no API key. Run 'NaN Builders: Manage Provider' → Profiles to set it, then test the connection again.`
+        : "No NaN Builders API key is configured. Run 'NaN Builders: Manage Provider' to add one, then test the connection again.",
     );
     return;
   }
@@ -572,6 +1103,7 @@ async function showDiagnostics(
   }
 
   const secretKeys = await context.secrets.keys();
+  const settings = profileSettings();
   let markdown: string;
   try {
     markdown = collectDiagnostics({
@@ -583,6 +1115,11 @@ async function showDiagnostics(
       secretKeys,
       trackedModels: provider.trackedModelIds(),
       lastDiscoveryError: provider.discoveryError(),
+      profiles: settings.profiles,
+      activeProfile: resolveActiveProfile(settings),
+      profileAssignments: Object.keys(effortOverrides())
+        .map((key) => parseProfileModelAssignment(key))
+        .filter((assignment): assignment is { profileId: string; modelId: string } => assignment !== undefined),
     });
   } catch (error) {
     vscode.window.showErrorMessage(`NaN Builders diagnostics failed to build the report: ${errorMessage(error)}`);

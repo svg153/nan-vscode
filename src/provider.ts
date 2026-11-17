@@ -31,6 +31,18 @@ import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
 import type { UsageTracker } from "./usageTracker";
 import type { DiscoveryFailure } from "./providerDiagnostics";
 import {
+  describeRoute,
+  effortOverride,
+  normalizeProfileIds,
+  profileSecretName,
+  readConfiguredCredential,
+  resolveActiveProfile,
+  resolveModelRoute,
+  type ModelRoute,
+  type ProfileRouteSource,
+  type ProfileSettings,
+} from "./profiles";
+import {
   MAX_ERROR_RESPONSE_BYTES,
   MAX_JSON_RESPONSE_BYTES,
   ResponseTooLargeError,
@@ -51,6 +63,20 @@ export class ModelDiscoveryError extends Error implements DiscoveryFailure {
   ) {
     super(message);
     this.name = "ModelDiscoveryError";
+  }
+}
+
+/**
+ * Raised when the profile a request resolved to has no key in SecretStorage.
+ * The message names the profile and is thrown at the single credential
+ * boundary, before any gateway call is built.
+ */
+export class ProfileKeyMissingError extends Error {
+  constructor(readonly profileId: string) {
+    super(
+      `NaN Builders profile "${profileId}" has no API key. Run 'NaN Builders: Manage Provider', open Profiles, and set the key for that profile.`,
+    );
+    this.name = "ProfileKeyMissingError";
   }
 }
 
@@ -120,7 +146,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       return cached.models;
     }
 
-    const apiKey = nativeApiKey ?? (await this.getApiKey(options.silent));
+    const apiKey = nativeApiKey ?? (await this.getDiscoveryApiKey(options.silent));
     if (!apiKey) {
       diagnostic("models.provide.noKey", { silent: options.silent });
       return [];
@@ -189,11 +215,14 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     const startedAt = Date.now();
     diagnostic("chat.begin", { modelId: model.id, messageCount: messages.length, toolCount: options.tools?.length ?? 0 });
     const modelConfiguration = (options as { modelConfiguration?: Record<string, unknown> }).modelConfiguration;
-    const apiKey = providerConfigString(modelConfiguration, "apiKey") ?? (await this.getApiKey(false));
-    if (!apiKey) {
-      diagnostic("chat.noKey", { modelId: model.id });
-      throw new Error("NaN Builders API key is not configured. Run 'NaN Builders: Manage Provider'.");
-    }
+    // Single credential boundary: the profile (and therefore the key) is
+    // resolved here, so a keyless profile fails with its name before any
+    // gateway call, and the resolved key is what the slot queue fingerprints.
+    const credential = await this.resolveCredential(
+      model.id,
+      providerConfigString(modelConfiguration, "apiKey"),
+    );
+    const apiKey = credential.apiKey;
 
     const toolMapping = convertTools(options.tools ?? [], options.toolMode === vscode.LanguageModelChatToolMode.Required);
     const history = convertMessages(
@@ -225,7 +254,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       max_tokens: model.maxOutputTokens || 4096,
       // NaN can spend several minutes in silent reasoning unless this is bounded.
       // The effort is remapped to the closest level the model actually documents.
-      reasoning_effort: this.resolveEffort(model.id, options.modelOptions),
+      reasoning_effort: this.resolveEffort(model.id, options.modelOptions, credential.profileId),
     };
 
     if (toolMapping.definitions.length > 0) {
@@ -404,6 +433,32 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     this.refresh();
   }
 
+  /** Stores one profile's key. Settings only ever hold profile ids. */
+  async setProfileKey(profileId: string, apiKey: string): Promise<void> {
+    await this.context.secrets.store(profileSecretName(profileId), apiKey.trim());
+    this.refresh();
+  }
+
+  async clearProfileKey(profileId: string): Promise<void> {
+    await this.context.secrets.delete(profileSecretName(profileId));
+    this.refresh();
+  }
+
+  /** Moves a profile's key to its new id, never leaving two copies behind. */
+  async renameProfileSecret(fromProfileId: string, toProfileId: string): Promise<void> {
+    if (fromProfileId === toProfileId) {
+      return;
+    }
+    const existing = await this.context.secrets.get(profileSecretName(fromProfileId));
+    if (existing) {
+      await this.context.secrets.store(profileSecretName(toProfileId), existing);
+    } else {
+      await this.context.secrets.delete(profileSecretName(toProfileId));
+    }
+    await this.context.secrets.delete(profileSecretName(fromProfileId));
+    this.refresh();
+  }
+
   async validateConfiguredKey(): Promise<number> {
     return (await this.probeConfiguredKey()).length;
   }
@@ -414,9 +469,11 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
    * Discovery is the only request sent - no chat completion is made.
    */
   async probeConfiguredKey(): Promise<string[]> {
-    const apiKey = await this.context.secrets.get(SECRET_API_KEY);
+    const { apiKey, profileId } = await this.configuredCredential();
     if (!apiKey) {
-      throw new Error("No NaN Builders API key is configured. Run 'NaN Builders: Manage Provider'.");
+      throw profileId
+        ? new ProfileKeyMissingError(profileId)
+        : new Error("No NaN Builders API key is configured. Run 'NaN Builders: Manage Provider'.");
     }
     const source = new vscode.CancellationTokenSource();
     try {
@@ -429,6 +486,124 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     } finally {
       source.dispose();
     }
+  }
+
+  /** Stored credential for the active profile, else the legacy shared key. */
+  async configuredCredential(): Promise<{ apiKey: string | undefined; profileId: string | undefined }> {
+    return readConfiguredCredential(
+      this.profileSettings(),
+      (name) => this.context.secrets.get(name),
+      SECRET_API_KEY,
+    );
+  }
+
+  /** Profiles are ids only; keys live in SecretStorage under a prefixed name. */
+  profileSettings(): ProfileSettings {
+    const configuration = vscode.workspace.getConfiguration("nanBuilders");
+    return {
+      profiles: normalizeProfileIds(configuration.get<unknown>("profiles", [])),
+      activeProfile: configuration.get<string>("activeProfile", ""),
+    };
+  }
+
+  private effortOverrides(): Record<string, unknown> {
+    return vscode.workspace.getConfiguration("nanBuilders").get<Record<string, unknown>>("reasoningEffortByModel", {}) ?? {};
+  }
+
+  /** Profile a model's requests resolve to, with its provenance. */
+  modelRoute(modelId: string): ModelRoute {
+    return resolveModelRoute(this.profileSettings(), this.effortOverrides(), modelId);
+  }
+
+  /**
+   * Resolves the key one chat request uses. A native per-model configuration
+   * wins (VS Code "Manage Models"); otherwise `profile::model` routing and the
+   * active profile decide, and the legacy shared key remains the fallback when
+   * no profile is configured.
+   */
+  private async resolveCredential(
+    modelId: string,
+    nativeApiKey: string | undefined,
+  ): Promise<{
+    apiKey: string;
+    profileId: string | undefined;
+    source: ProfileRouteSource | "native";
+  }> {
+    if (nativeApiKey) {
+      diagnostic("chat.credential", { modelId, source: "native" });
+      return { apiKey: nativeApiKey, profileId: undefined, source: "native" };
+    }
+    const route = this.modelRoute(modelId);
+    if (!route.profileId) {
+      const apiKey = await this.getApiKey(false);
+      if (!apiKey) {
+        diagnostic("chat.noKey", { modelId, source: route.source });
+        throw new Error("NaN Builders API key is not configured. Run 'NaN Builders: Manage Provider'.");
+      }
+      diagnostic("chat.credential", { modelId, source: route.source });
+      return { apiKey, profileId: undefined, source: route.source };
+    }
+    const apiKey = await this.context.secrets.get(profileSecretName(route.profileId));
+    diagnostic("chat.credential", { modelId, ...describeRoute(route), hasKey: Boolean(apiKey) });
+    if (!apiKey) {
+      throw new ProfileKeyMissingError(route.profileId);
+    }
+    return { apiKey, profileId: route.profileId, source: route.source };
+  }
+
+  /** Discovery credential: active profile key when profiles exist, else legacy. */
+  private async getDiscoveryApiKey(silent: boolean): Promise<string | undefined> {
+    const settings = this.profileSettings();
+    const activeProfile = resolveActiveProfile(settings);
+    if (!activeProfile) {
+      diagnostic("models.provide.legacyKey");
+      return this.getApiKey(silent);
+    }
+    const stored = await this.context.secrets.get(profileSecretName(activeProfile));
+    diagnostic("models.provide.profile", { profile: activeProfile, hasKey: Boolean(stored) });
+    if (stored || silent) {
+      return stored;
+    }
+    const entered = await this.promptForKey(
+      `NaN Builders profile "${activeProfile}" API Key`,
+      `Paste the API key for profile "${activeProfile}". It is stored in VS Code SecretStorage.`,
+    );
+    if (!entered) {
+      return undefined;
+    }
+    await this.setProfileKey(activeProfile, entered);
+    return entered;
+  }
+
+  private async promptForKey(title: string, prompt: string): Promise<string | undefined> {
+    const entered = await vscode.window.showInputBox({
+      title,
+      prompt,
+      password: true,
+      ignoreFocusOut: true,
+      placeHolder: "sk-...",
+    });
+    const trimmed = entered?.trim();
+    return trimmed ? trimmed : undefined;
+  }
+
+  private async getApiKey(silent: boolean): Promise<string | undefined> {
+    let apiKey = await this.context.secrets.get(SECRET_API_KEY);
+    if (apiKey || silent) {
+      return apiKey;
+    }
+
+    const entered = await this.promptForKey(
+      "NaN Builders API Key",
+      "Paste your NaN Builders API key. It will be stored in VS Code SecretStorage.",
+    );
+    if (!entered) {
+      return undefined;
+    }
+
+    apiKey = entered;
+    await this.setApiKey(apiKey);
+    return apiKey;
   }
 
   /** Endpoint used for discovery, chat, and usage; native provider configuration wins. */
@@ -449,28 +624,6 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   refresh(): void {
     this.cache = undefined;
     this.changedEmitter.fire();
-  }
-
-  private async getApiKey(silent: boolean): Promise<string | undefined> {
-    let apiKey = await this.context.secrets.get(SECRET_API_KEY);
-    if (apiKey || silent) {
-      return apiKey;
-    }
-
-    const entered = await vscode.window.showInputBox({
-      title: "NaN Builders API Key",
-      prompt: "Paste your NaN Builders API key. It will be stored in VS Code SecretStorage.",
-      password: true,
-      ignoreFocusOut: true,
-      placeHolder: "sk-...",
-    });
-    if (!entered?.trim()) {
-      return undefined;
-    }
-
-    apiKey = entered.trim();
-    await this.setApiKey(apiKey);
-    return apiKey;
   }
 
   private async fetchModelIds(apiKey: string, token: vscode.CancellationToken): Promise<DiscoveredModel[]> {
@@ -626,10 +779,15 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   }
 
   /** Effective reasoning effort for a model, honoring per-model overrides. */
-  private resolveEffort(modelId: string, modelOptions: { readonly [name: string]: unknown } | undefined): string {
+  private resolveEffort(
+    modelId: string,
+    modelOptions: { readonly [name: string]: unknown } | undefined,
+    profileId?: string,
+  ): string {
     const configuration = vscode.workspace.getConfiguration("nanBuilders");
     const overrides = configuration.get<Record<string, unknown>>("reasoningEffortByModel", {});
-    const perModel = typeof overrides?.[modelId] === "string" ? (overrides[modelId] as string) : undefined;
+    const routeProfile = profileId ?? resolveActiveProfile(this.profileSettings());
+    const perModel = effortOverride(overrides, modelId, routeProfile);
     const requested = typeof modelOptions?.reasoning_effort === "string" ? modelOptions.reasoning_effort : undefined;
     return resolveReasoningEffort({
       requested,
