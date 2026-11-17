@@ -179,7 +179,10 @@ export interface AccountModelRow {
   readonly credits?: number;
   /** Share of the plan's credit allowance used by this model (1 decimal); undefined means "do not fabricate %". */
   readonly percent?: number;
-  /** Note when no % applies, e.g. "Does not draw credits" or "No credits billed in this window". */
+  /**
+   * Note when no % applies, e.g. "Does not draw credits", "No credits billed in
+   * this window", or "Credit data unavailable for this model".
+   */
   readonly note?: string;
 }
 
@@ -226,6 +229,17 @@ export function windowCredits(report: UsageReport): number | undefined {
   return billed.length === 0 ? undefined : sumCredits(billed);
 }
 
+/**
+ * True when a metered row reports no usable credit amount, so `windowCredits`
+ * is a lower bound instead of the window total. Unmetered rows are expected to
+ * carry no credits and never make the sum partial.
+ */
+export function windowCreditsPartial(report: UsageReport): boolean {
+  return report.totals.byModel.some(
+    (entry) => unmeteredNote(entry.model) === undefined && !Number.isFinite(entry.credits),
+  );
+}
+
 /** Plan-credits headline: the share of the allowance used this period, or undefined when not billed in credits. */
 export function accountHeadline(report: UsageReport): { model: string; percent: number } | undefined {
   const { allowance, used } = report.credits ?? {};
@@ -235,12 +249,24 @@ export function accountHeadline(report: UsageReport): { model: string; percent: 
   return { model: "credits", percent: percentOf(used, allowance) };
 }
 
-function creditsNote(model: string, credits: number | undefined): string | undefined {
+/** Shown when a metered model's row has token usage but no usable credit amount. */
+export const CREDITS_UNAVAILABLE_NOTE = "Credit data unavailable for this model";
+
+/**
+ * Note for a per-model row that shows no percentage; undefined when a % applies.
+ * Missing/invalid per-model credits mean the gateway did not report billing
+ * data, which is not the same as an explicit zero: only a finite amount <= 0
+ * means nothing was billed in the window.
+ */
+export function creditsNote(model: string, credits: number | undefined): string | undefined {
   const unmetered = unmeteredNote(model);
   if (unmetered) {
     return unmetered;
   }
-  return credits === undefined || credits <= 0 ? "No credits billed in this window" : undefined;
+  if (typeof credits !== "number" || !Number.isFinite(credits)) {
+    return CREDITS_UNAVAILABLE_NOTE;
+  }
+  return credits <= 0 ? "No credits billed in this window" : undefined;
 }
 
 function utcToday(): string {

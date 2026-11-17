@@ -1,5 +1,5 @@
 import { PROVIDER_VENDOR } from "./constants";
-import { sanitizeErrorBody } from "./openai/request";
+import { sanitizeErrorBody } from "./providerErrors";
 import { sanitizeUpstreamText } from "./text";
 
 /**

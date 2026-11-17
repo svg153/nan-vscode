@@ -40,6 +40,13 @@ code --install-extension svg153.nan-builders-vscode
 
 The listing is community-maintained under the `svg153` publisher and is not an official NaN Builders product.
 
+Pre-release builds are published to the Marketplace pre-release channel on every
+merge that cuts a release. To try them, open the extension in the Extensions
+view, choose **Switch to Pre-Release Version**, and update normally; switch back
+to **Release Version** at any time. Stable versions are promoted manually once a
+pre-release has been validated, so a pre-release is ahead of the latest stable
+on purpose.
+
 ### From a release VSIX
 
 1. Download the latest `.vsix` from [GitHub Releases](https://github.com/svg153/nan-vscode/releases).
@@ -103,7 +110,7 @@ Models differ in which reasoning levels the API documents for them. Resolution h
 3. `nanBuilders.defaultReasoningEffort`, unless it is `auto`.
 4. The model's documented default: `medium` when the model supports it, otherwise the central documented level.
 
-Whatever level is chosen is remapped to the closest documented level for that model (ties move upward), so selecting an unsupported deep-thinking level on a shallow model never sends a value the API rejects. The ladders are curated from the "Controlling reasoning" table at <https://nan.builders/docs/models> (checked 2026-11-16): `/v1/models` does not publish per-model effort levels, so the table must be re-checked when the docs change. Model-specific quirks are stated in each model description: GLM always reasons (`none` is applied as `minimal`); Gemma 4 and Qwen 3.6 treat both `none` and `minimal` as off, with levels capping the reasoning phase between 2,048 and 32,768 tokens; MiMo documents only `low`–`max` and counts reasoning tokens inside `max_tokens`; `deepseek-v4-flash` and `qwen3.8-flash` treat effort values as hints rather than caps.
+Whatever level is chosen is remapped to the closest documented level for that model (ties move upward), so selecting an unsupported deep-thinking level on a shallow model never sends a value the API rejects. The ladders are curated from the "Controlling reasoning" table at <https://nan.builders/docs/models> (checked 2026-11-17): `/v1/models` does not publish per-model effort levels, so the table must be re-checked when the docs change. Model-specific quirks are stated in each model description: GLM always reasons (`none` is applied as `minimal`); Gemma 4 and Qwen 3.6 treat both `none` and `minimal` as off, with levels capping the reasoning phase between 2,048 and 32,768 tokens; MiMo documents only `low`–`max` and counts reasoning tokens inside `max_tokens`; `deepseek-v4-flash` and `qwen3.8-flash` treat effort values as hints rather than caps. `qwen4-max` documents `none` as off plus `minimal`–`max`, so it uses the full ladder, while `hy4-flash` documents only that it reasons by default and that `none` turns it off, so like `kimi-k3.1-pro` and `deepseek-v4-pro` it is treated as model-managed (`[]`).
 
 Run **NaN Builders: Set Model Reasoning Effort** from the Command Palette, pick a model, then pick a level (or reset it to `auto`). The current level is shown in the model tooltip and in the selection UI description.
 
@@ -143,7 +150,7 @@ NaN chat models with compatible function tool calling are marked as supporting t
 
 Only model IDs returned by `/v1/models` are exposed. Known non-chat endpoints are removed. Unknown IDs are hidden by default so an embedding, image, or audio endpoint is not accidentally advertised as a chat model. Set `nanBuilders.includeUnknownModels` to `true` to expose unknown IDs conservatively while local metadata catches up.
 
-VS Code needs context-window, output-budget, image, and tool-calling metadata, while `/v1/models` is the authorization and discovery source. The extension therefore keeps a small local capability catalog and never exposes a catalogued model unless the API key can access it. Refresh the catalog when NaN changes model capabilities. NaN's larger models (`kimi-k3.1-pro`, `qwen3.8-max`, `deepseek-v4-pro`, `hy4`, `glm5.3`) are appended with a `(larger model)` suffix in the picker because they bill more credits per token; their picker tooltip also states that they cost more per token than the flash models, while every other entry states that it draws from the account-wide credit pool. `clef` is a decision endpoint on `POST /v1/systemone` and is never offered as a chat model.
+VS Code needs context-window, output-budget, image, and tool-calling metadata, while `/v1/models` is the authorization and discovery source. The extension therefore keeps a small local capability catalog and never exposes a catalogued model unless the API key can access it. Refresh the catalog when NaN changes model capabilities. NaN's larger models (`kimi-k3.1-pro`, `qwen3.8-max`, `qwen4-max`, `deepseek-v4-pro`, `hy4`, `glm5.3`) are appended with a `(larger model)` suffix in the picker because they bill more credits per token; their picker tooltip also states that they cost more per token than the flash models, while every other entry states that it draws from the account-wide credit pool. `clef` is a decision endpoint on `POST /v1/systemone` and is never offered as a chat model.
 
 ## Usage and limitations
 
