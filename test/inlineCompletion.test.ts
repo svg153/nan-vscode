@@ -11,6 +11,7 @@ import {
   waitForInlineCompletionDebounce,
 } from "../src/inlineCompletion";
 import { MAX_JSON_RESPONSE_BYTES } from "../src/responseBody";
+import { SlotQueueRegistry, credentialId } from "../src/openai/slotQueue";
 
 const LONG_TEXT = "x".repeat(MAX_PROMPT_CHARS * 2);
 
@@ -403,15 +404,85 @@ test("requestInlineCompletion rejects oversized JSON without exposing its body",
   assert.equal(cancelled, true);
 });
 
-test("requestInlineCompletion maps empty suggestions from a valid payload", async () => {
-  const fetchImpl = (() =>
-    Promise.resolve(jsonResponse({ choices: [{ text: "  \n" }] }))) as unknown as typeof fetch;
-  const outcome = await requestInlineCompletion({
+test("requestInlineCompletion waits for a free slot before fetching", async () => {
+  const slotQueues = new SlotQueueRegistry(1);
+  let inFlight = 0;
+  let peakInFlight = 0;
+  const fetchImpl = (async () => {
+    inFlight += 1;
+    peakInFlight = Math.max(peakInFlight, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    inFlight -= 1;
+    return jsonResponse({ choices: [{ text: "ok" }] });
+  }) as unknown as typeof fetch;
+  const options = {
     baseUrl: "https://api.example.com/v1",
-    apiKey: "k",
+    apiKey: "sk-test",
     userAgent: "test",
     request: { model: "m", prompt: "p", max_tokens: 64, temperature: 0 },
     fetchImpl,
-  });
-  assert.deepEqual(outcome, { ok: false, reason: "empty" });
+    slotQueues,
+  };
+
+  const outcomes = await Promise.all([requestInlineCompletion(options), requestInlineCompletion(options)]);
+
+  assert.deepEqual(outcomes[0], { ok: true, text: "ok" });
+  assert.deepEqual(outcomes[1], { ok: true, text: "ok" });
+  assert.equal(peakInFlight, 1);
+  assert.equal(slotQueues.forCredential(credentialId("sk-test")).inUse, 0);
 });
+
+test("requestInlineCompletion cancelled while queued never fetches", async () => {
+  const slotQueues = new SlotQueueRegistry(1);
+  const held = await slotQueues.acquire("sk-test");
+  let fetches = 0;
+  const fetchImpl = (() => {
+    fetches += 1;
+    return Promise.resolve(jsonResponse({ choices: [{ text: "ok" }] }));
+  }) as unknown as typeof fetch;
+  const controller = new AbortController();
+
+  const pending = requestInlineCompletion({
+    baseUrl: "https://api.example.com/v1",
+    apiKey: "sk-test",
+    userAgent: "test",
+    request: { model: "m", prompt: "p", max_tokens: 64, temperature: 0 },
+    signal: controller.signal,
+    fetchImpl,
+    slotQueues,
+  });
+  controller.abort();
+
+  assert.deepEqual(await pending, { ok: false, reason: "cancelled" });
+  assert.equal(fetches, 0);
+  held.release();
+});
+
+test("requestInlineCompletion releases its slot after HTTP and network failures", async () => {
+  const slotQueues = new SlotQueueRegistry(1);
+  const options = {
+    baseUrl: "https://api.example.com/v1",
+    apiKey: "sk-test",
+    userAgent: "test",
+    request: { model: "m", prompt: "p", max_tokens: 64, temperature: 0 },
+  };
+  const queue = slotQueues.forCredential(credentialId("sk-test"));
+
+  const tooMany = (() =>
+    Promise.resolve(jsonResponse({ error: "rate limited" }, 429))) as unknown as typeof fetch;
+  assert.deepEqual(await requestInlineCompletion({ ...options, fetchImpl: tooMany, slotQueues }), {
+    ok: false,
+    reason: "http",
+    status: 429,
+  });
+  assert.equal(queue.inUse, 0);
+
+  const offline = (() => Promise.reject(new TypeError("fetch failed"))) as unknown as typeof fetch;
+  assert.deepEqual(await requestInlineCompletion({ ...options, fetchImpl: offline, slotQueues }), {
+    ok: false,
+    reason: "network",
+  });
+  assert.equal(queue.inUse, 0);
+  assert.equal(queue.pending, 0);
+});
+

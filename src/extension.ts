@@ -5,6 +5,11 @@ import { HttpEndpointConsentDeniedError, HttpEndpointGuard } from "./httpEndpoin
 import { NanInlineCompletionProvider } from "./inlineCompletionProvider";
 import { NanChatModelProvider, ModelDiscoveryError } from "./provider";
 import { collectDiagnostics, formatConnectionOk, formatConnectionWarning, selectHostModels } from "./providerDiagnostics";
+import {
+  DEFAULT_MAX_PARALLEL_REQUESTS,
+  SlotQueueRegistry,
+  resolveMaxParallelRequests,
+} from "./openai/slotQueue";
 import { getKnownModel, resolveReasoningEffort } from "./modelCatalog";
 import { AccountUsageService, accountModelRows, windowCredits } from "./accountUsage";
 import { compactTokens } from "./quotaCatalog";
@@ -110,7 +115,16 @@ export function activate(context: vscode.ExtensionContext): {
   }, endpointGuard);
   const usage = new UsageTracker(context.globalState, account);
   diagnostic("activate.usageTracker.created");
-  const provider = new NanChatModelProvider(context, usage, endpointGuard);
+  // One set of slots per API key, shared by chat and inline completions so the
+  // gateway's per-key concurrency limit holds across both paths.
+  const slotQueues = new SlotQueueRegistry(() =>
+    resolveMaxParallelRequests(
+      vscode.workspace
+        .getConfiguration("nanBuilders")
+        .get<number>("maxParallelRequests", DEFAULT_MAX_PARALLEL_REQUESTS),
+    ),
+  );
+  const provider = new NanChatModelProvider(context, usage, endpointGuard, slotQueues);
   let inlineStartupGate: (() => Promise<void>) | undefined;
   let inlineTestSource: vscode.CancellationTokenSource | undefined;
   let inlineRegistrationSelector: vscode.DocumentSelector | undefined;
@@ -127,7 +141,7 @@ export function activate(context: vscode.ExtensionContext): {
           onDidChange: (listener) => context.secrets.onDidChange(listener),
         }
       : context.secrets;
-  const inlineCompletions = new NanInlineCompletionProvider(inlineSecrets, endpointGuard);
+  const inlineCompletions = new NanInlineCompletionProvider(inlineSecrets, endpointGuard, slotQueues);
   const registerInlineCompletions = (selector: vscode.DocumentSelector): vscode.Disposable => {
     inlineRegistrationSelector = selector;
     return vscode.languages.registerInlineCompletionItemProvider(selector, inlineCompletions);
@@ -262,6 +276,9 @@ export function activate(context: vscode.ExtensionContext): {
       }
       if (event.affectsConfiguration("nanBuilders.completionModel")) {
         syncInlineCompletions();
+      }
+      if (event.affectsConfiguration("nanBuilders.maxParallelRequests")) {
+        slotQueues.refresh();
       }
       if (event.affectsConfiguration("nanBuilders.apiBaseUrl")) {
         endpointGuard.resetDenials();

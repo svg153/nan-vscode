@@ -4,6 +4,7 @@ import test from "node:test";
 import type * as vscode from "vscode";
 import { SECRET_API_KEY } from "../src/constants";
 import { RequestTimeoutError } from "../src/openai/request";
+import { DEFAULT_MAX_PARALLEL_REQUESTS, SlotQueueRegistry, credentialId } from "../src/openai/slotQueue";
 import { MAX_ERROR_RESPONSE_BYTES, MAX_JSON_RESPONSE_BYTES, ResponseTooLargeError } from "../src/responseBody";
 import { MAX_SSE_LINE_CHARS, StreamLimitError } from "../src/openai/stream";
 
@@ -89,6 +90,7 @@ function createHarness(
   endpointAuthorizer: { authorize: (baseUrl: string, signal?: AbortSignal) => Promise<void> } = {
     authorize: async () => undefined,
   },
+  slots: SlotQueueRegistry = new SlotQueueRegistry(DEFAULT_MAX_PARALLEL_REQUESTS),
 ) {
   settings.clear();
   settings.set("apiBaseUrl", "https://unit.test/v1/");
@@ -115,8 +117,9 @@ function createHarness(
       },
     },
     endpointAuthorizer,
+    slots,
   );
-  return { provider, calls, get recordedUsage() { return recordedUsage; } };
+  return { provider, calls, slots, get recordedUsage() { return recordedUsage; } };
 }
 
 function modelListResponse(body: unknown, init?: ResponseInit): Response {
@@ -541,6 +544,7 @@ test("native provider configuration overrides the stored key and settings for di
     { secrets },
     { record: async () => undefined },
     { authorize: async () => undefined },
+    new SlotQueueRegistry(DEFAULT_MAX_PARALLEL_REQUESTS),
   );
   try {
     const token = new TestCancellationToken();
@@ -937,6 +941,100 @@ test("response headers end the connect deadline while a slow error body is still
     const failure = await outcome;
     assert.ok(failure instanceof RequestTimeoutError);
     assert.equal(failure.kind, "stream-idle");
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("chat requests beyond the concurrency limit wait instead of racing the gateway", async () => {
+  const originalFetch = globalThis.fetch;
+  const slots = new SlotQueueRegistry(1);
+  let inFlight = 0;
+  let peakInFlight = 0;
+  const harness = createHarness(async (input) => {
+    if (String(input).endsWith("/models")) {
+      return modelListResponse({ data: [{ id: "mimo-v2.6-flash" }] });
+    }
+    inFlight += 1;
+    peakInFlight = Math.max(peakInFlight, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    inFlight -= 1;
+    return new Response(ssePayload("hi"));
+  }, undefined, slots);
+  try {
+    const model = await discoverChatModel(harness.provider);
+    const reported: unknown[] = [];
+    await Promise.all([
+      chatOutcome(harness.provider, model, reported),
+      chatOutcome(harness.provider, model, []),
+    ]);
+
+    assert.equal(peakInFlight, 1);
+    assert.equal(harness.recordedUsage, 2);
+    assert.equal(reported.length, 1);
+    assert.equal(slots.forCredential(credentialId("unit-test-key")).inUse, 0);
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("chat cancelled while queued never reaches the gateway", async () => {
+  const originalFetch = globalThis.fetch;
+  const slots = new SlotQueueRegistry(1);
+  const harness = createHarness(
+    async (input) =>
+      String(input).endsWith("/models")
+        ? modelListResponse({ data: [{ id: "mimo-v2.6-flash" }] })
+        : new Response(ssePayload("hi")),
+    undefined,
+    slots,
+  );
+  const chatCalls = (): string[] =>
+    harness.calls.filter((call) => call.endsWith("/chat/completions"));
+  try {
+    const model = await discoverChatModel(harness.provider);
+    const held = await slots.acquire("unit-test-key");
+    const token = new TestCancellationToken();
+    const pending = chatOutcome(harness.provider, model, [], token);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.deepEqual(chatCalls(), []);
+
+    token.cancel();
+    assert.equal(await pending, undefined);
+    assert.deepEqual(chatCalls(), []);
+    held.release();
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a failed chat response releases its slot for the next request", async () => {
+  const originalFetch = globalThis.fetch;
+  const slots = new SlotQueueRegistry(1);
+  let chatAttempts = 0;
+  const harness = createHarness(async (input) => {
+    if (String(input).endsWith("/models")) {
+      return modelListResponse({ data: [{ id: "mimo-v2.6-flash" }] });
+    }
+    chatAttempts += 1;
+    if (chatAttempts === 1) {
+      return new Response("rate limited", { status: 429 });
+    }
+    return new Response(ssePayload("hi"));
+  }, undefined, slots);
+  try {
+    const model = await discoverChatModel(harness.provider);
+    const failed = await chatOutcome(harness.provider, model, []);
+    assert.ok(failed instanceof Error);
+    assert.equal(slots.forCredential(credentialId("unit-test-key")).inUse, 0);
+
+    const reported: unknown[] = [];
+    assert.equal(await chatOutcome(harness.provider, model, reported), undefined);
+    assert.equal(reported.length, 1);
+    assert.equal(chatAttempts, 2);
   } finally {
     harness.provider.dispose();
     globalThis.fetch = originalFetch;
