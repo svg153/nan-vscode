@@ -1,4 +1,5 @@
 import { PROVIDER_VENDOR } from "./constants";
+import { SHARED_KEY_LABEL, type FailoverDiagnostics } from "./failover";
 import { profileKeyPresence } from "./profiles";
 import { sanitizeErrorBody } from "./providerErrors";
 import { sanitizeUpstreamText } from "./text";
@@ -85,6 +86,11 @@ export interface DiagnosticsInput {
   readonly activeProfile?: string;
   /** `profile::model` routing entries, already reduced to profile/model pairs. */
   readonly profileAssignments?: ReadonlyArray<{ profileId: string; modelId: string }>;
+  /**
+   * Opt-in failover state: whether it is enabled and which keys are cooling
+   * down, as profile ids and whole seconds. Never a key.
+   */
+  readonly failover?: FailoverDiagnostics;
   /** Override for tests; defaults to the current time. */
   readonly generatedAt?: string;
   readonly vendor?: string;
@@ -113,6 +119,7 @@ export function collectDiagnostics(input: DiagnosticsInput): string {
     `- Include unknown models: ${includeUnknown ? "yes" : "no"}`,
     `- API key configured: ${keyCount > 0 ? "yes" : "no"}`,
     `- Configured keys/profiles: ${keyCount} (count only; key values are never read)`,
+    `- Failover on throttle: ${input.failover?.enabled ? "on (one hop per request)" : "off (fixed routing)"}`,
     "",
     "## Models exposed by this VS Code host",
     "",
@@ -168,6 +175,7 @@ function describeProfiles(input: DiagnosticsInput): string[] {
     return [
       "- No profiles configured: every model uses the shared `nanBuilders.apiKey` key.",
       "- Add profiles in **NaN Builders: Manage Provider** → **Profiles**.",
+      ...describeCooldowns(input),
     ];
   }
   const activeProfile = input.activeProfile && input.activeProfile.trim() ? input.activeProfile.trim() : profiles[0];
@@ -188,6 +196,27 @@ function describeProfiles(input: DiagnosticsInput): string[] {
           ...assignments.map(({ profileId, modelId }) => `- \`${modelId}\` → profile \`${profileId}\``),
         ]
       : ["", "- No `profile::model` assignments: every model uses the active profile."]),
+    ...describeCooldowns(input),
+  ];
+}
+
+/**
+ * Cooldown state left by the opt-in failover: profile ids and whole seconds
+ * only, so the report stays safe to share and never names a key.
+ */
+function describeCooldowns(input: DiagnosticsInput): string[] {
+  const cooling = input.failover?.cooling ?? [];
+  if (cooling.length === 0 || !input.failover?.enabled) {
+    return [];
+  }
+  return [
+    "",
+    "Cooldown after a rate limit:",
+    "",
+    ...cooling.map(
+      ({ profileId, remainingSeconds }) =>
+        `- \`${profileId ?? SHARED_KEY_LABEL}\`: cooling down, ${remainingSeconds}s left`,
+    ),
   ];
 }
 

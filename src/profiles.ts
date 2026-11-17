@@ -30,7 +30,11 @@ export interface ProfileSettings {
   readonly activeProfile?: string;
 }
 
-export type ProfileRouteSource = "legacy" | "assignment" | "active" | "first";
+/**
+ * Why a profile was chosen. `"failover"` marks a benign retry with another
+ * profile after the routed one was rate limited (#144).
+ */
+export type ProfileRouteSource = "legacy" | "assignment" | "active" | "first" | "failover";
 
 /** Which profile key serves one request. `profileId` absent means the legacy key. */
 export interface ModelRoute {
@@ -167,6 +171,28 @@ export function resolveModelRoute(
   const active = resolveActiveProfile(settings);
   const configured = typeof settings.activeProfile === "string" ? settings.activeProfile.trim() : "";
   return { profileId: active, source: active !== undefined && active === configured ? "active" : "first" };
+}
+
+/**
+ * Ordered key candidates for opt-in failover (#144): the route
+ * `resolveModelRoute` picks first, then every other configured profile in
+ * settings order. Keeping the order here means a retry can never jump ahead of
+ * an assignment, and the extra candidates are labelled `"failover"` so
+ * diagnostics distinguish a retry from a routing decision.
+ */
+export function resolveModelRouteCandidates(
+  settings: ProfileSettings,
+  overrides: Record<string, unknown> | undefined,
+  modelId: string,
+): ModelRoute[] {
+  const primary = resolveModelRoute(settings, overrides, modelId);
+  const candidates = [primary];
+  for (const profileId of settings.profiles) {
+    if (profileId !== primary.profileId) {
+      candidates.push({ profileId, source: "failover" });
+    }
+  }
+  return candidates;
 }
 
 /**
