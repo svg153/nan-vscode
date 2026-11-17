@@ -7,6 +7,7 @@ import {
   requestInlineCompletion,
   waitForInlineCompletionDebounce,
 } from "./inlineCompletion";
+import type { SlotQueueRegistry } from "./openai/slotQueue";
 
 /**
  * Opt-in inline ghost-text completions through the legacy `POST /completions`
@@ -19,6 +20,8 @@ export class NanInlineCompletionProvider implements vscode.InlineCompletionItemP
   constructor(
     private readonly secrets: vscode.SecretStorage,
     private readonly endpointAuthorizer: HttpEndpointAuthorizer,
+    /** Slots shared with chat so both paths respect one per-key limit. */
+    private readonly slots: Pick<SlotQueueRegistry, "acquire">,
   ) {}
 
   async provideInlineCompletionItems(
@@ -72,6 +75,7 @@ export class NanInlineCompletionProvider implements vscode.InlineCompletionItemP
         request,
         signal: controller.signal,
         endpointAuthorizer: this.endpointAuthorizer,
+        slotQueues: this.slots,
       });
       diagnostic(
         "inline.complete",

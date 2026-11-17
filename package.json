@@ -133,6 +133,13 @@
           "maximum": 3600,
           "description": "Maximum silence between streamed chunks before a chat request is aborted as timed out. The timer restarts on every chunk, so slow but alive streams are never cut off by a total deadline. Raise it for models with long silent reasoning phases."
         },
+        "nanBuilders.maxParallelRequests": {
+          "type": "number",
+          "default": 7,
+          "minimum": 1,
+          "maximum": 7,
+          "description": "Chat requests and inline completions allowed to run at once for one API key. NaN serves up to 7 concurrent requests per key and answers more with HTTP 429, so extra requests wait in a first-in-first-out queue instead. Lower it to leave headroom for other editors or terminals using the same key. Values above 7 are capped at the gateway limit."
+        },
         "nanBuilders.showStatusBar": {
           "type": "boolean",
           "default": true,

@@ -7,6 +7,7 @@
 
 import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
 import { MAX_JSON_RESPONSE_BYTES, ResponseTooLargeError, readBoundedJson } from "./responseBody";
+import type { SlotLease, SlotQueueRegistry } from "./openai/slotQueue";
 
 /** Maximum prompt characters sent per request (tail ending at the cursor). */
 export const MAX_PROMPT_CHARS = 4000;
@@ -111,6 +112,8 @@ export async function requestInlineCompletion(options: {
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
   endpointAuthorizer?: HttpEndpointAuthorizer;
+  /** Shared chat + inline slots for this API key, when queueing is enabled. */
+  slotQueues?: Pick<SlotQueueRegistry, "acquire">;
 }): Promise<CompletionOutcome> {
   if (options.signal?.aborted) {
     return { ok: false, reason: "cancelled" };
@@ -128,37 +131,54 @@ export async function requestInlineCompletion(options: {
     return { ok: false, reason: "cancelled" };
   }
   const send = options.fetchImpl ?? fetch;
-  let response: Response;
-  try {
-    response = await send(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${options.apiKey}`,
-        "Content-Type": "application/json",
-        "User-Agent": options.userAgent,
-      },
-      body: JSON.stringify(options.request),
-      signal: options.signal ?? null,
-    });
-  } catch {
-    return options.signal?.aborted ? { ok: false, reason: "cancelled" } : { ok: false, reason: "network" };
-  }
-  if (!response.ok) {
+  // Queued behind other requests for the same key instead of racing the
+  // gateway's concurrency limit; a cancelled waiter returns before any fetch.
+  let slot: SlotLease | undefined;
+  if (options.slotQueues) {
     try {
-      await response.body?.cancel();
+      slot = await options.slotQueues.acquire(options.apiKey, options.signal);
     } catch {
-      // The body may already be consumed or locked; nothing to release.
+      return { ok: false, reason: "cancelled" };
     }
-    return { ok: false, reason: "http", status: response.status };
   }
   try {
-    const payload: unknown = await readBoundedJson(response, MAX_JSON_RESPONSE_BYTES);
-    return parseCompletionResponse(payload);
-  } catch (error) {
-    if (error instanceof ResponseTooLargeError) {
-      return { ok: false, reason: "too_large" };
+    if (options.signal?.aborted) {
+      return { ok: false, reason: "cancelled" };
     }
-    return options.signal?.aborted ? { ok: false, reason: "cancelled" } : { ok: false, reason: "malformed" };
+    let response: Response;
+    try {
+      response = await send(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${options.apiKey}`,
+          "Content-Type": "application/json",
+          "User-Agent": options.userAgent,
+        },
+        body: JSON.stringify(options.request),
+        signal: options.signal ?? null,
+      });
+    } catch {
+      return options.signal?.aborted ? { ok: false, reason: "cancelled" } : { ok: false, reason: "network" };
+    }
+    if (!response.ok) {
+      try {
+        await response.body?.cancel();
+      } catch {
+        // The body may already be consumed or locked; nothing to release.
+      }
+      return { ok: false, reason: "http", status: response.status };
+    }
+    try {
+      const payload: unknown = await readBoundedJson(response, MAX_JSON_RESPONSE_BYTES);
+      return parseCompletionResponse(payload);
+    } catch (error) {
+      if (error instanceof ResponseTooLargeError) {
+        return { ok: false, reason: "too_large" };
+      }
+      return options.signal?.aborted ? { ok: false, reason: "cancelled" } : { ok: false, reason: "malformed" };
+    }
+  } finally {
+    slot?.release();
   }
 }
 

@@ -15,6 +15,7 @@ import {
 import { historyConversationKey, trimHistoryToBudget } from "./openai/historyTrim";
 import { convertMessages, convertTools } from "./openai/request";
 import { countContentTokens, estimateTokens } from "./openai/tokens";
+import type { SlotLease, SlotQueueRegistry } from "./openai/slotQueue";
 import { OpenAIStreamDecoder, StreamLimitError, type StreamEvent } from "./openai/stream";
 import {
   ChatTimeoutController,
@@ -76,6 +77,8 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     private readonly context: Pick<vscode.ExtensionContext, "secrets">,
     private readonly usage: Pick<UsageTracker, "record">,
     private readonly endpointAuthorizer: HttpEndpointAuthorizer,
+    /** Per-credential slots shared with inline completions. */
+    private readonly slots: Pick<SlotQueueRegistry, "acquire">,
   ) {}
 
   dispose(): void {
@@ -237,9 +240,15 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       timeoutController.settle();
     }
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let slot: SlotLease | undefined;
     let chunkCount = 0;
     try {
-      const response = await this.sendChatRequest(apiKey, requestBody, cancellation.signal, timeoutController);
+      const sent = await this.sendChatRequest(apiKey, requestBody, cancellation.signal, timeoutController);
+      slot = sent.slot;
+      if (slot.waited) {
+        diagnostic("chat.slot.queued", { modelId: model.id, waitedMs: Date.now() - startedAt });
+      }
+      const response = sent.response;
       diagnostic("chat.http.response", { modelId: model.id, status: response.status, elapsedMs: Date.now() - startedAt });
       if (!response.body) {
         throw new Error("NaN Builders returned an empty streaming response.");
@@ -330,6 +339,9 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
         throw toProviderError(error);
       }
     } finally {
+      // The slot covers the stream body too, so it is freed only once the
+      // reader is done or cancelled, never on headers alone.
+      slot?.release();
       timeoutController.settle();
       reader?.releaseLock();
       cancellation.dispose();
@@ -516,7 +528,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     body: Record<string, unknown>,
     signal: AbortSignal,
     timeouts: ChatTimeoutController,
-  ): Promise<Response> {
+  ): Promise<{ response: Response; slot: SlotLease }> {
     const baseUrl = this.apiBaseUrl();
     // Each send arms its own headers deadline *after* authorization, so endpoint
     // consent never counts against it, and each send clears whatever timer the
@@ -540,18 +552,34 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     };
 
     await this.endpointAuthorizer.authorize(baseUrl, signal);
-    let response = await send(body);
-    if (!response.ok) {
-      const text = await readChatErrorText(response);
-      if (
-        response.status === 400 &&
-        "stream_options" in body &&
-        /stream[_ -]?options|include[_ -]?usage/i.test(text)
-      ) {
-        const fallback = { ...body };
-        delete fallback.stream_options;
-        response = await send(fallback);
-      } else {
+    // One slot per send attempt covers the compatibility fallback re-send too:
+    // the failed response is drained before the retry, so only one request is
+    // ever in flight against the gateway for this lease.
+    const slot = await this.slots.acquire(apiKey, signal);
+    try {
+      let response = await send(body);
+      if (!response.ok) {
+        const text = await readChatErrorText(response);
+        if (
+          response.status === 400 &&
+          "stream_options" in body &&
+          /stream[_ -]?options|include[_ -]?usage/i.test(text)
+        ) {
+          const fallback = { ...body };
+          delete fallback.stream_options;
+          response = await send(fallback);
+        } else {
+          throw httpError(
+            response.status,
+            response.statusText,
+            text,
+            parseRetryAfter(response.headers.get("Retry-After")),
+          );
+        }
+      }
+
+      if (!response.ok) {
+        const text = await readChatErrorText(response);
         throw httpError(
           response.status,
           response.statusText,
@@ -559,18 +587,13 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
           parseRetryAfter(response.headers.get("Retry-After")),
         );
       }
+      return { response, slot };
+    } catch (error) {
+      // Failures and cancellations release here; the caller releases once it
+      // has drained the stream body.
+      slot.release();
+      throw error;
     }
-
-    if (!response.ok) {
-      const text = await readChatErrorText(response);
-      throw httpError(
-        response.status,
-        response.statusText,
-        text,
-        parseRetryAfter(response.headers.get("Retry-After")),
-      );
-    }
-    return response;
   }
 
   private chatTimeouts(): ChatTimeouts {
