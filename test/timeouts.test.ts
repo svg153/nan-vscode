@@ -121,6 +121,26 @@ test("does not start timers after settle", (t) => {
   assert.equal(aborts.length, 0);
 });
 
+test("arming a new connect deadline clears the previous body idle timer", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const aborts: RequestTimeoutError[] = [];
+  const controller = controllerFor(aborts, { connectTimeoutSeconds: 20, streamIdleTimeoutSeconds: 10 });
+
+  controller.armConnect();
+  controller.startStream();
+  t.mock.timers.tick(5_000);
+  // A fallback HTTP send starts: the leftover body timer must not fire.
+  controller.armConnect();
+  t.mock.timers.tick(10_000);
+  assert.equal(aborts.length, 0);
+  const beforeConnectDeadline = controller.timeoutError;
+  assert.equal(beforeConnectDeadline, undefined);
+
+  t.mock.timers.tick(10_000);
+  assert.equal(controller.timeoutError?.kind, "connect");
+  assert.equal(aborts.length, 1);
+});
+
 test("resolveTimeoutSeconds keeps whole seconds within the supported range", () => {
   assert.equal(resolveTimeoutSeconds(undefined, DEFAULT_CONNECT_TIMEOUT_SECONDS), DEFAULT_CONNECT_TIMEOUT_SECONDS);
   assert.equal(resolveTimeoutSeconds(Number.NaN, DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS), DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS);

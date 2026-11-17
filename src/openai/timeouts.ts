@@ -50,9 +50,17 @@ export class ChatTimeoutController {
     return this.timeoutValue;
   }
 
-  /** Starts the deadline for response headers. */
+  /**
+   * Starts a fresh deadline for the response headers of one HTTP send. Any
+   * timer left over from a previous send (or its error body) is cleared, so a
+   * fallback request always receives the full deadline.
+   */
   armConnect(): void {
+    if (this.settled || this.timeoutValue) {
+      return;
+    }
     this.clearConnect();
+    this.clearIdle();
     this.armTimer("connect", this.timeouts.connectTimeoutSeconds);
   }
 

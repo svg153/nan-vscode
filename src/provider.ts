@@ -200,9 +200,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     let chunkCount = 0;
     try {
-      timeoutController.armConnect();
-      const response = await this.sendChatRequest(apiKey, requestBody, cancellation.signal);
-      timeoutController.startStream();
+      const response = await this.sendChatRequest(apiKey, requestBody, cancellation.signal, timeoutController);
       diagnostic("chat.http.response", { modelId: model.id, status: response.status, elapsedMs: Date.now() - startedAt });
       if (!response.body) {
         throw new Error("NaN Builders returned an empty streaming response.");
@@ -423,11 +421,15 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     apiKey: string,
     body: Record<string, unknown>,
     signal: AbortSignal,
+    timeouts: ChatTimeoutController,
   ): Promise<Response> {
     const baseUrl = this.apiBaseUrl();
-    await this.endpointAuthorizer.authorize(baseUrl, signal);
-    const send = async (requestBody: Record<string, unknown>): Promise<Response> =>
-      fetch(`${baseUrl}/chat/completions`, {
+    // Each send arms its own headers deadline *after* authorization, so endpoint
+    // consent never counts against it, and each send clears whatever timer the
+    // previous request or its error body left running before starting.
+    const send = async (requestBody: Record<string, unknown>): Promise<Response> => {
+      timeouts.armConnect();
+      const response = await fetch(`${baseUrl}/chat/completions`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${apiKey}`,
@@ -438,7 +440,12 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
         body: JSON.stringify(requestBody),
         signal,
       });
+      // Headers are in: the remaining time is body time, not connect time.
+      timeouts.startStream();
+      return response;
+    };
 
+    await this.endpointAuthorizer.authorize(baseUrl, signal);
     let response = await send(body);
     if (!response.ok) {
       const text = await readChatErrorText(response);
