@@ -96,6 +96,40 @@ The marker `AUTONOMOUS-DECISION` is used for decisions made during implementatio
 
 **Decision:** No. The code can use the descriptive name `NaN Builders for VS Code`, but documentation states that it is community-maintained unless NaN Builders explicitly adopts or publishes it. Marketplace publisher ownership and official branding need explicit agreement before public release.
 
+## AUTONOMOUS-DECISION: gateway errors map to a shared taxonomy
+
+**Question:** Should each call site format its own error text, or should HTTP statuses and transport failures go through one mapping?
+
+**Options:**
+
+- Keep per-call messages (the 402 hint shipped in `src/openai/request.ts`).
+- Add a pure `ProviderErrorCode` taxonomy that every chat failure goes through.
+
+**Decision:** One pure mapping in `src/providerErrors.ts`, used by the chat request path.
+
+| Signal | Code | Message points at | Retryable |
+| --- | --- | --- | --- |
+| 401 | `invalid_api_key` | Update the key with **NaN Builders: Manage Provider**. | No |
+| 403 | `invalid_api_key` | Update the key, or ask the key owner for model access. | No |
+| 402, or 429 with `insufficient_quota` / `insufficient_balance` | `insufficient_quota` | One credits pool: spent allowance, frozen credits, or no active pack; **Show Usage**. | No |
+| 404, or `model_not_found` / `no_such_model` | `model_not_found` | **NaN Builders: Refresh Models**, or check `nanBuilders.apiBaseUrl`. | No |
+| `context_length_exceeded` / `prompt_too_long` | `context_length_exceeded` | Trim the chat history or start a new chat. | No |
+| 408, 504, `TimeoutError`, `ProviderTimeoutError` | `timeout` | Retry, or check the network if it persists. | Yes |
+| 429 without a quota code | `rate_limit_exceeded` | Wait, citing `Retry-After` seconds when the response carries them. | Yes |
+| 5xx | `gateway_error` | Retry shortly, or try another model. | Yes |
+| `TypeError` from `fetch`, `ENOTFOUND`, `ECONNREFUSED`, `ECONNRESET` | `network` | Check the network and `nanBuilders.apiBaseUrl`. | Yes |
+| Abort without a timeout | `cancelled` | The request was cancelled. | No |
+| Anything else | `unknown` | The existing sanitized body summary, or a generic failure. | No |
+
+Details:
+
+- The status wins for 401/403 and 402, because a key that cannot authenticate or a billing refusal is never a throttle or a model problem. Everywhere else `error.type` / `error.code` / `error.param` from the JSON body takes precedence over the bare status, so a 429 whose code says `insufficient_quota` points at **Show Usage** instead of a wait.
+- `httpError` attaches the typed `ProviderError` (code + retryability) and accepts the parsed `Retry-After` value. `parseRetryAfter` now lives in the taxonomy module and is re-exported from `src/usageApi.ts`.
+- Timeouts are never reported as cancellations. Issue #113 can throw `ProviderTimeoutError` from the connect or stream-idle timers; `toProviderError` turns it into the timeout message, and the mapper also recognizes `name === "TimeoutError"` and `code === "timeout"` so the hook stays usable before #113 lands.
+- Every message that includes upstream text goes through `sanitizeErrorBody`, which keeps only structural `type`/`code`/`param` fields, redacts `sk-...` and `Bearer ...` tokens, bounds each field and the summary, and drops free-form messages. Request headers, the API key, and the full endpoint URL are never interpolated.
+
+**Non-goals:** automatic retries or backoff, message localization, and changes to the streaming protocol.
+
 ## AUTONOMOUS-DECISION: agentic workflows stay on Copilot with explicit budget caps
 
 **Question:** Should the two agentic workflows keep running on the Copilot engine with the GitHub-hosted runner, or move to a self-managed model provider, and does a public repository make either free?
