@@ -66,7 +66,7 @@ deterministic workflow that never invokes an agent.
 Both workflows therefore declare a budget instead of inheriting the 1000 AIC
 ($10) default per run:
 
-| Workflow | `max-ai-credits` | `max-daily-ai-credits` |
+| Workflow | `max-ai-credits` (main agent) | `max-daily-ai-credits` |
 | --- | --- | --- |
 | `copilot-triage` | 150 | 300 |
 | `feature-scout` | 400 | 400 |
@@ -76,6 +76,31 @@ Both workflows therefore declare a budget instead of inheriting the 1000 AIC
 workflow and skips the agent job once the threshold is crossed. Both are
 top-level frontmatter fields, so recompile with `gh aw compile --strict` after
 changing them.
+
+Two details matter before reading 150/400 AIC as a per-run ceiling:
+
+**The cap covers the main agent, not the whole run.** Threat detection runs in
+its own job with a separate allowance that defaults to 400 AIC. Both lock files
+read it from the same repository-variable override in the detection job:
+
+```yaml
+GH_AW_MAX_AI_CREDITS: ${{ vars.GH_AW_DEFAULT_DETECTION_MAX_AI_CREDITS || '400' }}
+```
+
+So a run that emits safe outputs can consume the agent budget
+(`150` for `copilot-triage`, `400` for `feature-scout`) **plus** up to 400 AIC
+of detection. To tighten the detection side, set the
+`GH_AW_DEFAULT_DETECTION_MAX_AI_CREDITS` repository variable; there is no
+per-workflow frontmatter field for it, so `gh aw compile` will not preserve a
+hand edit to the lock file.
+
+**Manual dispatch bypasses the daily guardrail.** In the pinned gh-aw v1.2.2
+runtime the daily AIC guardrail is skipped for `workflow_dispatch`, and
+`feature-scout` exposes that trigger next to its daily `schedule`. A maintainer
+can therefore keep launching scout runs after the 400 AIC daily threshold is
+crossed; those runs still enforce the per-run `max-ai-credits` limit on the
+agent, but the 24-hour sum stops being a hard stop. `copilot-triage` only
+listens to `issues`, so it has no manual escape hatch.
 
 Inference auth stays on the `COPILOT_GITHUB_TOKEN` PAT. The
 `permissions: copilot-requests: write` alternative authenticates with
