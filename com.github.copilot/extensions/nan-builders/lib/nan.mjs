@@ -262,7 +262,9 @@ export async function fetchUsage(cfg, window) {
 /**
  * Plan credits for the current billing period (`credits` on GET /v1/usage).
  * Gateways that predate the credits model omit the block: undefined then, so the
- * caller degrades to token counts instead of inventing a percentage.
+ * caller degrades to token counts instead of inventing a percentage. A block
+ * whose every field is missing or invalid is equally unusable and also returns
+ * undefined, so an empty object never masks the fallback with a blank headline.
  */
 function normalizeCredits(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -280,7 +282,8 @@ function normalizeCredits(value) {
     periodEnd: str(value.period_end),
     frozen: typeof value.frozen === "boolean" ? value.frozen : undefined,
   };
-  return Object.fromEntries(Object.entries(credits).filter(([, entry]) => entry !== undefined));
+  const normalized = Object.fromEntries(Object.entries(credits).filter(([, entry]) => entry !== undefined));
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
 function normalizeTotals(totals) {

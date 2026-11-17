@@ -176,7 +176,7 @@ export function renderHtml() {
         : (credits && credits.periodEnd ? "renews " + credits.periodEnd : "");
       var blocks = [];
       if (!credits) {
-        blocks.push('<div class="headline"><span class="pct">' + fmt(state.usage.totals.totalTokens) + '</span><span class="muted">tokens this window \u00b7 this gateway does not report plan credits</span></div>');
+        blocks.push('<div class="headline"><span class="pct">' + fmt(state.usage.totals.totalTokens) + '</span><span class="muted">tokens this window \u00b7 this gateway reports no usable plan-credit data</span></div>');
       } else {
         if (credits.frozen) {
           blocks.push('<div class="banner frozen">Plan credits are frozen: credit-billed requests are refused until the subscription is active again. No usage percentage is shown.</div>');
@@ -193,6 +193,9 @@ export function renderHtml() {
         }
         if (credits.packCredits) {
           blocks.push('<div class="muted">Credit pack: ' + fmtCredits(credits.packCredits) + ' credits' + (credits.packExpiresAt ? ' \u00b7 expires ' + esc(credits.packExpiresAt) : '') + '</div>');
+        }
+        if (!blocks.length) {
+          blocks.push('<div class="headline"><span class="pct">' + fmt(state.usage.totals.totalTokens) + '</span><span class="muted">tokens this window \u00b7 the gateway reported no usable plan-credit data</span></div>');
         }
       }
       headline.innerHTML = blocks.join('');

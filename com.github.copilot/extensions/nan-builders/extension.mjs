@@ -375,7 +375,7 @@ const tools = [
       const credits = usage.credits;
       const lines = ["NaN Builders usage " + usage.startDate + " .. " + usage.endDate];
       if (!credits) {
-        lines.push("This gateway does not report plan credits (no credits block on GET /v1/usage); the token counts below are not a quota.");
+        lines.push("This gateway does not report usable plan credits (the credits block on GET /v1/usage is missing or invalid); the token counts below are not a quota.");
       } else {
         if (credits.frozen) {
           lines.push("WARNING: plan credits are frozen - credit-billed requests are refused until the subscription is active again. No usage percentage is implied.");
@@ -400,7 +400,11 @@ const tools = [
         }
       }
       if (usage.windowCredits !== null) {
-        lines.push("Window credits: " + formatCredits(usage.windowCredits) + " (calendar-month sum of the per-model rows; the billing-period used total can differ by tenths).");
+        lines.push(
+          "Window credits: " + formatCredits(usage.windowCredits) +
+          (usage.windowCreditsPartial ? " (partial: some model rows report no credit data)" : "") +
+          " (calendar-month sum of the per-model rows; the billing-period used total can differ by tenths).",
+        );
       }
       if (!usage.items.length) {
         lines.push("No usage recorded in this window.");

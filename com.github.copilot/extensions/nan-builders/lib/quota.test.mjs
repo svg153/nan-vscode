@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  CREDITS_UNAVAILABLE_NOTE,
   compactTokens,
   composeUsage,
   creditProgress,
@@ -88,8 +89,19 @@ test("unmetered models carry the published note, never a percentage", () => {
   assert.equal(quotaCapLabel("glm5.3"), "Paid from plan credits");
   assert.equal(quotaCapLabel("brand-new-model"), "Billed in credits; no documented allowance");
   assert.equal(creditsNote("gemma4", 0), "Does not draw credits");
+  assert.equal(creditsNote("gemma4", undefined), "Does not draw credits");
   assert.equal(creditsNote("glm5.3", 0), "No credits billed in this window");
   assert.equal(creditsNote("glm5.3", 2.5), undefined);
+  assert.equal(creditsNote("glm5.3", undefined), CREDITS_UNAVAILABLE_NOTE);
+  assert.equal(creditsNote("glm5.3", null), CREDITS_UNAVAILABLE_NOTE);
+  assert.equal(creditsNote("glm5.3", Number.NaN), CREDITS_UNAVAILABLE_NOTE);
+});
+
+test("creditsView ignores a block with no usable field", () => {
+  assert.equal(creditsView({}), null);
+  assert.equal(creditsView({ frozen: false }), null);
+  assert.equal(creditsView({ allowance: "invalid", used: null }), null);
+  assert.equal(creditsView({ frozen: true }).frozen, true);
 });
 
 test("creditsView exposes the period headline from the API credits block", () => {
@@ -178,6 +190,41 @@ test("composeUsage tolerates a gateway without the credits block", () => {
   assert.equal(usage.windowCredits, null);
   assert.equal(usage.items[0].percent, null);
   assert.equal(usage.items[0].note, "No credits billed in this window");
+});
+
+test("composeUsage marks a metered row without credit data as unavailable, not zero", () => {
+  const usage = composeUsage(
+    report({ byModel: [{ model: "glm5.3", totalTokens: 5000, apiRequests: 2 }] }),
+  );
+  assert.equal(usage.credits, null);
+  assert.equal(usage.items[0].credits, null);
+  assert.equal(usage.items[0].percent, null);
+  assert.equal(usage.items[0].note, CREDITS_UNAVAILABLE_NOTE);
+  assert.equal(usage.windowCredits, null);
+  assert.equal(usage.windowCreditsPartial, true);
+});
+
+test("composeUsage keeps an explicit zero distinct from unavailable credit data", () => {
+  const usage = composeUsage(
+    report({ byModel: [{ model: "glm5.3", totalTokens: 5000, apiRequests: 2, credits: 0 }] }),
+  );
+  assert.equal(usage.items[0].credits, 0);
+  assert.equal(usage.items[0].note, "No credits billed in this window");
+  assert.equal(usage.windowCreditsPartial, false);
+});
+
+test("composeUsage flags a partially reported window but keeps the known sum", () => {
+  const usage = composeUsage(
+    report({
+      byModel: [
+        { model: "glm5.3", totalTokens: 5000, credits: 4.5 },
+        { model: "deepseek-v4-flash", totalTokens: 3000 },
+        { model: "gemma4", totalTokens: 1000 },
+      ],
+    }),
+  );
+  assert.equal(usage.windowCredits, 4.5);
+  assert.equal(usage.windowCreditsPartial, true);
 });
 
 test("compactTokens picks the largest readable unit", () => {

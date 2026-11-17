@@ -123,20 +123,32 @@ export function creditProgress(entries, allowance) {
   return progress.sort((a, b) => b.percent - a.percent);
 }
 
-/** Note for a per-model row that shows no percentage; undefined when a % applies. */
+/** Shown when a metered model's row has token usage but no usable credit amount. */
+export const CREDITS_UNAVAILABLE_NOTE = "Credit data unavailable for this model";
+
+/**
+ * Note for a per-model row that shows no percentage; undefined when a % applies.
+ * Missing/invalid per-model credits mean the gateway did not report billing data,
+ * which is not the same as an explicit zero: only a finite amount <= 0 means
+ * nothing was billed in the window.
+ */
 export function creditsNote(modelId, credits) {
   const unmetered = unmeteredNote(modelId);
   if (unmetered) {
     return unmetered;
   }
-  return !Number.isFinite(credits) || credits <= 0 ? "No credits billed in this window" : undefined;
+  if (!Number.isFinite(credits)) {
+    return CREDITS_UNAVAILABLE_NOTE;
+  }
+  return credits <= 0 ? "No credits billed in this window" : undefined;
 }
 
 /**
  * Plan credits for the billing period (`credits` on GET /v1/usage), or null when
- * the gateway predates the credits model. Percentages are suppressed while the
- * pool is frozen: credit-billed requests are being refused, so the share of
- * allowance is no longer the actionable number.
+ * the gateway predates the credits model or reported a block with no usable
+ * field. Percentages are suppressed while the pool is frozen: credit-billed
+ * requests are being refused, so the share of allowance is no longer the
+ * actionable number.
  */
 export function creditsView(credits) {
   if (!credits) {
@@ -145,7 +157,7 @@ export function creditsView(credits) {
   const allowance = Number.isFinite(credits.allowance) ? credits.allowance : undefined;
   const used = Number.isFinite(credits.used) ? credits.used : undefined;
   const frozen = credits.frozen === true;
-  return {
+  const view = {
     allowance: allowance ?? null,
     used: used ?? null,
     remaining: Number.isFinite(credits.remaining) ? credits.remaining : null,
@@ -156,6 +168,15 @@ export function creditsView(credits) {
     frozen,
     percent: frozen || used === undefined || allowance === undefined || allowance <= 0 ? null : percentOf(used, allowance),
   };
+  const hasData =
+    view.allowance !== null ||
+    view.used !== null ||
+    view.remaining !== null ||
+    view.packCredits !== null ||
+    view.packExpiresAt !== null ||
+    view.periodStart !== null ||
+    view.periodEnd !== null;
+  return hasData || frozen ? view : null;
 }
 
 /**
@@ -187,12 +208,18 @@ export function composeUsage(report) {
         cap: quotaCapLabel(entry.model),
       };
     });
+  // A metered row without a usable credit amount makes the window sum a lower
+  // bound, not a total, so callers can say so instead of implying completeness.
+  const windowCreditsPartial = report.totals.byModel.some(
+    (entry) => unmeteredNote(entry.model) === undefined && !Number.isFinite(entry.credits),
+  );
   return {
     startDate: report.startDate,
     endDate: report.endDate,
     truncated: report.truncated,
     credits,
     windowCredits: windowCredits(report.totals.byModel) ?? null,
+    windowCreditsPartial,
     totals: report.totals,
     items,
   };

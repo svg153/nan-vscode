@@ -178,6 +178,42 @@ test("fetchUsage keeps per-model credits optional and drops a malformed block", 
   }
 });
 
+test("fetchUsage drops a credits block with no recognisable field", async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async () =>
+      jsonResponse(200, {
+        object: "usage.report",
+        data: [],
+        totals: { total_tokens: 5, by_model: [] },
+        credits: { allowance: "invalid", used: null },
+        has_more: false,
+      });
+    const report = await fetchUsage({ baseUrl: DEFAULT_BASE_URL, apiKey: "sk-test" }, { startDate: "2026-11-01", endDate: "2026-11-16" });
+    assert.equal(report.credits, undefined);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("fetchUsage keeps the valid fields of a partially malformed credits block", async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async () =>
+      jsonResponse(200, {
+        object: "usage.report",
+        data: [],
+        totals: { total_tokens: 5, by_model: [] },
+        credits: { allowance: "invalid", used: null, remaining: 10, frozen: false },
+        has_more: false,
+      });
+    const report = await fetchUsage({ baseUrl: DEFAULT_BASE_URL, apiKey: "sk-test" }, { startDate: "2026-11-01", endDate: "2026-11-16" });
+    assert.deepEqual(report.credits, { remaining: 10, frozen: false });
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test("fetchUsage maps HTTP 429 to a rate_limited NanError with API message", async () => {
   const original = globalThis.fetch;
   try {
