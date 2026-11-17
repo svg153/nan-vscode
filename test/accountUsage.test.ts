@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AccountUsageService, accountHeadline, accountModelRows, windowCredits } from "../src/accountUsage";
+import {
+  AccountUsageService,
+  CREDITS_UNAVAILABLE_NOTE,
+  accountHeadline,
+  accountModelRows,
+  creditsNote,
+  windowCredits,
+  windowCreditsPartial,
+} from "../src/accountUsage";
 import { UsageApiError, parseUsageReport, type UsageReport } from "../src/usageApi";
 
 const TODAY = "2026-09-18";
@@ -254,6 +262,28 @@ test("accountModelRows does not invent a percentage without plan credits", () =>
   assert.equal(rows[0].credits, 3);
 });
 
+test("creditsNote keeps unmetered, explicit zero and missing credit data distinct", () => {
+  assert.equal(creditsNote("gemma4", undefined), "Does not draw credits");
+  assert.equal(creditsNote("gemma4", 0), "Does not draw credits");
+  assert.equal(creditsNote("glm5.3", 0), "No credits billed in this window");
+  assert.equal(creditsNote("glm5.3", 2.5), undefined);
+  assert.equal(creditsNote("glm5.3", undefined), CREDITS_UNAVAILABLE_NOTE);
+  assert.equal(creditsNote("glm5.3", Number.NaN), CREDITS_UNAVAILABLE_NOTE);
+});
+
+test("accountModelRows marks a metered row without credit data as unavailable, not zero", () => {
+  const [row] = accountModelRows(reportWith([{ model: "glm5.3", totalTokens: 5_000 }]));
+  assert.equal(row.credits, undefined);
+  assert.equal(row.percent, undefined);
+  assert.equal(row.note, CREDITS_UNAVAILABLE_NOTE);
+});
+
+test("accountModelRows keeps an explicit zero distinct from unavailable credit data", () => {
+  const [row] = accountModelRows(reportWith([{ model: "glm5.3", totalTokens: 5_000, credits: 0 }]));
+  assert.equal(row.credits, 0);
+  assert.equal(row.note, "No credits billed in this window");
+});
+
 test("accountModelRows passes reported cached input tokens through and leaves them unset when absent", () => {
   const rows = accountModelRows(
     reportWith([
@@ -282,6 +312,20 @@ test("windowCredits sums per-model credits without float drift", () => {
 test("windowCredits stays undefined when no model billed credits", () => {
   assert.equal(windowCredits(reportWith([{ model: "gemma4", totalTokens: 10 }])), undefined);
   assert.equal(windowCredits(reportWith([{ model: "gemma4", totalTokens: 10, credits: 0 }])), undefined);
+});
+
+test("windowCreditsPartial flags metered rows without credit data, never unmetered rows", () => {
+  assert.equal(windowCreditsPartial(reportWith([{ model: "glm5.3", totalTokens: 10, credits: 4.5 }])), false);
+  assert.equal(windowCreditsPartial(reportWith([{ model: "glm5.3", totalTokens: 10 }])), true);
+  assert.equal(windowCreditsPartial(reportWith([{ model: "gemma4", totalTokens: 10 }])), false);
+
+  const mixed = reportWith([
+    { model: "glm5.3", totalTokens: 5_000, credits: 4.5 },
+    { model: "deepseek-v4-flash", totalTokens: 3_000 },
+    { model: "gemma4", totalTokens: 1_000 },
+  ]);
+  assert.equal(windowCredits(mixed), 4.5);
+  assert.equal(windowCreditsPartial(mixed), true);
 });
 
 test("accountHeadline reports plan-credit usage and never fabricates one", () => {

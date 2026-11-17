@@ -1,4 +1,4 @@
-import { accountModelRows, windowCredits, type AccountUsageError, type AccountUsageSnapshot } from "./accountUsage";
+import { accountModelRows, windowCredits, windowCreditsPartial, type AccountUsageError, type AccountUsageSnapshot } from "./accountUsage";
 import { NAN_API_KEYS_URL, NAN_BILLING_URL, NAN_MODELS_DOCS_URL, NAN_TOKEN_PRICING_URL } from "./constants";
 import type { QuotaSummaryItem } from "./quotaCatalog";
 import { sanitizeUpstreamText } from "./text";
@@ -190,8 +190,11 @@ export function buildTooltipMarkdown(input: TooltipInput): string {
     lines.push(...creditsLines(report.credits));
     const windowCredit = windowCredits(report);
     if (windowCredit !== undefined) {
+      const partial = windowCreditsPartial(report)
+        ? " (partial: some model rows report no credit data)"
+        : "";
       lines.push(
-        `- Window credits: **${formatCredits(windowCredit)}** — approximate calendar-month sum of the per-model ` +
+        `- Window credits: **${formatCredits(windowCredit)}**${partial} — approximate calendar-month sum of the per-model ` +
           `rows; the billing-period used total can differ by tenths.\n`,
       );
     }
