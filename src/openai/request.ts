@@ -1,5 +1,15 @@
 import { buildToolNameMappings, sanitizeSchema, sanitizeToolName } from "./tooling";
 import type { OpenAIContentPart, OpenAIMessage, OpenAIToolDefinition } from "./types";
+import {
+  flattenToolResult,
+  isImagePart,
+  isTextPart,
+  isToolCallPart,
+  isToolResultPart,
+  safeStringify,
+} from "./tokens";
+
+export { estimateTokens, isImagePart } from "./tokens";
 
 export interface ToolMapping {
   readonly definitions: OpenAIToolDefinition[];
@@ -21,10 +31,6 @@ export interface PlainTool {
   readonly name: string;
   readonly description?: string;
   readonly inputSchema?: unknown;
-}
-
-export function estimateTokens(text: string): number {
-  return Math.max(1, Math.ceil(text.length / 4));
 }
 
 export function convertMessages(
@@ -124,62 +130,4 @@ function contentValue(parts: OpenAIContentPart[]): string | OpenAIContentPart[] 
     return parts.map((part) => (part.type === "text" ? part.text : "")).join("");
   }
   return parts;
-}
-
-function safeStringify(value: unknown): string {
-  try {
-    return JSON.stringify(value ?? {});
-  } catch {
-    return "{}";
-  }
-}
-
-function isTextPart(value: unknown): value is { value: string } {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const candidate = value as { value?: unknown; callId?: unknown };
-  return typeof candidate.value === "string" && typeof candidate.callId !== "string";
-}
-
-function isToolCallPart(value: unknown): value is { callId: string; name: string; input: unknown } {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const candidate = value as { callId?: unknown; name?: unknown };
-  return typeof candidate.callId === "string" && typeof candidate.name === "string";
-}
-
-function isToolResultPart(value: unknown): value is { callId: string; content: readonly unknown[] } {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const candidate = value as { callId?: unknown; content?: unknown };
-  return typeof candidate.callId === "string" && Array.isArray(candidate.content);
-}
-
-export function isImagePart(value: unknown): value is { data: Uint8Array; mimeType: string } {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const candidate = value as { data?: unknown; mimeType?: unknown };
-  return (
-    candidate.data instanceof Uint8Array &&
-    typeof candidate.mimeType === "string" &&
-    candidate.mimeType.startsWith("image/")
-  );
-}
-
-function flattenToolResult(content: readonly unknown[]): string {
-  const pieces: string[] = [];
-  for (const part of content) {
-    if (typeof part === "string") {
-      pieces.push(part);
-    } else if (isTextPart(part)) {
-      pieces.push(part.value);
-    } else {
-      pieces.push(safeStringify(part));
-    }
-  }
-  return pieces.join("");
 }

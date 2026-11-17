@@ -129,3 +129,25 @@ Details:
 - Every message that includes upstream text goes through `sanitizeErrorBody`, which keeps only structural `type`/`code`/`param` fields, redacts `sk-...` and `Bearer ...` tokens, bounds each field and the summary, and drops free-form messages. Request headers, the API key, and the full endpoint URL are never interpolated.
 
 **Non-goals:** automatic retries or backoff, message localization, and changes to the streaming protocol.
+
+## AUTONOMOUS-DECISION: agentic workflows stay on Copilot with explicit budget caps
+
+**Question:** Should the two agentic workflows keep running on the Copilot engine with the GitHub-hosted runner, or move to a self-managed model provider, and does a public repository make either free?
+
+**Options:**
+
+- Keep Copilot and add explicit cost caps.
+- Move `feature-scout` to the NaN Builders gateway with `engine: codex` and a NaN API key stored as a repository secret.
+- Keep Copilot where the repository is public and free to run, and route the private copies through the NaN gateway so the spend lands on the NaN account instead of Copilot AI Credits.
+
+**Research:** GitHub's billing documentation separates the two costs. Standard GitHub-hosted runners are free for public repositories and draw from included compute usage (~$0.006/min on Linux) for private ones. Inference is not free for public repositories: Copilot usage is billed in AI Credits (1 AIC = $0.01) against the plan or organization allowance regardless of visibility, and Anthropic/OpenAI/Google usage is billed to that provider's account. Authentication options are `COPILOT_GITHUB_TOKEN` (fine-grained PAT, billed to the PAT owner), `permissions: copilot-requests: write` (uses `${{ github.token }}`, bills to an organization Copilot tenant, needs no secret), and keyless federation (Anthropic WIF, Google WIF, Azure Entra OIDC for Codex). `engine:` accepts `claude`, `codex`, `gemini`, `pi` and `agy`, plus declarative third-party engines through `secret-strategy: universal-llm-consumer`.
+
+**Decision:** Keep Copilot on both workflows and cap the spend in frontmatter.
+
+- `copilot-triage`: `max-ai-credits: 150`, `max-daily-ai-credits: 300`.
+- `feature-scout`: `max-ai-credits: 400`, `max-daily-ai-credits: 400`.
+- Auth stays on the `COPILOT_GITHUB_TOKEN` PAT because `copilot-requests: write` only applies to organization-owned repositories, and `svg153/nan-vscode` is user-owned.
+- The provider swap targets the NaN Builders gateway (`https://api.nan.builders/v1`), the same OpenAI-compatible endpoint the extension uses, so the private deployment can bill NaN credits rather than Copilot AI Credits. It is staged as a commented `engine:` draft (`codex`, `deepseek-v4-flash`, `OPENAI_BASE_URL`, `api.nan.builders`) in `feature-scout.md` and documented in `docs/agentic-pipeline.md#swapping-the-model-provider-draft`.
+- It is deliberately not enabled, for two reasons. `copilot-triage` hands work to the Copilot coding agent through `safe-outputs: assign-to-agent`, which makes Copilot load-bearing there, so only `feature-scout` is a candidate. And the Codex engine speaks the Responses API (`/v1/responses`), which the extension does not exercise today, so the gateway's Responses support has to be verified before the draft can be turned on.
+
+**Follow-up:** Revisit if the repository moves under an organization (which unlocks `copilot-requests: write` and central billing), or if `feature-scout` becomes the dominant AI Credit consumer. The next concrete step for a private deployment is the `/v1/responses` check in `docs/agentic-pipeline.md#swapping-the-model-provider-draft`, then a priced `feature-scout` run from `gh aw logs --json` before switching.

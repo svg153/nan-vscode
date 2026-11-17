@@ -10,6 +10,29 @@ permissions:
 
 network: defaults
 
+# Cost guardrails: the scout reads PRs, issues and diffs, so it needs more
+# budget than triage, but nowhere near the 1000 AIC default.
+max-ai-credits: 400
+max-daily-ai-credits: 400
+
+# Draft (not enabled): run this workflow on the NaN Builders gateway instead of
+# Copilot. To enable it:
+#   1. store the NaN API key as the repository secret OPENAI_API_KEY (the name
+#      the gh-aw OpenAI route reads),
+#   2. replace `network: defaults` above with
+#      network:
+#        allowed: [defaults, api.nan.builders]
+#   3. uncomment the engine block below.
+# gh-aw's OpenAI route speaks the Responses API, so confirm the gateway serves
+# /v1/responses before enabling. See
+# docs/agentic-pipeline.md#swapping-the-model-provider-draft.
+# engine:
+#   id: codex
+#   model: deepseek-v4-flash
+#   api-target: api.nan.builders
+#   env:
+#     OPENAI_BASE_URL: https://api.nan.builders/v1
+
 safe-outputs:
   create-issue:
     max: 3

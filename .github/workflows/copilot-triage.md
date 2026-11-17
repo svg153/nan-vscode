@@ -9,6 +9,18 @@ permissions:
 
 network: defaults
 
+# Cost guardrails: a triage run is a label check plus one assignment. The
+# default budget (1000 AIC = $10) is far above what this needs, so cap it.
+max-ai-credits: 150
+max-daily-ai-credits: 300
+
+# Not a provider-swap candidate: this workflow hands work to the Copilot coding
+# agent through `safe-outputs: assign-to-agent`, so Copilot is load-bearing here
+# and the engine has to stay on it. If that hand-off is ever removed, the swap
+# target is the NaN Builders gateway (see feature-scout.md for the same draft):
+# engine id: codex with OPENAI_BASE_URL, model deepseek-v4-flash, secret
+# OPENAI_API_KEY, and api.nan.builders allowed in network.
+
 safe-outputs:
   assign-to-agent:
     name: copilot

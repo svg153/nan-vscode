@@ -44,6 +44,146 @@ graph LR
   (`scripts/run-insiders-integration.cjs`), and `npm run package` proves the
   VSIX builds.
 
+## Billing and model provider
+
+An agentic run has two independent costs: GitHub Actions minutes and AI
+inference. This repository is **public** and owned by a **user account**, which
+decides how each one is billed.
+
+| Cost | Public repository | Private repository |
+| --- | --- | --- |
+| Standard GitHub-hosted runner (`ubuntu-latest`) | Free and unlimited | Draws from included compute usage (~$0.006/min Linux) |
+| Copilot inference | Billed in **AI Credits** (1 AIC = $0.01) against the PAT owner's Copilot allowance | Same |
+| NaN Builders gateway inference (draft) | Billed in NaN credits to the NaN account | Same |
+
+Being public makes the **runner minutes** free. It does **not** make inference
+free: both workflows call Copilot, and Copilot usage is measured in AI Credits
+on every repository, public or private. The only genuinely free path is a
+deterministic workflow that never invokes an agent.
+
+### Cost guardrails
+
+Both workflows therefore declare a budget instead of inheriting the 1000 AIC
+($10) default per run:
+
+| Workflow | `max-ai-credits` (main agent) | `max-daily-ai-credits` |
+| --- | --- | --- |
+| `copilot-triage` | 150 | 300 |
+| `feature-scout` | 400 | 400 |
+
+`max-ai-credits` is the AWF budget for a single run; AWF warns the agent at
+80/90/95/99%. `max-daily-ai-credits` sums the previous 24 hours of the same
+workflow and skips the agent job once the threshold is crossed. Both are
+top-level frontmatter fields, so recompile with `gh aw compile --strict` after
+changing them.
+
+Two details matter before reading 150/400 AIC as a per-run ceiling:
+
+**The cap covers the main agent, not the whole run.** Threat detection runs in
+its own job with a separate allowance that defaults to 400 AIC. Both lock files
+read it from the same repository-variable override in the detection job:
+
+```yaml
+GH_AW_MAX_AI_CREDITS: ${{ vars.GH_AW_DEFAULT_DETECTION_MAX_AI_CREDITS || '400' }}
+```
+
+So a run that emits safe outputs can consume the agent budget
+(`150` for `copilot-triage`, `400` for `feature-scout`) **plus** up to 400 AIC
+of detection. To tighten the detection side, set the
+`GH_AW_DEFAULT_DETECTION_MAX_AI_CREDITS` repository variable; there is no
+per-workflow frontmatter field for it, so `gh aw compile` will not preserve a
+hand edit to the lock file.
+
+**Manual dispatch bypasses the daily guardrail.** In the pinned gh-aw v1.2.2
+runtime the daily AIC guardrail is skipped for `workflow_dispatch`, and
+`feature-scout` exposes that trigger next to its daily `schedule`. A maintainer
+can therefore keep launching scout runs after the 400 AIC daily threshold is
+crossed; those runs still enforce the per-run `max-ai-credits` limit on the
+agent, but the 24-hour sum stops being a hard stop. `copilot-triage` only
+listens to `issues`, so it has no manual escape hatch.
+
+Inference auth stays on the `COPILOT_GITHUB_TOKEN` PAT. The
+`permissions: copilot-requests: write` alternative authenticates with
+`${{ github.token }}` and needs no secret, but it bills inference to an
+**organization** Copilot tenant, so it does not apply to this user-owned
+repository.
+
+### Monitoring spend
+
+```powershell
+gh aw logs feature-scout --last 5          # AIC, duration, turns per run
+gh aw audit <run-id>                       # tokens, tool calls, AIC detail
+gh aw logs --start-date -30d --json | jq '.runs[] | {workflow: .workflow_name, aic: .aic}'
+```
+
+The AIC figure is computed from AWF pricing data and can differ from the
+provider invoice; confirm real charges in the billing dashboard.
+
+### Swapping the model provider (draft)
+
+The alternative provider is our own gateway, the same OpenAI-compatible API the
+extension talks to, not a third-party vendor account.
+
+| Field | Value |
+| --- | --- |
+| Endpoint | `https://api.nan.builders/v1` |
+| Engine | `codex` (gh-aw's OpenAI route) |
+| Model | any NaN model id: `deepseek-v4-flash`, `glm5.3`, `qwen3.8-flash`, `kimi-k3.1-pro`, ... |
+| Repository secret | `OPENAI_API_KEY` (or `CODEX_API_KEY`) holding a NaN API key |
+| Network | `api.nan.builders` must be allowed |
+| Billing | NaN credits against the NaN account, not Copilot AI Credits |
+
+`feature-scout.md` carries this draft as a comment block:
+
+```yaml
+network:
+  allowed: [defaults, api.nan.builders]
+
+engine:
+  id: codex
+  model: deepseek-v4-flash
+  api-target: api.nan.builders
+  env:
+    OPENAI_BASE_URL: https://api.nan.builders/v1
+```
+
+That frontmatter was compiled in a throwaway workflow to confirm it is real
+rather than aspirational. The generated job pins
+`"model_provider":"openai-proxy"` with `"wire_api":"responses"`, routes the
+`openai` proxy target to `api.nan.builders`, validates `CODEX_API_KEY` or
+`OPENAI_API_KEY` before the agent starts, and passes `deepseek-v4-flash`
+through unchanged because `OPENAI_BASE_URL` disables model fallback.
+
+**The one real blocker: the Responses API.** The Codex engine speaks
+`/v1/responses`, not Chat Completions, and the extension only uses
+`/v1/chat/completions`. Working through the extension does not prove the
+gateway serves the Responses API, so verify it before enabling:
+
+```bash
+curl -sS -X POST https://api.nan.builders/v1/responses \
+  -H "Authorization: Bearer $NAN_API_KEY" -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-v4-flash","input":"ping"}'
+```
+
+A 404 or 405 means the gateway needs a Responses-compatible bridge; until then
+the swap stays blocked and the workflows stay on Copilot.
+
+Rules for enabling the draft:
+
+1. Store the NaN API key as the repository secret first; activation fails
+   without it.
+2. Replace `network: defaults`, do not add a second `network:` key, then run
+   `gh aw compile <workflow> --strict`. The lock file is what actually runs.
+3. `feature-scout` only. `copilot-triage` hands work to the Copilot coding
+   agent through `safe-outputs: assign-to-agent`, so Copilot is load-bearing
+   there.
+4. Do not use a provider-keyed engine on a `pull_request`/fork trigger:
+   workflows from fork PRs receive no secrets.
+5. `max-ai-credits` keeps working (AWF meters whatever model is routed), but
+   the NaN account is the authoritative invoice. `GET /v1/usage` with the same
+   key shows the real spend.
+6. Treat the NaN key as a billing credential: repository secret only, never in
+   a workflow body or log, rotated from the NaN Cloud API keys page.
 ## Dependency updates & supply chain
 
 Renovate (Mend app, `app/renovate`) is the single version-update bot for npm
