@@ -11,6 +11,8 @@
  * the request builder sends them as one flattened string, so they are counted
  * from `flattenToolResult` to match the payload upstream.
  */
+import type { OpenAIMessage } from "./types";
+
 export const CHARS_PER_TOKEN = 4;
 
 /** Flat cost of any message part that carries image data. */
@@ -48,6 +50,38 @@ export function estimateHistoryTokens(messages: readonly CountableMessage[]): nu
   let tokens = 0;
   for (const message of messages) {
     tokens += countContentTokens(message.content);
+  }
+  return tokens;
+}
+
+/**
+ * Token count for one already-converted OpenAI message. The history trimmer
+ * budgets with this function, so the estimate it trims against is the same one
+ * `provideTokenCount` reports: text at four characters per token, a flat
+ * per-image cost, and tool calls charged for the name plus serialized
+ * arguments exactly as the request builder sends them.
+ */
+export function countOpenAIMessageTokens(message: OpenAIMessage): number {
+  let tokens = 0;
+  const content = message.content;
+  if (typeof content === "string") {
+    tokens += estimateTokens(content);
+  } else if (Array.isArray(content)) {
+    for (const part of content) {
+      tokens += part.type === "image_url" ? IMAGE_TOKENS : estimateTokens(part.text);
+    }
+  }
+  for (const call of message.tool_calls ?? []) {
+    tokens += estimateTokens(`${call.function.name}${call.function.arguments}`);
+  }
+  return Math.max(1, tokens);
+}
+
+/** Token count for a converted conversation, message by message. */
+export function countOpenAIMessagesTokens(messages: readonly OpenAIMessage[]): number {
+  let tokens = 0;
+  for (const message of messages) {
+    tokens += countOpenAIMessageTokens(message);
   }
   return tokens;
 }

@@ -185,3 +185,19 @@ Details:
 **Decision:** Pending maintainer approval (recorded 2026-11-16). Recommendation: option C. It keeps today's stored selections working, treats the collision as a coexistence/documentation problem instead of a data-loss risk, and leaves a rename possible later only through a documented migration. The vendor id is an internal identifier rather than the product name, so a future brand handover or rebrand does not require changing it.
 
 **Follow-up:** If C is approved, open a child issue for (a) a documented rename/migration procedure if coexistence proves unacceptable in practice, (b) the runtime duplicate-provider warning from #118 option (c), and (c) a public note about the shared vendor id once concurrent README edits are safe. Any handover agreement must state whether the vendor id transfers with the extension identity.
+
+## AUTONOMOUS-DECISION: trim history in atomic units, middle-out
+
+**Question:** When a conversation exceeds the model's input budget, what should be dropped before the request is sent, and in what order?
+
+**Options:**
+
+- Drop individual messages or characters until the estimate fits. This is the simplest rule, but an assistant `tool_calls` entry can lose the `tool` results that reference it, and the gateway then rejects the payload with a validation error that is harder to act on than the context-length 400 it was meant to prevent.
+- Drop atomic units from the oldest end. That keeps payloads valid but removes the conversation opening, which is where the user's framing and the first instructions live.
+- Drop atomic units from the middle outward, preserving system framing, the first unit, and the trailing unit (chosen).
+
+**Research:** OpenAI-compatible gateways require every `tool` message to reference a `tool_calls` id declared earlier in the same request, so a trim unit must be an assistant message together with its `tool_calls` and every result that references them. `SrScorpio/nan-bridge` trims with the same atomic rule and preserves the first unit and the current turn. The older turns in the middle of a long agent conversation are the least load-bearing: the opening still anchors the task and the trailing unit is the request being answered.
+
+**Decision:** `src/openai/historyTrim.ts` groups the converted payload into atomic units and discards whole units from the middle outward until the input estimate fits `maxInputTokens`, which `toModelInfo` already derives as `max(1, min(context - maxOutput, 0.9 * context))`. System messages, the first unit (including the first user turn after leading system framing), and the trailing unit are never trim candidates; when those alone exceed the budget the request is still sent, because dropping the current request would be worse than a context error. Trimming is silent when the history already fits: the same array is sent unchanged, which is covered by a no-op regression test. The estimate comes from `countOpenAIMessageTokens` in `src/openai/tokens.ts`, the same module `provideTokenCount` uses, so the trim decision and the host-reported counts cannot drift apart. Each trim writes one `chat.history.trimmed` diagnostic line with unit counts and estimated tokens before/after, never message content, and the user sees at most one warning per conversation, keyed by a hash of the first unit rather than by stored text.
+
+**Follow-up:** Revisit if the gateway rejects a middle trim with a validation error (which would mean the unit boundary needs to include more context than the `tool_calls` pair), or when image counting changes, since a cheaper estimate would delay the trim. Summarizing discarded history stays a non-goal until the trim itself is proven in long agent turns.

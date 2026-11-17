@@ -168,6 +168,8 @@ Local usage remains available regardless of the API: **NaN Builders: Show Usage*
 
 VS Code does not expose a documented usage-reporting callback for third-party chat providers, so local counts only cover turns where the API returned OpenAI-compatible streaming usage metadata; see [issue #7](https://github.com/svg153/nan-vscode/issues/7).
 
+Long conversations are trimmed before they are sent. The extension estimates the input with the same counter that backs `provideTokenCount`, and when that estimate exceeds the model's input budget (`min(context window - max output, 90% of the context window)`) it drops whole units from the middle of the conversation outward. A unit is an assistant message together with its `tool_calls` and every tool result that answers them, so a request never carries an orphaned tool result. The first unit, any system framing, and the unit being answered are never trimmed, and a conversation that already fits is sent byte for byte unchanged. Each trim shows one warning per conversation and, with `nanBuilders.diagnostics.enabled`, writes one counts-only `chat.history.trimmed` line with the units discarded and the estimated tokens before and after; message content is never logged. Summarizing the dropped turns is not implemented.
+
 Inline ghost-text completions are opt-in and off by default. Set `nanBuilders.completionModel` to a model ID returned by `/v1/models` and the extension registers an `InlineCompletionItemProvider` for file-scheme documents. Each suggestion is one `POST {apiBaseUrl}/completions` request carrying only the last 4,000 characters before the cursor, capped at 64 completion tokens and 1,000 suggestion characters. The provider waits for a fixed 150 ms quiet period after the latest trigger, cancels pending or in-flight work when another trigger arrives, and never returns stale text; HTTP errors, network failures, and empty or malformed responses are dropped. Quality depends on the chosen model, and while enabled each pause while typing can send an extra billed request that local usage history does not count yet (see [issue #7](https://github.com/svg153/nan-vscode/issues/7)).
 
 ## Architecture
@@ -195,6 +197,7 @@ No alternate chat webview is created; the provider uses the built-in VS Code Cha
 - **No models appear:** validate the key, then refresh models. Check that the key can call `/v1/models`.
 - **A model is missing:** the API key does not currently return that model, or it is a known non-chat endpoint.
 - **A request stops without text:** NaN may have hit a reasoning-only truncation; try a shorter prompt or a model with adjustable reasoning.
+- **Earlier turns seem to be missing:** the conversation exceeded the model's input budget and the middle turns were trimmed to fit. Start a new chat if the model needs those earlier details; enable `nanBuilders.diagnostics.enabled` to see how many units were dropped and the estimated tokens before and after.
 - **Remote or WSL window:** the provider prefers the workspace extension host; install the extension and configure the key in that remote host's SecretStorage.
 - **Key safety:** use **Clear API key** from the management command to remove it from SecretStorage.
 
