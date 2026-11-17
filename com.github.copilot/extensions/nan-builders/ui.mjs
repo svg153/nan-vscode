@@ -54,6 +54,8 @@ export function renderHtml() {
   .headline .pct { font-size: 32px; font-weight: var(--font-weight-semibold, 600); }
   .muted { color: var(--text-color-muted, #656d76); font-size: 12px; }
   .error { color: var(--true-color-red, #cf222e); background: var(--true-color-red-muted, #ffebe9); padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; }
+  .banner { padding: 8px 12px; border-radius: 6px; margin: 8px 0 10px; font-size: 13px; border: 1px solid currentColor; }
+  .banner.frozen { color: var(--true-color-red, #cf222e); background: var(--true-color-red-muted, #ffebe9); }
   .settings label { display: block; margin: 14px 0 4px; font-weight: var(--font-weight-semibold, 600); font-size: 13px; }
   .settings input { width: 360px; max-width: 100%; }
   .settings .row { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
@@ -83,14 +85,14 @@ export function renderHtml() {
   <section id="tab-usage">
     <div id="headline"></div>
     <table>
-      <thead><tr><th>Model</th><th>Used (month)</th><th>Published cap</th><th>Quota</th></tr></thead>
-      <tbody id="usageRows"><tr><td colspan="4" class="muted">No usage data yet.</td></tr></tbody>
+      <thead><tr><th>Model</th><th>Tokens (window)</th><th>Requests</th><th>Billed credits</th><th>Share of plan credits</th></tr></thead>
+      <tbody id="usageRows"><tr><td colspan="5" class="muted">No usage data yet.</td></tr></tbody>
     </table>
-    <p class="muted">Percentages are computed only for models with a documented fixed monthly counter; other rows show the published cap note. Source: GET /v1/usage (UTC current month).</p>
+    <p class="muted">The headline covers the billing period reported by GET /v1/usage. Per-model rows are the current UTC month; NaN rounds each model independently, so their sum can differ by tenths from the billing-period total. Models that do not draw credits, and frozen pools, never show a percentage.</p>
   </section>
   <section id="tab-models" hidden>
     <table>
-      <thead><tr><th>Model</th><th>Context</th><th>Max output</th><th>Image in</th><th>Tool calls</th><th>Quota cap</th></tr></thead>
+      <thead><tr><th>Model</th><th>Context</th><th>Max output</th><th>Image in</th><th>Tool calls</th><th>Billing</th></tr></thead>
       <tbody id="modelRows"><tr><td colspan="6" class="muted">No model data yet.</td></tr></tbody>
     </table>
     <p class="muted">GET /v1/models for the configured key, enriched with published metadata.</p>
@@ -129,6 +131,11 @@ export function renderHtml() {
 
   function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
   function fmt(n) { return Number(n || 0).toLocaleString("en-US"); }
+  function fmtCredits(n) {
+    if (n === null || n === undefined) return "\u2014";
+    var r = Math.round(Number(n) * 10) / 10;
+    return Number.isInteger(r) ? r.toLocaleString("en-US") : r.toFixed(1);
+  }
 
   function showError(message) {
     var el = document.getElementById("error");
@@ -163,17 +170,43 @@ export function renderHtml() {
     var rows = document.getElementById("usageRows");
     if (state.usage) {
       var items = state.usage.items || [];
-      var top = items.filter(function (i) { return i.percent !== null; })[0];
-      headline.innerHTML = top
-        ? '<div class="headline"><span class="pct">' + top.percent + '%</span><span class="muted">most-used monthly quota · ' + esc(top.model) + '</span></div>'
-        : '<div class="headline"><span class="pct">' + fmt(state.usage.totals.totalTokens) + '</span><span class="muted">tokens this month (no fixed monthly-counter quota applies)</span></div>';
-      if (!items.length) { rows.innerHTML = '<tr><td colspan="4" class="muted">No token usage recorded this month.</td></tr>'; }
+      var credits = state.usage.credits;
+      var period = credits && credits.periodStart && credits.periodEnd
+        ? credits.periodStart + " \u2192 " + credits.periodEnd
+        : (credits && credits.periodEnd ? "renews " + credits.periodEnd : "");
+      var blocks = [];
+      if (!credits) {
+        blocks.push('<div class="headline"><span class="pct">' + fmt(state.usage.totals.totalTokens) + '</span><span class="muted">tokens this window \u00b7 this gateway reports no usable plan-credit data</span></div>');
+      } else {
+        if (credits.frozen) {
+          blocks.push('<div class="banner frozen">Plan credits are frozen: credit-billed requests are refused until the subscription is active again. No usage percentage is shown.</div>');
+        }
+        if (credits.percent !== null) {
+          blocks.push('<div class="headline"><span class="pct">' + credits.percent + '%</span><span class="muted">of plan credits used' + (period ? ' \u00b7 ' + esc(period) : '') + '</span></div>');
+        }
+        var facts = [];
+        if (credits.used !== null) facts.push(fmtCredits(credits.used) + ' used');
+        if (credits.allowance !== null) facts.push(fmtCredits(credits.allowance) + ' allowance');
+        if (credits.remaining !== null) facts.push(fmtCredits(credits.remaining) + ' remaining');
+        if (facts.length) {
+          blocks.push('<div class="muted">' + esc(facts.join(' \u00b7 ')) + (credits.percent === null && period ? ' \u00b7 ' + esc(period) : '') + '</div>');
+        }
+        if (credits.packCredits) {
+          blocks.push('<div class="muted">Credit pack: ' + fmtCredits(credits.packCredits) + ' credits' + (credits.packExpiresAt ? ' \u00b7 expires ' + esc(credits.packExpiresAt) : '') + '</div>');
+        }
+        if (!blocks.length) {
+          blocks.push('<div class="headline"><span class="pct">' + fmt(state.usage.totals.totalTokens) + '</span><span class="muted">tokens this window \u00b7 the gateway reported no usable plan-credit data</span></div>');
+        }
+      }
+      headline.innerHTML = blocks.join('');
+      if (!items.length) { rows.innerHTML = '<tr><td colspan="5" class="muted">No usage recorded this window.</td></tr>'; }
       else {
         rows.innerHTML = items.map(function (i) {
-          var bar = i.percent === null ? '<span class="muted">—</span>'
+          var share = i.percent === null || i.percent === undefined
+            ? '<span class="muted">' + esc(i.note || "\u2014") + '</span>'
             : '<div class="bar' + (i.percent >= 80 ? ' hot' : '') + '"><div style="width:' + Math.min(i.percent, 100) + '%"></div></div> <span>' + i.percent + '%</span>';
-          return "<tr><td>" + esc(i.model) + "</td><td>" + fmt(i.usedTokens) + " tok" + (i.requests ? " · " + fmt(i.requests) + " req" : "") +
-            "</td><td>" + esc(i.cap) + "</td><td>" + bar + "</td></tr>";
+          return "<tr><td>" + esc(i.model) + "</td><td>" + fmt(i.usedTokens) + " tok</td><td>" +
+            (i.requests ? fmt(i.requests) : "\u2014") + "</td><td>" + fmtCredits(i.credits) + "</td><td>" + share + "</td></tr>";
         }).join("");
       }
     }

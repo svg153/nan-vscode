@@ -211,6 +211,7 @@ export async function fetchUsage(cfg, window) {
   const rows = [];
   let totals = null;
   let allTime = null;
+  let credits;
   let cursor;
   let hasMore = false;
   for (let page = 0; page < USAGE_MAX_PAGES; page += 1) {
@@ -238,6 +239,9 @@ export async function fetchUsage(cfg, window) {
     if (!allTime && json.all_time) {
       allTime = json.all_time;
     }
+    if (credits === undefined && json.credits !== undefined && json.credits !== null) {
+      credits = normalizeCredits(json.credits);
+    }
     hasMore = json.has_more === true;
     cursor = typeof json.next_cursor === "string" && json.next_cursor ? json.next_cursor : undefined;
     if (!hasMore || !cursor) {
@@ -250,19 +254,49 @@ export async function fetchUsage(cfg, window) {
     truncated: hasMore && cursor !== undefined,
     rows,
     totals: normalizeTotals(totals),
+    credits,
     allTime: allTime && typeof allTime === "object" ? normalizeTotals(allTime) : null,
   };
+}
+
+/**
+ * Plan credits for the current billing period (`credits` on GET /v1/usage).
+ * Gateways that predate the credits model omit the block: undefined then, so the
+ * caller degrades to token counts instead of inventing a percentage. A block
+ * whose every field is missing or invalid is equally unusable and also returns
+ * undefined, so an empty object never masks the fallback with a blank headline.
+ */
+function normalizeCredits(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+  const str = (v) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+  const credits = {
+    allowance: num(value.allowance),
+    used: num(value.used),
+    remaining: num(value.remaining),
+    packCredits: num(value.pack_credits),
+    packExpiresAt: str(value.pack_expires_at),
+    periodStart: str(value.period_start),
+    periodEnd: str(value.period_end),
+    frozen: typeof value.frozen === "boolean" ? value.frozen : undefined,
+  };
+  const normalized = Object.fromEntries(Object.entries(credits).filter(([, entry]) => entry !== undefined));
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
 }
 
 function normalizeTotals(totals) {
   const t = totals && typeof totals === "object" ? totals : {};
   const byModelRaw = Array.isArray(t.by_model) ? t.by_model : [];
   const num = (v) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  const optionalNum = (v) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
   return {
     promptTokens: num(t.prompt_tokens),
     completionTokens: num(t.completion_tokens),
     totalTokens: num(t.total_tokens),
     apiRequests: num(t.api_requests),
+    credits: optionalNum(t.credits),
     byModel: byModelRaw
       .filter((entry) => entry && typeof entry === "object" && typeof entry.model === "string")
       .map((entry) => ({
@@ -271,6 +305,7 @@ function normalizeTotals(totals) {
         completionTokens: num(entry.completion_tokens),
         totalTokens: num(entry.total_tokens),
         apiRequests: num(entry.api_requests),
+        credits: optionalNum(entry.credits),
       })),
   };
 }
