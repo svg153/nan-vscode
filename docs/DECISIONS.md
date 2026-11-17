@@ -117,3 +117,19 @@ The marker `AUTONOMOUS-DECISION` is used for decisions made during implementatio
 - It is deliberately not enabled, for two reasons. `copilot-triage` hands work to the Copilot coding agent through `safe-outputs: assign-to-agent`, which makes Copilot load-bearing there, so only `feature-scout` is a candidate. And the Codex engine speaks the Responses API (`/v1/responses`), which the extension does not exercise today, so the gateway's Responses support has to be verified before the draft can be turned on.
 
 **Follow-up:** Revisit if the repository moves under an organization (which unlocks `copilot-requests: write` and central billing), or if `feature-scout` becomes the dominant AI Credit consumer. The next concrete step for a private deployment is the `/v1/responses` check in `docs/agentic-pipeline.md#swapping-the-model-provider-draft`, then a priced `feature-scout` run from `gh aw logs --json` before switching.
+
+## AUTONOMOUS-DECISION: November model reasoning ladders follow the published bullets
+
+**Question:** Which `reasoningEffortValues` should `qwen4-max` and `hy4-flash` declare, given that NaN's "Controlling reasoning" ladder table does not cover the November additions (`kimi-k3.1-pro`, `qwen3.8-max`, `deepseek-v4-pro`, `hy4`, `qwen4-max`, `hy4-flash`)?
+
+**Options:**
+
+- `[]` for both, treating every model outside the ladder table as model-managed (the `kimi-k3.1-pro` / `deepseek-v4-pro` convention).
+- The full canonical ladder for both, assuming the November models accept `none` through `max`.
+- Per-model: the ladder only where the model's own bullet enumerates the levels, `[]` otherwise.
+
+**Research:** https://nan.builders/docs/models gives each model a reasoning bullet outside the ladder table. `qwen4-max` says `reasoning_effort` accepts `none` to turn reasoning off and `minimal` to `max` to steer depth, and that `max_tokens` bounds reasoning plus answer (up to 131,000). `hy4-flash` says it reasons by default with no default level applied, that `none` turns it off, and that `max_tokens` bounds reasoning plus answer (up to 64,000); it does not enumerate the levels. `hy4`, added in the same wave, already declares `["none","minimal","low","medium","high","max"]`.
+
+**Decision:** Per-model. `qwen4-max` declares `["none","minimal","low","medium","high","xhigh","max"]` because its bullet enumerates `none` plus `minimal`..`max`. `hy4-flash` declares `[]` because no per-level contract is published, matching `kimi-k3.1-pro` and `deepseek-v4-pro`; an empty ladder keeps VS Code's depth control away from an undocumented surface while `defaultReasoningEffortForModel([])` still resolves to `low`, which is inside the documented range.
+
+**Follow-up:** Replace `[]` with the enumerated ladder once NaN publishes the levels for `hy4-flash` or adds the November models to the ladder table, and add a validation step that compares picker depth choices with the published levels.
