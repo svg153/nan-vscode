@@ -45,10 +45,10 @@ Expected: the extension is loaded in an isolated Insiders profile, discovers the
 2. Enter an invalid key and confirm validation reports a clear authentication error.
 3. Enter a valid `sk-...` key.
 4. Confirm the key is not written to `settings.json`, `chatLanguageModels.json`, the workspace, or extension logs.
-5. Compare the picker with `GET /v1/models` for the same key. Every known chat ID returned there should be offered: `deepseek-v4-flash`, `deepseek-v4-pro`, `glm5.3-flash`, `qwen3.8-flash`, `qwen3.8-max`, `mimo-v2.6-flash`, `kimi-k3.1-pro`, `hy4`, `gemma4`, `qwen3.6`, and, for keys with access, `glm5.3`. Models absent from `/v1/models` must stay absent from the picker.
+5. Compare the picker with `GET /v1/models` for the same key. Every known chat ID returned there should be offered: `deepseek-v4-flash`, `deepseek-v4-pro`, `glm5.3-flash`, `qwen3.8-flash`, `qwen3.8-max`, `qwen4-max`, `mimo-v2.6-flash`, `kimi-k3.1-pro`, `hy4`, `hy4-flash`, `gemma4`, `qwen3.6`, and, for keys with access, `glm5.3`. Models absent from `/v1/models` must stay absent from the picker.
 6. Confirm known non-chat IDs such as embeddings, rerank, audio, and image generation are not exposed as chat models.
 
-Important: treat `/v1/models` as the definitive API-key-filtered list. A model must not be exposed just because it exists in the local metadata catalog. In particular, the larger models (`glm5.3`, `kimi-k3.1-pro`, `qwen3.8-max`, `deepseek-v4-pro`, `hy4`) should only appear for keys whose `/v1/models` response contains them.
+Important: treat `/v1/models` as the definitive API-key-filtered list. A model must not be exposed just because it exists in the local metadata catalog. In particular, the larger models (`glm5.3`, `kimi-k3.1-pro`, `qwen3.8-max`, `qwen4-max`, `deepseek-v4-pro`, `hy4`) should only appear for keys whose `/v1/models` response contains them.
 
 ## Basic streaming chat
 
