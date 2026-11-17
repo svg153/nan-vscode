@@ -1,6 +1,15 @@
 import { buildToolNameMappings, sanitizeSchema, sanitizeToolName } from "./tooling";
 import type { OpenAIContentPart, OpenAIMessage, OpenAIToolDefinition } from "./types";
-import { sanitizeUpstreamText } from "../text";
+import {
+  flattenToolResult,
+  isImagePart,
+  isTextPart,
+  isToolCallPart,
+  isToolResultPart,
+  safeStringify,
+} from "./tokens";
+
+export { estimateTokens, isImagePart } from "./tokens";
 
 export interface ToolMapping {
   readonly definitions: OpenAIToolDefinition[];
@@ -22,10 +31,6 @@ export interface PlainTool {
   readonly name: string;
   readonly description?: string;
   readonly inputSchema?: unknown;
-}
-
-export function estimateTokens(text: string): number {
-  return Math.max(1, Math.ceil(text.length / 4));
 }
 
 export type RequestTimeoutKind = "connect" | "stream-idle";
@@ -51,69 +56,6 @@ export class RequestTimeoutError extends Error {
     super(TIMEOUT_MESSAGES[kind](timeoutSeconds));
     this.name = "RequestTimeoutError";
   }
-}
-
-export function httpError(status: number, statusText: string, body: string): Error {
-  const summary = sanitizeErrorBody(body);
-  const suffix = summary ? `: ${summary}` : "";
-  const hint = status === 402 ? ` — ${CREDITS_REFUSED_HINT}` : "";
-  return new Error(
-    `NaN Builders API error ${status} ${sanitizeUpstreamText(statusText, MAX_FIELD_LENGTH)}${suffix}${hint}`,
-  );
-}
-
-/**
- * HTTP 402 is the only symptom of an exhausted or frozen credit pool, so the
- * message names the three causes the user can act on instead of staying cryptic.
- */
-const CREDITS_REFUSED_HINT =
-  "NaN Builders bills every metered model from one credits pool, so this request was refused because the " +
-  "plan allowance is spent, credits are frozen, or no credit pack is active. Run 'NaN Builders: Show Usage' " +
-  "for the balance, or use a model that does not draw credits.";
-
-const MAX_SUMMARY_LENGTH = 200;
-const MAX_FIELD_LENGTH = 64;
-
-/**
- * Upstream bodies can echo the request, including user prompt text and API
- * keys. Only structural error identifiers are surfaced; free-form messages are
- * dropped entirely.
- */
-export function sanitizeErrorBody(body: string): string {
-  const trimmed = body.trim();
-  if (!trimmed) {
-    return "";
-  }
-  const summary = summarizeError(trimmed);
-  return summary ? redactSecrets(summary).slice(0, MAX_SUMMARY_LENGTH) : "";
-}
-
-function summarizeError(body: string): string {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body);
-  } catch {
-    return "";
-  }
-  if (!parsed || typeof parsed !== "object") {
-    return "";
-  }
-  const error = (parsed as { error?: unknown }).error;
-  if (!error || typeof error !== "object") {
-    return "";
-  }
-  const fields = error as { type?: unknown; code?: unknown; param?: unknown };
-  const parts: string[] = [];
-  for (const value of [fields.type, fields.code, fields.param]) {
-    if (typeof value === "string" && value.trim()) {
-      parts.push(value.trim().slice(0, MAX_FIELD_LENGTH));
-    }
-  }
-  return parts.join(" ");
-}
-
-function redactSecrets(text: string): string {
-  return sanitizeUpstreamText(text, MAX_SUMMARY_LENGTH);
 }
 
 export function convertMessages(
@@ -213,62 +155,4 @@ function contentValue(parts: OpenAIContentPart[]): string | OpenAIContentPart[] 
     return parts.map((part) => (part.type === "text" ? part.text : "")).join("");
   }
   return parts;
-}
-
-function safeStringify(value: unknown): string {
-  try {
-    return JSON.stringify(value ?? {});
-  } catch {
-    return "{}";
-  }
-}
-
-function isTextPart(value: unknown): value is { value: string } {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const candidate = value as { value?: unknown; callId?: unknown };
-  return typeof candidate.value === "string" && typeof candidate.callId !== "string";
-}
-
-function isToolCallPart(value: unknown): value is { callId: string; name: string; input: unknown } {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const candidate = value as { callId?: unknown; name?: unknown };
-  return typeof candidate.callId === "string" && typeof candidate.name === "string";
-}
-
-function isToolResultPart(value: unknown): value is { callId: string; content: readonly unknown[] } {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const candidate = value as { callId?: unknown; content?: unknown };
-  return typeof candidate.callId === "string" && Array.isArray(candidate.content);
-}
-
-export function isImagePart(value: unknown): value is { data: Uint8Array; mimeType: string } {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const candidate = value as { data?: unknown; mimeType?: unknown };
-  return (
-    candidate.data instanceof Uint8Array &&
-    typeof candidate.mimeType === "string" &&
-    candidate.mimeType.startsWith("image/")
-  );
-}
-
-function flattenToolResult(content: readonly unknown[]): string {
-  const pieces: string[] = [];
-  for (const part of content) {
-    if (typeof part === "string") {
-      pieces.push(part);
-    } else if (isTextPart(part)) {
-      pieces.push(part.value);
-    } else {
-      pieces.push(safeStringify(part));
-    }
-  }
-  return pieces.join("");
 }

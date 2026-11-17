@@ -1,17 +1,25 @@
-// Pure NaN quota math + published metadata, mirrored from src/quotaCatalog.ts and
+// Pure NaN credit math + published metadata, mirrored from src/quotaCatalog.ts and
 // src/modelCatalog.ts so the Copilot app plugin and the VS Code extension never
 // fabricate a percentage the API does not define. Keep the tables in sync with TS.
+//
+// NaN bills every metered model from one credits pool (allowance per billing
+// period) instead of fixed per-model monthly token counters, so a percentage is
+// always the share of the plan allowance, never the share of a per-model cap.
 
-export const MODEL_QUOTA_LIMITS = {
-  "deepseek-v4-flash": { tokens: 3_000_000_000, period: "month" },
-  "glm5.3-flash": { tokens: 2_000_000_000, period: "month" },
-  "qwen3.8-flash": { tokens: 500_000_000, period: "month" },
-  "mimo-v2.6-flash": { tokens: 1_000_000_000, period: "month" },
-  "glm5.3": { tokens: 3_000_000_000, period: "billing period", rollingTokens: 400_000_000, rollingHours: 4 },
-};
-
-/** Models where NaN documents no fixed token-counter allowance; never show a % for them. */
-export const NO_TOKEN_COUNTER_MODELS = new Set(["qwen3.6", "gemma4"]);
+/**
+ * Models NaN documents as "no counter": they do not draw credits, so no
+ * percentage of the plan allowance can be computed for them.
+ */
+export const UNMETERED_MODELS = new Set([
+  "gemma4",
+  "qwen3.6",
+  "qwen3-embedding",
+  "rerank",
+  "kokoro",
+  "whisper",
+  "flux-2-klein",
+  "qwen-image-2.1",
+]);
 
 export const KNOWN_CHAT_MODELS = [
   { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", contextWindow: 1_048_575, maxOutputTokens: 32_768, imageInput: true, toolCalling: true },
@@ -24,6 +32,7 @@ export const KNOWN_CHAT_MODELS = [
 ];
 
 const BY_ID = new Map(KNOWN_CHAT_MODELS.map((model) => [model.id, model]));
+const KNOWN_IDS = new Set(KNOWN_CHAT_MODELS.map((model) => model.id));
 
 export function getKnownModel(id) {
   return BY_ID.get(id);
@@ -33,52 +42,187 @@ export function knownChatModelIds() {
   return KNOWN_CHAT_MODELS.map((model) => model.id);
 }
 
-function capLabel(limit) {
-  return compactTokens(limit.tokens) + " per " + limit.period +
-    (limit.rollingTokens ? " · " + compactTokens(limit.rollingTokens) + " per rolling " + limit.rollingHours + "h" : "");
+/** Note for a model that draws no credits, or undefined when it is metered. */
+export function unmeteredNote(modelId) {
+  return UNMETERED_MODELS.has(modelId) ? "Does not draw credits" : undefined;
 }
 
-/** Describes a quota that is NOT a fixed monthly counter, or undefined. */
-export function nonMonthlyQuotaNote(modelId) {
-  const limit = MODEL_QUOTA_LIMITS[modelId];
-  if (!limit || limit.period === "month") {
-    return undefined;
-  }
-  return capLabel(limit) + " (not a fixed monthly counter)";
-}
-
-/** Human cap label for the catalog/usage tables; never a fabricated percentage. */
+/** Published billing label for a model row; never a fabricated percentage. */
 export function quotaCapLabel(modelId) {
-  const limit = MODEL_QUOTA_LIMITS[modelId];
-  if (limit) {
-    return capLabel(limit);
+  const unmetered = unmeteredNote(modelId);
+  if (unmetered) {
+    return unmetered;
   }
-  if (NO_TOKEN_COUNTER_MODELS.has(modelId)) {
-    return "No token counter";
+  return KNOWN_IDS.has(modelId) ? "Paid from plan credits" : "Billed in credits; no documented allowance";
+}
+
+/** One-decimal percentage, the precision NaN reports for credits. */
+export function percentOf(part, whole) {
+  if (!Number.isFinite(part) || !Number.isFinite(whole) || whole <= 0) {
+    return 0;
   }
-  return "No published quota limit";
+  return Math.round((part / whole) * 1000) / 10;
+}
+
+/** Credits are billed with one decimal, so any computed amount is re-rounded to that precision. */
+export function roundCredits(value) {
+  return Number.isFinite(value) ? Math.round(value * 10) / 10 : 0;
 }
 
 /**
- * Usage percentages ONLY for models with a documented fixed monthly counter.
- * Sorted descending: the first entry is the most-restricted quota (headline).
- * Entries: [{ model, totalTokens }] from GET /v1/usage totals.by_model.
+ * Sums credit amounts to the billed precision. Per-model rows arrive rounded, so
+ * adding them as floats drifts (0.1 + 0.2 = 0.30000000000000004) and would show
+ * up as noise in totals.
  */
-export function monthlyQuotaProgress(entries) {
+export function sumCredits(values) {
+  return roundCredits(values.reduce((total, value) => total + (Number.isFinite(value) ? value : 0), 0));
+}
+
+/** Credits with the billed one-decimal precision, without a trailing `.0`. */
+export function formatCredits(value) {
+  const rounded = roundCredits(value);
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+}
+
+/**
+ * Credits billed in the window's per-model rows. NaN rounds each model
+ * independently, so this calendar-window sum is approximate: it can differ by
+ * tenths from `credits.used`, which covers the billing period.
+ */
+export function windowCredits(entries) {
+  const billed = entries
+    .map((entry) => (Number.isFinite(entry?.credits) ? entry.credits : 0))
+    .filter((value) => value > 0);
+  return billed.length === 0 ? undefined : sumCredits(billed);
+}
+
+/**
+ * Percentage of the plan's credit allowance used by each model.
+ * NaN bills every metered model from one credits pool, so the share is always
+ * measured against the plan allowance. Models that draw no credits and models
+ * without credits in the window are excluded so no percentage is fabricated.
+ * Sorted descending: the first entry is the largest consumer.
+ */
+export function creditProgress(entries, allowance) {
+  if (!Number.isFinite(allowance) || allowance <= 0) {
+    return [];
+  }
   const progress = [];
   for (const entry of entries) {
-    const limit = MODEL_QUOTA_LIMITS[entry.model];
-    if (!limit || limit.period !== "month") {
+    const credits = Number.isFinite(entry?.credits) ? entry.credits : 0;
+    if (UNMETERED_MODELS.has(entry?.model) || credits <= 0) {
       continue;
     }
     progress.push({
       model: entry.model,
-      percent: Math.round((entry.totalTokens / limit.tokens) * 1000) / 10,
-      usedTokens: entry.totalTokens,
-      limitTokens: limit.tokens,
+      percent: percentOf(credits, allowance),
+      usedCredits: credits,
+      allowance,
     });
   }
   return progress.sort((a, b) => b.percent - a.percent);
+}
+
+/** Shown when a metered model's row has token usage but no usable credit amount. */
+export const CREDITS_UNAVAILABLE_NOTE = "Credit data unavailable for this model";
+
+/**
+ * Note for a per-model row that shows no percentage; undefined when a % applies.
+ * Missing/invalid per-model credits mean the gateway did not report billing data,
+ * which is not the same as an explicit zero: only a finite amount <= 0 means
+ * nothing was billed in the window.
+ */
+export function creditsNote(modelId, credits) {
+  const unmetered = unmeteredNote(modelId);
+  if (unmetered) {
+    return unmetered;
+  }
+  if (!Number.isFinite(credits)) {
+    return CREDITS_UNAVAILABLE_NOTE;
+  }
+  return credits <= 0 ? "No credits billed in this window" : undefined;
+}
+
+/**
+ * Plan credits for the billing period (`credits` on GET /v1/usage), or null when
+ * the gateway predates the credits model or reported a block with no usable
+ * field. Percentages are suppressed while the pool is frozen: credit-billed
+ * requests are being refused, so the share of allowance is no longer the
+ * actionable number.
+ */
+export function creditsView(credits) {
+  if (!credits) {
+    return null;
+  }
+  const allowance = Number.isFinite(credits.allowance) ? credits.allowance : undefined;
+  const used = Number.isFinite(credits.used) ? credits.used : undefined;
+  const frozen = credits.frozen === true;
+  const view = {
+    allowance: allowance ?? null,
+    used: used ?? null,
+    remaining: Number.isFinite(credits.remaining) ? credits.remaining : null,
+    packCredits: Number.isFinite(credits.packCredits) ? credits.packCredits : null,
+    packExpiresAt: credits.packExpiresAt ?? null,
+    periodStart: credits.periodStart ?? null,
+    periodEnd: credits.periodEnd ?? null,
+    frozen,
+    percent: frozen || used === undefined || allowance === undefined || allowance <= 0 ? null : percentOf(used, allowance),
+  };
+  const hasData =
+    view.allowance !== null ||
+    view.used !== null ||
+    view.remaining !== null ||
+    view.packCredits !== null ||
+    view.packExpiresAt !== null ||
+    view.periodStart !== null ||
+    view.periodEnd !== null;
+  return hasData || frozen ? view : null;
+}
+
+/**
+ * Usage payload shared by the canvas Usage tab and the nan_usage tool: the plan
+ * credits headline plus one row per model the API reports. Every returned model
+ * is rendered (no local allow-list), and a row only carries a percentage when
+ * NaN billed it credits against a known, non-frozen allowance.
+ */
+export function composeUsage(report) {
+  const credits = creditsView(report.credits);
+  const percentByModel = new Map(
+    creditProgress(
+      report.totals.byModel.map((entry) => ({ model: entry.model, credits: entry.credits ?? 0 })),
+      report.credits?.allowance,
+    ).map((entry) => [entry.model, entry.percent]),
+  );
+  const items = report.totals.byModel
+    .slice()
+    .sort((a, b) => b.totalTokens - a.totalTokens)
+    .map((entry) => {
+      const percent = !credits?.frozen && percentByModel.has(entry.model) ? percentByModel.get(entry.model) : null;
+      return {
+        model: entry.model,
+        usedTokens: entry.totalTokens,
+        requests: entry.apiRequests,
+        credits: Number.isFinite(entry.credits) ? entry.credits : null,
+        percent,
+        note: percent === null ? creditsNote(entry.model, entry.credits) : undefined,
+        cap: quotaCapLabel(entry.model),
+      };
+    });
+  // A metered row without a usable credit amount makes the window sum a lower
+  // bound, not a total, so callers can say so instead of implying completeness.
+  const windowCreditsPartial = report.totals.byModel.some(
+    (entry) => unmeteredNote(entry.model) === undefined && !Number.isFinite(entry.credits),
+  );
+  return {
+    startDate: report.startDate,
+    endDate: report.endDate,
+    truncated: report.truncated,
+    credits,
+    windowCredits: windowCredits(report.totals.byModel) ?? null,
+    windowCreditsPartial,
+    totals: report.totals,
+    items,
+  };
 }
 
 export function compactTokens(value) {

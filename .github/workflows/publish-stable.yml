@@ -1,41 +1,48 @@
 name: Publish stable to Marketplace
 
-# Manual promotion gate: run this after you have validated a release
-# (typically the matching preview VSIX). The `marketplace` environment can be
-# configured with required reviewers so publishing also needs an explicit
-# approval in the Actions UI.
+# Promotion gate: run this once you have validated the pre-release. The
+# `marketplace` environment can require reviewers, so approving the deployment
+# is the "the pre-release works" signal — the same VSIX that main built is then
+# published as the stable version.
+#
+# The target release is resolved in an *ungated* job so it is pinned before
+# anyone approves: an approval then publishes exactly the tag and artifact shown
+# in the deployment details, never whatever is latest by the time it is clicked.
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Stable release tag to publish (e.g. v1.6.0)
-        required: true
+        description: Stable release tag to publish (e.g. v1.12.0). Leave empty to use the latest stable release.
+        required: false
         type: string
 
 jobs:
-  promote:
+  resolve:
+    name: Resolve the release to promote
     runs-on: ubuntu-latest
-    environment:
-      name: marketplace
     permissions:
       contents: read
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
-        with:
-          node-version: 26
-          cache: npm
-      - run: npm ci
-      - name: Download release VSIX
+      # No checkout or install: this job only reads release metadata, so the
+      # pinned tag cannot depend on anything in a working tree.
+      - name: Resolve the release to promote
+        id: release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           INPUT_TAG: ${{ inputs.tag }}
         run: |
-          tag="$INPUT_TAG"
+          tag=$(printf '%s' "$INPUT_TAG" | tr -d '[:space:]')
+          if [ -z "$tag" ]; then
+            tag=$(gh release list --repo "$GITHUB_REPOSITORY" \
+              --exclude-pre-releases --exclude-drafts --limit 1 --json tagName -q '.[0].tagName')
+          fi
           if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Tag must be a stable semver release like v1.6.0 (no prerelease suffix)."
+            echo "::error::Tag must be a stable semver release like v1.12.0 (no prerelease suffix)."
             exit 1
           fi
           # gh exits non-zero (stopping the step) if the release cannot be read,
@@ -45,23 +52,65 @@ jobs:
             echo "::error::Release $tag is marked prerelease; only stable releases can be promoted."
             exit 1
           fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "Pinned $tag for promotion" >> "$GITHUB_STEP_SUMMARY"
+
+  promote:
+    name: Publish ${{ needs.resolve.outputs.tag }} to the Marketplace
+    needs: resolve
+    runs-on: ubuntu-latest
+    environment:
+      name: marketplace
+      # Surfaces the pinned tag in the deployment details, so the approver sees
+      # exactly which release the approval will publish.
+      url: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.resolve.outputs.tag }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - name: Download the pinned release VSIX
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
           mkdir -p release-vsix
-          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern 'nan-builders-vscode-*.vsix' --dir release-vsix
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'nan-builders-vscode-*.vsix' --dir release-vsix
           count=$(ls release-vsix/*.vsix | wc -l)
           if [ "$count" -ne 1 ]; then
-            echo "::error::Expected exactly one VSIX on release $tag, found $count."
+            echo "::error::Expected exactly one VSIX on release $TAG, found $count."
             exit 1
           fi
+          # Guard against promoting an artifact built from a different version.
+          expected="release-vsix/nan-builders-vscode-$VERSION.vsix"
+          if [ ! -f "$expected" ]; then
+            echo "::error::Release $TAG does not contain $expected."
+            exit 1
+          fi
+          echo "Publishing $expected from $TAG" >> "$GITHUB_STEP_SUMMARY"
       - name: Publish to the VS Code Marketplace
         shell: bash
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
+          TRUSTED_PUBLISHING: ${{ vars.MARKETPLACE_TRUSTED_PUBLISHING }}
+          VERSION: ${{ needs.resolve.outputs.version }}
         run: |
-          shopt -s nullglob
-          vsix=(release-vsix/nan-builders-vscode-*.vsix)
-          if [ -z "$VSCE_PAT" ]; then
-            echo "::error::The VSCE_PAT secret is not configured, so publishing cannot proceed."
-            exit 1
+          args=(--packagePath "release-vsix/nan-builders-vscode-$VERSION.vsix" --no-dependencies --skip-duplicate)
+          if [ "$TRUSTED_PUBLISHING" = "true" ]; then
+            npx vsce publish "${args[@]}" --oidc
+          else
+            if [ -z "$VSCE_PAT" ]; then
+              echo "::error::Neither trusted publishing (MARKETPLACE_TRUSTED_PUBLISHING=true) nor the VSCE_PAT secret is configured, so publishing cannot proceed."
+              exit 1
+            fi
+            npx vsce verify-pat svg153
+            npx vsce publish "${args[@]}"
           fi
-          npx vsce verify-pat svg153
-          npx vsce publish --packagePath "${vsix[0]}" --no-dependencies
