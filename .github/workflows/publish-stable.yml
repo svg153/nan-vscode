@@ -4,6 +4,10 @@ name: Publish stable to Marketplace
 # `marketplace` environment can require reviewers, so approving the deployment
 # is the "the pre-release works" signal — the same VSIX that main built is then
 # published as the stable version.
+#
+# The target release is resolved in an *ungated* job so it is pinned before
+# anyone approves: an approval then publishes exactly the tag and artifact shown
+# in the deployment details, never whatever is latest by the time it is clicked.
 
 on:
   workflow_dispatch:
@@ -14,20 +18,17 @@ on:
         type: string
 
 jobs:
-  promote:
+  resolve:
+    name: Resolve the release to promote
     runs-on: ubuntu-latest
-    environment:
-      name: marketplace
     permissions:
       contents: read
-      id-token: write
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
-        with:
-          node-version: 26
-          cache: npm
-      - run: npm ci
+      # No checkout or install: this job only reads release metadata, so the
+      # pinned tag cannot depend on anything in a working tree.
       - name: Resolve the release to promote
         id: release
         shell: bash
@@ -53,13 +54,33 @@ jobs:
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
-          echo "Promoting $tag"
-      - name: Download the release VSIX
+          echo "Pinned $tag for promotion" >> "$GITHUB_STEP_SUMMARY"
+
+  promote:
+    name: Publish ${{ needs.resolve.outputs.tag }} to the Marketplace
+    needs: resolve
+    runs-on: ubuntu-latest
+    environment:
+      name: marketplace
+      # Surfaces the pinned tag in the deployment details, so the approver sees
+      # exactly which release the approval will publish.
+      url: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.resolve.outputs.tag }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - name: Download the pinned release VSIX
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.release.outputs.tag }}
-          VERSION: ${{ steps.release.outputs.version }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           mkdir -p release-vsix
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'nan-builders-vscode-*.vsix' --dir release-vsix
@@ -74,12 +95,13 @@ jobs:
             echo "::error::Release $TAG does not contain $expected."
             exit 1
           fi
+          echo "Publishing $expected from $TAG" >> "$GITHUB_STEP_SUMMARY"
       - name: Publish to the VS Code Marketplace
         shell: bash
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
           TRUSTED_PUBLISHING: ${{ vars.MARKETPLACE_TRUSTED_PUBLISHING }}
-          VERSION: ${{ steps.release.outputs.version }}
+          VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           args=(--packagePath "release-vsix/nan-builders-vscode-$VERSION.vsix" --no-dependencies --skip-duplicate)
           if [ "$TRUSTED_PUBLISHING" = "true" ]; then

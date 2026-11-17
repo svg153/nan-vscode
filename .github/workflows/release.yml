@@ -42,10 +42,10 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "Released $tag"
 
-  # Marketplace pre-release channel: every merge that cuts a release publishes
-  # the next patch as a pre-release, so "Switch to Pre-Release Version" in VS
-  # Code installs exactly what `main` builds. Publishing stable stays gated
-  # behind publish-stable.yml.
+  # Marketplace pre-release channel: every merge that cuts a release publishes a
+  # preview version, so "Switch to Pre-Release Version" in VS Code installs
+  # exactly what `main` builds. Publishing stable stays gated behind
+  # publish-stable.yml.
   preview:
     needs: release
     if: needs.release.outputs.released == 'true'
@@ -67,8 +67,8 @@ jobs:
         env:
           STABLE_TAG: ${{ needs.release.outputs.tag }}
         run: |
-          # The Marketplace has no semver prerelease tags: the preview of a
-          # v1.12.0 release is published as plain 1.12.1.
+          # The Marketplace has no semver prerelease tags and needs a version
+          # distinct from the stable one: v1.12.0 -> 1.12.1000.
           preview=$(node scripts/marketplace-version.cjs "${STABLE_TAG#v}")
           echo "version=$preview" >> "$GITHUB_OUTPUT"
           PREVIEW_VERSION="$preview" STABLE_TAG="$STABLE_TAG" node -e '

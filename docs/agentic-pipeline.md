@@ -53,14 +53,25 @@ graph LR
 | Channel | Version | How a user gets it |
 | --- | --- | --- |
 | Stable | `v1.12.0` (the release tag) | Normal Marketplace install/update |
-| Pre-release | `1.12.1` (tag + 1 patch) | *Switch to Pre-Release Version*, or the `preview` release VSIX |
+| Pre-release | `1.12.1000` (tag + 1000 patches) | *Switch to Pre-Release Version*, or the `preview` release VSIX |
 
 The Marketplace **does not accept semver prerelease tags** (`1.12.1-preview.3`
-is rejected), which is why the preview channel publishes the next patch instead
-of a suffixed version; `scripts/marketplace-version.cjs` derives it from the
-tag. Because the pre-release is numerically higher, pre-release users are never
-silently downgraded when a stable version ships, and they keep getting previews
-until they switch back. Publishing `1.12.0` as stable while `1.12.1` exists as a
+is rejected), which is why the preview channel publishes a plain numeric version
+instead of a suffixed one; `scripts/marketplace-version.cjs` derives it from the
+tag. It also requires pre-release and regular versions to **differ**, so the
+preview lane sits 1000 patches above the tag (`PREVIEW_PATCH_OFFSET`): the
+preview of `v1.12.0` is `1.12.1000` and the preview of `v1.12.1` is
+`1.12.1001`.
+
+Publishing "tag + 1 patch" would be wrong: the preview of `v1.12.0` (`1.12.1`)
+and the stable build of the next fix release (`1.12.1`) would be the same
+number, and `vsce publish --skip-duplicate` compares version and target — not
+channel — so the validated stable artifact would be skipped as a duplicate. The
+offset keeps the lanes disjoint and monotonic (`1.12.1001 < 1.13.1000`), the
+same shape as the Marketplace's own even/odd-minor recommendation. Because the
+pre-release is numerically higher, pre-release users are never silently
+downgraded when a stable version ships, and they keep getting previews until
+they switch back. Publishing `1.12.0` as stable while `1.12.1000` exists as a
 pre-release is explicitly allowed by the Marketplace.
 
 ## Dependency updates & supply chain
@@ -186,8 +197,12 @@ your approval. If you later want low-risk churn removed, set
      to promote an older one.
   3. Approve the pending `marketplace` deployment review. That approval is the
      "validated" signal; the VSIX published is the one `main` built.
-  The stable version is the release tag (`1.12.0`), not the pre-release
-  version (`1.12.1`), which is what keeps pre-release users on pre-releases.
+  The release is resolved and pinned *before* the approval gate (the `resolve`
+  job has no environment), so the deployment shows the exact tag it will
+  publish: a release published while the approval is pending can never be
+  promoted by mistake.
+  The stable version is the release tag (`1.12.0`), not the pre-release version
+  (`1.12.1000`), which is what keeps pre-release users on pre-releases.
 
 ## Editing agentic workflows
 
