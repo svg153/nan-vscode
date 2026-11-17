@@ -123,7 +123,7 @@ The marker `AUTONOMOUS-DECISION` is used for decisions made during implementatio
 
 Details:
 
-- The status wins for 401/403 and 402, because a key that cannot authenticate or a billing refusal is never a throttle or a model problem. Everywhere else `error.type` / `error.code` / `error.param` from the JSON body takes precedence over the bare status, so a 429 whose code says `insufficient_quota` points at **Show Usage** instead of a wait.
+- The status wins for 401/403 and 402, because a key that cannot authenticate or a billing refusal is never a throttle or a model problem. Everywhere else `error.code` / `error.type` / `error.param` from the JSON body takes precedence over the bare status, and a specific `code` wins over a broader `type`, so a 429 whose body pairs `type: rate_limit_exceeded` with `code: insufficient_quota` points at **Show Usage** instead of a wait.
 - `httpError` attaches the typed `ProviderError` (code + retryability) and accepts the parsed `Retry-After` value. `parseRetryAfter` now lives in the taxonomy module and is re-exported from `src/usageApi.ts`.
 - Timeouts are never reported as cancellations. Issue #113 can throw `ProviderTimeoutError` from the connect or stream-idle timers; `toProviderError` turns it into the timeout message, and the mapper also recognizes `name === "TimeoutError"` and `code === "timeout"` so the hook stays usable before #113 lands.
 - Every message that includes upstream text goes through `sanitizeErrorBody`, which keeps only structural `type`/`code`/`param` fields, redacts `sk-...` and `Bearer ...` tokens, bounds each field and the summary, and drops free-form messages. Request headers, the API key, and the full endpoint URL are never interpolated.
