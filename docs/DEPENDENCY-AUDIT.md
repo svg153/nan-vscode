@@ -23,7 +23,7 @@ The current lockfile audit reports one critical and four high vulnerable package
 |---|---|---|---|---|
 | `@azure/identity` | High | `@vscode/vsce@4.0.0` → `@azure/identity@4.13.3` → `@azure/msal-node@6.0.1` | Development packaging only | `@azure/identity@4.14.1` depends on `@azure/msal-node ^7.1.0`; defer this lockfile update because fetching package tarballs is blocked in this environment. |
 | `@azure/msal-node` | High | `@vscode/vsce@4.0.0` → `@azure/identity@4.13.3` → `@azure/msal-node@6.0.1` | Development packaging only | Update to `>=7.1.0` through a compatible `@azure/identity` release; defer for the same package-fetch restriction. Advisory: [GHSA-xcx6-jx8p-x3h5](https://github.com/advisories/GHSA-xcx6-jx8p-x3h5). |
-| `brace-expansion` | High | `@semantic-release/npm@13.2.0` → `npm@11.20.0` → `brace-expansion@5.0.9` | Release tooling only | **Resolved 2026-11-17 (#146).** The copy is bundled inside the `npm` tarball, so it cannot be patched with a `brace-expansion` override; the `npm` override now pins `^11.21.2`, whose bundle ships `brace-expansion@5.0.12`. |
+| `brace-expansion` | High | `@semantic-release/npm@13.2.0` → `npm@11.21.2` → `brace-expansion@5.0.12` | Release tooling only | **Resolved 2026-11-17 (#146, #153).** The copy is bundled inside the `npm` tarball, so it cannot be patched with a `brace-expansion` override; the `overrides.npm` pin to `^11.21.2` ships `brace-expansion@5.0.12`. |
 | `handlebars` | Critical | `semantic-release@25.0.9` → `@semantic-release/commit-analyzer@13.0.1` → `conventional-changelog-writer@8.4.0` → `handlebars@4.7.9` | Release tooling only | Update to `4.7.10` or later; defer the lockfile update because package tarball fetching is blocked. |
 | `undici` | High | `@actions/http-client@4.0.1` → `undici@6.28.1`; nested npm copy `6.28.0`; root copy `7.29.1` | Release tooling only | Update v6 copies to `>=6.29.1` and v7 copies to `>=7.30.1`; defer the lockfile update because package tarball fetching is blocked. |
 
@@ -33,6 +33,6 @@ The current lockfile audit reports one critical and four high vulnerable package
 
 | Date | Package | Change | Verification |
 |---|---|---|---|
-| 2026-11-17 | `brace-expansion` | `overrides.npm` set to `^11.21.2`; lockfile regenerated so the bundled copy moves from `5.0.9` to `5.0.12` (Closes #146) | `npm ls brace-expansion --all` reports `5.0.12` for every instance; `npm audit --package-lock-only` no longer lists `brace-expansion` |
+| 2026-11-17 | `brace-expansion` | `overrides.npm` set to `^11.21.2`; lockfile regenerated so the bundled copy moves from `5.0.9` to `5.0.12` (#146, #153) | `npm ls brace-expansion --all` reports `5.0.12` for both instances; `npm audit --package-lock-only` no longer lists `brace-expansion` |
 
 Packages nested inside a released tarball (`inBundle: true` in `package-lock.json`, as all of npm's own dependencies are) cannot be redirected by an `overrides` entry for that package: the file ships inside the dependency's tarball. Bumping the bundling package is the only lever, so the override is applied to `npm` rather than to `brace-expansion`.
