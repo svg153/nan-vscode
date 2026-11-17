@@ -7,7 +7,16 @@ import {
   isImagePart,
   RequestTimeoutError,
 } from "../src/openai/request";
-import { httpError } from "../src/providerErrors";
+import { ProviderError, ProviderTimeoutError, httpError } from "../src/providerErrors";
+import {
+  DEFAULT_MAX_RETRIES,
+  MAX_RETRIES_LIMIT,
+  MAX_RETRY_DELAY_MS,
+  preStreamRetryError,
+  resolveMaxRetries,
+  retryDelayMs,
+  waitForRetry,
+} from "../src/retry";
 
 const noMapping = new Map<string, string>();
 
@@ -235,4 +244,116 @@ test("detects image parts only for image mime types backed by bytes", () => {
   assert.equal(isImagePart({ mimeType: "text/plain", data: new Uint8Array([0]) }), false);
   assert.equal(isImagePart({ mimeType: "image/png", data: "not-bytes" }), false);
   assert.equal(isImagePart(null), false);
+});
+
+test("maxRetries defaults to 2 and ignores values that would retry forever", () => {
+  assert.equal(DEFAULT_MAX_RETRIES, 2);
+  assert.equal(resolveMaxRetries(undefined), 2);
+  assert.equal(resolveMaxRetries("3"), 2);
+  assert.equal(resolveMaxRetries(Number.NaN), 2);
+  assert.equal(resolveMaxRetries(Number.POSITIVE_INFINITY), 2);
+  assert.equal(resolveMaxRetries(0), 0);
+  assert.equal(resolveMaxRetries(1.9), 1);
+  assert.equal(resolveMaxRetries(-4), 0);
+  assert.equal(resolveMaxRetries(99), MAX_RETRIES_LIMIT);
+});
+
+test("only pre-stream transient failures qualify for a retry", () => {
+  const throttle = preStreamRetryError(httpError(429, "Too Many Requests", "", 1));
+  assert.ok(throttle instanceof ProviderError);
+  assert.equal(throttle.code, "rate_limit_exceeded");
+  assert.equal(throttle.retryAfterSeconds, 1);
+
+  for (const status of [502, 503]) {
+    const gateway = preStreamRetryError(httpError(status, "Gateway", ""));
+    assert.ok(gateway instanceof ProviderError, `HTTP ${status} is transient`);
+    assert.equal(gateway.code, "gateway_error");
+  }
+  // 504 is reported as the timeout it is, and is equally worth retrying.
+  const gatewayTimeout = preStreamRetryError(httpError(504, "Gateway Timeout", ""));
+  assert.ok(gatewayTimeout instanceof ProviderError);
+  assert.equal(gatewayTimeout.code, "timeout");
+
+  const connect = preStreamRetryError(new RequestTimeoutError("connect", 20));
+  assert.ok(connect instanceof ProviderError);
+  assert.equal(connect.code, "timeout");
+
+  const network = preStreamRetryError(new TypeError("fetch failed"));
+  assert.ok(network instanceof ProviderError);
+  assert.equal(network.code, "network");
+
+  // A 429 that means "credits are spent" is a billing answer, not a throttle:
+  // retrying it only burns turns and hides the real cause.
+  assert.equal(
+    preStreamRetryError(httpError(429, "Too Many Requests", '{"error":{"code":"insufficient_quota"}}')),
+    undefined,
+  );
+  assert.equal(preStreamRetryError(httpError(402, "Payment Required", "")), undefined);
+  for (const status of [400, 401, 403, 404, 413, 422]) {
+    assert.equal(preStreamRetryError(httpError(status, "Error", "")), undefined, `HTTP ${status} is final`);
+  }
+
+  // The stream already started: replaying it would duplicate a partially seen turn.
+  assert.equal(preStreamRetryError(new RequestTimeoutError("stream-idle", 120)), undefined);
+  assert.equal(preStreamRetryError(new ProviderTimeoutError("stream")), undefined);
+  assert.equal(preStreamRetryError(new Error("boom")), undefined);
+});
+
+test("a retry waits for the gateway Retry-After, capped, before any backoff", () => {
+  assert.equal(retryDelayMs({ attempt: 1, retryAfterSeconds: 1 }), 1_000);
+  assert.equal(retryDelayMs({ attempt: 1, retryAfterSeconds: 0 }), 0);
+  assert.equal(retryDelayMs({ attempt: 1, retryAfterSeconds: 1.4 }), 1_400);
+  assert.equal(retryDelayMs({ attempt: 1, retryAfterSeconds: 3_600 }), MAX_RETRY_DELAY_MS);
+  assert.equal(retryDelayMs({ attempt: 1, retryAfterSeconds: Number.NaN, random: () => 0 }), 250);
+});
+
+test("backoff doubles per retry, stays inside half-to-full jitter, and is capped", () => {
+  const ceiling = (attempt: number): number => retryDelayMs({ attempt, random: () => 1 });
+  assert.equal(ceiling(1), 500);
+  assert.equal(ceiling(2), 1_000);
+  assert.equal(ceiling(3), 2_000);
+  assert.equal(ceiling(5), MAX_RETRY_DELAY_MS);
+  assert.equal(ceiling(20), MAX_RETRY_DELAY_MS);
+
+  for (const attempt of [1, 2, 3, 4, 5, 20]) {
+    const floorDelay = retryDelayMs({ attempt, random: () => 0 });
+    const ceilDelay = retryDelayMs({ attempt, random: () => 1 });
+    assert.equal(floorDelay, Math.round(ceilDelay / 2));
+    assert.ok(floorDelay <= ceilDelay);
+    assert.ok(ceilDelay <= MAX_RETRY_DELAY_MS);
+  }
+  // A jitter source outside [0, 1) must not escape the window either.
+  assert.equal(retryDelayMs({ attempt: 1, random: () => 5 }), 500);
+  assert.equal(retryDelayMs({ attempt: 1, random: () => -5 }), 250);
+});
+
+test("a retry wait resolves on its timer and rejects as soon as the turn is cancelled", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+
+  const resolved = waitForRetry(400, new AbortController().signal);
+  t.mock.timers.tick(400);
+  await resolved;
+
+  const controller = new AbortController();
+  const pending = waitForRetry(8_000, controller.signal);
+  let settled: "resolved" | "rejected" | undefined;
+  pending.then(
+    () => {
+      settled = "resolved";
+    },
+    () => {
+      settled = "rejected";
+    },
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(settled, undefined);
+
+  controller.abort(new Error("The user cancelled the request."));
+  await assert.rejects(pending, /cancelled/);
+  // The timer was cleared, so a cancelled wait cannot fire a late retry.
+  t.mock.timers.tick(8_000);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(settled, "rejected");
+
+  await assert.rejects(waitForRetry(1_000, AbortSignal.abort()), { name: "AbortError" });
 });

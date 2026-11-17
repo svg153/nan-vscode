@@ -13,7 +13,7 @@ import {
   type ModelMetadata,
 } from "./modelCatalog";
 import { historyConversationKey, trimHistoryToBudget } from "./openai/historyTrim";
-import { convertMessages, convertTools } from "./openai/request";
+import { convertMessages, convertTools, RequestTimeoutError } from "./openai/request";
 import { countContentTokens, estimateTokens } from "./openai/tokens";
 import { credentialId, type SlotLease, type SlotQueueRegistry } from "./openai/slotQueue";
 import { OpenAIStreamDecoder, StreamLimitError, type StreamEvent } from "./openai/stream";
@@ -26,6 +26,14 @@ import {
 } from "./openai/timeouts";
 import type { OpenAIUsage } from "./openai/types";
 import { httpError, parseRetryAfter, sanitizeErrorBody, toProviderError } from "./providerErrors";
+import {
+  DEFAULT_MAX_RETRIES,
+  preStreamRetryError,
+  resolveMaxRetries,
+  RETRY_SETTING,
+  retryDelayMs,
+  waitForRetry,
+} from "./retry";
 import { sanitizeUpstreamText } from "./text";
 import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
 import type { UsageTracker } from "./usageTracker";
@@ -323,16 +331,15 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     startedAt: number,
   ): Promise<void> {
     let timeoutController: ChatTimeoutController | undefined;
+    let attempt: AttemptSignal | undefined;
     const cancellation = cancellationSignal(token, () => timeoutController?.settle());
-    timeoutController = new ChatTimeoutController(this.chatTimeouts(), (reason) => cancellation.abort(reason));
-    if (token.isCancellationRequested) {
-      timeoutController.settle();
-    }
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     let slot: SlotLease | undefined;
     let chunkCount = 0;
     try {
-      const sent = await this.sendChatRequest(apiKey, requestBody, cancellation.signal, timeoutController);
+      const sent = await this.sendChatWithRetries(model, requestBody, apiKey, token, cancellation.signal);
+      timeoutController = sent.timeoutController;
+      attempt = sent.attempt;
       slot = sent.slot;
       if (slot.waited) {
         diagnostic("chat.slot.queued", { modelId: model.id, waitedMs: Date.now() - startedAt });
@@ -372,12 +379,12 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
         if (done) {
           break;
         }
-        timeoutController.touch();
+        timeoutController?.touch();
         chunkCount += 1;
         reportStreamEvents(streamDecoder.push(textDecoder.decode(value, { stream: true })));
       }
 
-      timeoutController.settle();
+      timeoutController?.settle();
       if (!token.isCancellationRequested) {
         reportStreamEvents(streamDecoder.push(textDecoder.decode()));
         reportStreamEvents(streamDecoder.finish());
@@ -398,7 +405,11 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
         }
       }
     } catch (error) {
-      const timeoutError = timeoutController.timeoutError;
+      // A connect timeout now ends the retry loop by throwing the timer error
+      // itself, so it is still reported as a timeout, not as a generic failure.
+      const timeoutError =
+        timeoutController?.timeoutError ??
+        (error instanceof RequestTimeoutError ? error : undefined);
       if ((error instanceof StreamLimitError || timeoutError) && reader) {
         try {
           await reader.cancel(timeoutError ?? error);
@@ -431,12 +442,13 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       // The slot covers the stream body too, so it is freed only once the
       // reader is done or cancelled, never on headers alone.
       slot?.release();
-      timeoutController.settle();
+      timeoutController?.settle();
+      attempt?.dispose();
       reader?.releaseLock();
       cancellation.dispose();
       diagnostic("chat.finally", {
         modelId: model.id,
-        timedOut: Boolean(timeoutController.timeoutError),
+        timedOut: Boolean(timeoutController?.timeoutError),
         cancelled: token.isCancellationRequested,
       });
     }
@@ -806,6 +818,70 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     return body.data ?? [];
   }
 
+  /**
+   * Sends one chat request, retrying transient failures that happen before the
+   * response body is handed out (#151): a throttle 429 with `Retry-After`,
+   * 5xx gateway errors, connect timeouts, and network errors. Nothing is
+   * retried once streaming has started.
+   *
+   * Retries stay on the same key and are counted per profile attempt, so the
+   * retry budget is what runs out before the opt-in failover (#144) may hop.
+   */
+  private async sendChatWithRetries(
+    model: vscode.LanguageModelChatInformation,
+    requestBody: Record<string, unknown>,
+    apiKey: string,
+    token: vscode.CancellationToken,
+    cancellation: AbortSignal,
+  ): Promise<{
+    response: Response;
+    slot: SlotLease;
+    timeoutController: ChatTimeoutController;
+    attempt: AttemptSignal;
+  }> {
+    const maxRetries = this.maxRetries();
+    const timeouts = this.chatTimeouts();
+    for (let retry = 0; ; retry += 1) {
+      // Every attempt owns its abort signal and timers: an aborted signal can
+      // never be reused, and a fired connect timer must not poison the next
+      // attempt with a stale timeout error.
+      const attempt = linkedSignal(cancellation);
+      const timeoutController = new ChatTimeoutController(timeouts, (reason) => attempt.abort(reason));
+      if (token.isCancellationRequested) {
+        timeoutController.settle();
+      }
+      try {
+        // oxlint-disable-next-line eslint/no-await-in-loop
+        const sent = await this.sendChatRequest(apiKey, requestBody, attempt.signal, timeoutController);
+        return { ...sent, timeoutController, attempt };
+      } catch (error) {
+        const failure = timeoutController.timeoutError ?? error;
+        timeoutController.settle();
+        attempt.dispose();
+        const retryable = preStreamRetryError(failure);
+        if (retry >= maxRetries || !retryable || token.isCancellationRequested) {
+          throw failure;
+        }
+        const delayMs = retryDelayMs({
+          attempt: retry + 1,
+          retryAfterSeconds: retryable.retryAfterSeconds,
+        });
+        diagnostic("chat.retry", {
+          modelId: model.id,
+          attempt: retry + 1,
+          maxRetries,
+          delayMs,
+          code: retryable.code,
+        });
+        // The failed send already released its slot, so a backoff holds no
+        // per-key capacity: another request can use the key while this one
+        // waits, and cancellation rejects the wait instead of taking a slot.
+        // oxlint-disable-next-line eslint/no-await-in-loop
+        await waitForRetry(delayMs, cancellation);
+      }
+    }
+  }
+
   private async sendChatRequest(
     apiKey: string,
     body: Record<string, unknown>,
@@ -891,6 +967,13 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
         DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS,
       ),
     };
+  }
+
+  /** `nanBuilders.maxRetries`, where `0` restores the pre-#151 behavior. */
+  private maxRetries(): number {
+    return resolveMaxRetries(
+      vscode.workspace.getConfiguration("nanBuilders").get<number>(RETRY_SETTING, DEFAULT_MAX_RETRIES),
+    );
   }
 
   private apiBaseUrl(): string {
@@ -982,6 +1065,12 @@ function providerConfigString(configuration: Record<string, unknown> | undefined
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+interface AttemptSignal {
+  readonly signal: AbortSignal;
+  readonly abort: (reason?: unknown) => void;
+  readonly dispose: () => void;
+}
+
 function cancellationSignal(
   token: vscode.CancellationToken,
   onCancel?: () => void,
@@ -998,6 +1087,27 @@ function cancellationSignal(
     controller.abort();
   });
   return { signal: controller.signal, abort, dispose: () => listener.dispose() };
+}
+
+/**
+ * A per-attempt abort signal that follows the request-wide cancellation but can
+ * also be aborted on its own by that attempt's connect timer. Aborting the
+ * attempt never aborts the request, which is what lets the next retry run.
+ */
+function linkedSignal(parent: AbortSignal): AttemptSignal {
+  const controller = new AbortController();
+  const abort = (reason?: unknown): void => controller.abort(reason);
+  if (parent.aborted) {
+    abort(parent.reason);
+    return { signal: controller.signal, abort, dispose: () => {} };
+  }
+  const forward = (): void => abort(parent.reason);
+  parent.addEventListener("abort", forward, { once: true });
+  return {
+    signal: controller.signal,
+    abort,
+    dispose: () => parent.removeEventListener("abort", forward),
+  };
 }
 
 async function readChatErrorText(response: Response): Promise<string> {
