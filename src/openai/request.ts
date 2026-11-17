@@ -1,6 +1,13 @@
 import { buildToolNameMappings, sanitizeSchema, sanitizeToolName } from "./tooling";
 import type { OpenAIContentPart, OpenAIMessage, OpenAIToolDefinition } from "./types";
-import { isImagePart, isTextPart, isToolCallPart, isToolResultPart, safeStringify } from "./tokens";
+import {
+  flattenToolResult,
+  isImagePart,
+  isTextPart,
+  isToolCallPart,
+  isToolResultPart,
+  safeStringify,
+} from "./tokens";
 import { sanitizeUpstreamText } from "../text";
 
 export { estimateTokens, isImagePart } from "./tokens";
@@ -187,18 +194,4 @@ function contentValue(parts: OpenAIContentPart[]): string | OpenAIContentPart[] 
     return parts.map((part) => (part.type === "text" ? part.text : "")).join("");
   }
   return parts;
-}
-
-function flattenToolResult(content: readonly unknown[]): string {
-  const pieces: string[] = [];
-  for (const part of content) {
-    if (typeof part === "string") {
-      pieces.push(part);
-    } else if (isTextPart(part)) {
-      pieces.push(part.value);
-    } else {
-      pieces.push(safeStringify(part));
-    }
-  }
-  return pieces.join("");
 }

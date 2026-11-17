@@ -7,7 +7,9 @@
  * provider-side estimators use. Every part that carries image data costs a
  * flat 1024 tokens, matching the competitor's per-image value; OpenAI documents
  * `76 + area / 512` for gpt-4o, but that needs decoded dimensions, and a flat
- * per-image cost is predictable without them.
+ * per-image cost is predictable without them. Tool results are the exception:
+ * the request builder sends them as one flattened string, so they are counted
+ * from `flattenToolResult` to match the payload upstream.
  */
 export const CHARS_PER_TOKEN = 4;
 
@@ -58,7 +60,10 @@ function countPartTokens(part: unknown): number {
     return estimateTokens(`${part.name}${safeStringify(part.input)}`);
   }
   if (isToolResultPart(part)) {
-    return countContentTokens(part.content);
+    // The request builder sends a tool result as one flattened string, so the
+    // estimate charges for that string. Counting the parts individually would
+    // charge IMAGE_TOKENS for an image whose bytes are serialized as text.
+    return estimateTokens(flattenToolResult(part.content));
   }
   if (isTextPart(part)) {
     return estimateTokens(part.value);
@@ -79,6 +84,27 @@ export function safeStringify(value: unknown): string {
   } catch {
     return "{}";
   }
+}
+
+/**
+ * Flattens one tool result into the single string the request builder sends as
+ * the `tool` message content. String and text parts pass through; every other
+ * part is JSON-serialized, so an image part contributes its serialized form
+ * rather than image content. Counting reuses this function so the estimate and
+ * the upstream payload always describe the same representation.
+ */
+export function flattenToolResult(content: readonly unknown[]): string {
+  const pieces: string[] = [];
+  for (const part of content) {
+    if (typeof part === "string") {
+      pieces.push(part);
+    } else if (isTextPart(part)) {
+      pieces.push(part.value);
+    } else {
+      pieces.push(safeStringify(part));
+    }
+  }
+  return pieces.join("");
 }
 
 export function isTextPart(value: unknown): value is { value: string } {

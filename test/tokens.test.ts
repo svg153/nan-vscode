@@ -5,7 +5,9 @@ import {
   countContentTokens,
   estimateHistoryTokens,
   estimateTokens,
+  flattenToolResult,
 } from "../src/openai/tokens";
+import { convertMessages } from "../src/openai/request";
 
 const image = (mimeType = "image/png") => ({ mimeType, data: new Uint8Array([1, 2, 3]) });
 
@@ -26,13 +28,16 @@ test("charges a flat per-image cost instead of the encoded byte length", () => {
 });
 
 test("counts a mixed message with text, an image and a tool result holding an image", () => {
+  const toolContent = [{ value: "y".repeat(100) }, image("image/webp")];
   const tokens = countContentTokens([
     { value: "x".repeat(400) },
     image(),
-    { callId: "call-1", content: [{ value: "y".repeat(100) }, image("image/webp")] },
+    { callId: "call-1", content: toolContent },
   ]);
 
-  assert.equal(tokens, 100 + IMAGE_TOKENS + (25 + IMAGE_TOKENS));
+  // The tool result is charged as the flattened string sent upstream, not as
+  // "text plus one flat image", so its serialized image bytes are counted.
+  assert.equal(tokens, 100 + IMAGE_TOKENS + estimateTokens(flattenToolResult(toolContent)));
 });
 
 test("counts tool-call names and their serialized arguments", () => {
@@ -53,14 +58,48 @@ test("counts deeply nested tool-call arguments", () => {
 
 test("counts nested tool calls and images inside tool results", () => {
   const nestedCall = { callId: "call-2", name: "t", input: { a: 1 } };
+  const toolContent = [{ value: "done" }, image(), nestedCall];
   const tokens = countContentTokens([
     {
       callId: "call-1",
-      content: [{ value: "done" }, image(), nestedCall],
+      content: toolContent,
     },
   ]);
 
-  assert.equal(tokens, 1 + IMAGE_TOKENS + estimateTokens('t{"a":1}'));
+  assert.equal(tokens, estimateTokens(flattenToolResult(toolContent)));
+});
+
+test("counts a tool result exactly as the request builder serializes it", () => {
+  const toolContent = [{ value: "done" }, image("image/png"), { structured: { ok: true } }];
+  const converted = convertMessages(
+    [{ role: "user", content: [{ callId: "call-1", content: toolContent }] }],
+    new Map(),
+  );
+  const sent = converted.find((message) => message.role === "tool");
+
+  assert.ok(sent);
+  assert.equal(typeof sent.content, "string");
+  const sentText = sent.content as string;
+  assert.equal(countContentTokens([{ callId: "call-1", content: toolContent }]), estimateTokens(sentText));
+  assert.notEqual(
+    countContentTokens([{ callId: "call-1", content: toolContent }]),
+    estimateTokens("done") + IMAGE_TOKENS,
+  );
+});
+
+test("charges a tool-result image by its serialized size, not the flat image cost", () => {
+  const bytes = new Uint8Array(8 * 1024).fill(7);
+  const toolContent = [{ mimeType: "image/png", data: bytes }];
+  const converted = convertMessages(
+    [{ role: "user", content: [{ callId: "call-1", content: toolContent }] }],
+    new Map(),
+  );
+  const sent = converted.find((message) => message.role === "tool");
+  assert.ok(sent && typeof sent.content === "string");
+
+  const counted = countContentTokens([{ callId: "call-1", content: toolContent }]);
+  assert.equal(counted, estimateTokens(sent.content as string));
+  assert.ok(counted > IMAGE_TOKENS);
 });
 
 test("keeps the previous fixed allowance for unrecognized parts", () => {
