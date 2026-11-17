@@ -23,10 +23,11 @@ import {
   type ChatTimeouts,
 } from "./openai/timeouts";
 import type { OpenAIUsage } from "./openai/types";
-import { httpError, parseRetryAfter, toProviderError } from "./providerErrors";
+import { httpError, parseRetryAfter, sanitizeErrorBody, toProviderError } from "./providerErrors";
 import { sanitizeUpstreamText } from "./text";
 import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
 import type { UsageTracker } from "./usageTracker";
+import type { DiscoveryFailure } from "./providerDiagnostics";
 import {
   MAX_ERROR_RESPONSE_BYTES,
   MAX_JSON_RESPONSE_BYTES,
@@ -34,6 +35,22 @@ import {
   readBoundedJson,
   readBoundedResponseText,
 } from "./responseBody";
+
+/**
+ * Model-discovery failure raised at the HTTP boundary. The response body is
+ * sanitized and bounded here, so downstream formatters only ever see
+ * structural identifiers plus the status.
+ */
+export class ModelDiscoveryError extends Error implements DiscoveryFailure {
+  constructor(
+    message: string,
+    readonly status?: number,
+    readonly detail?: string,
+  ) {
+    super(message);
+    this.name = "ModelDiscoveryError";
+  }
+}
 
 interface ModelListResponse {
   data?: DiscoveredModel[];
@@ -50,6 +67,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
 
   private cache: CachedModels | undefined;
   private nativeBaseUrl: string | undefined;
+  private lastDiscoveryError: DiscoveryFailure | undefined;
 
   constructor(
     private readonly context: Pick<vscode.ExtensionContext, "secrets">,
@@ -106,11 +124,13 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     let discoveryFailed = false;
     try {
       models = await this.fetchModelIds(apiKey, token);
+      this.lastDiscoveryError = undefined;
     } catch (error) {
       if (isAbortError(error)) {
         return [];
       }
       discoveryFailed = true;
+      this.lastDiscoveryError = toDiscoveryFailure(error);
       diagnostic("models.fetch.failed", {
         errorName: error instanceof Error ? error.name : typeof error,
         message: error instanceof Error ? error.message.slice(0, 200) : typeof error,
@@ -329,17 +349,45 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   }
 
   async validateConfiguredKey(): Promise<number> {
+    return (await this.probeConfiguredKey()).length;
+  }
+
+  /**
+   * Silent model discovery for "Test Connection": reads the stored key
+   * directly (never prompting for one) and returns the IDs it can reach.
+   * Discovery is the only request sent - no chat completion is made.
+   */
+  async probeConfiguredKey(): Promise<string[]> {
     const apiKey = await this.context.secrets.get(SECRET_API_KEY);
     if (!apiKey) {
-      throw new Error("No NaN Builders API key is configured.");
+      throw new Error("No NaN Builders API key is configured. Run 'NaN Builders: Manage Provider'.");
     }
     const source = new vscode.CancellationTokenSource();
     try {
-      const ids = await this.fetchModelIds(apiKey, source.token);
-      return ids.length;
+      const models = await this.fetchModelIds(apiKey, source.token);
+      this.lastDiscoveryError = undefined;
+      return models.map((model) => model.id);
+    } catch (error) {
+      this.lastDiscoveryError = toDiscoveryFailure(error);
+      throw error;
     } finally {
       source.dispose();
     }
+  }
+
+  /** Endpoint used for discovery, chat, and usage; native provider configuration wins. */
+  getBaseUrl(): string {
+    return this.apiBaseUrl();
+  }
+
+  /** Model IDs tracked locally: the warm discovery cache, else the curated catalog. */
+  trackedModelIds(): string[] {
+    return this.cache?.models.map((model) => model.id) ?? knownChatModelIds();
+  }
+
+  /** Last model-discovery failure; already stripped of response bodies. */
+  discoveryError(): DiscoveryFailure | undefined {
+    return this.lastDiscoveryError;
   }
 
   refresh(): void {
@@ -389,12 +437,18 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       });
       diagnostic("models.fetch.response", { status: response.status, elapsedMs: Date.now() - startedAt });
       if (!response.ok) {
-        await response.body?.cancel();
+        const detail = await readDiscoveryFailureDetail(response);
         if (response.status === 401 || response.status === 403) {
-          throw new Error("NaN Builders rejected the API key. Update it with 'NaN Builders: Manage Provider'.");
+          throw new ModelDiscoveryError(
+            `NaN Builders rejected the API key (HTTP ${response.status}). Update it with 'NaN Builders: Manage Provider'.`,
+            response.status,
+            detail,
+          );
         }
-        throw new Error(
+        throw new ModelDiscoveryError(
           `Unable to discover NaN Builders models: HTTP ${response.status} ${sanitizeUpstreamText(response.statusText, 200)}`,
+          response.status,
+          detail,
         );
       }
       body = (await readBoundedJson(response, MAX_JSON_RESPONSE_BYTES)) as ModelListResponse;
@@ -600,6 +654,24 @@ async function readChatErrorText(response: Response): Promise<string> {
     }
     throw error;
   }
+}
+
+/**
+ * Reads a bounded discovery failure body and reduces it to safe structural
+ * identifiers. Nothing from the body leaves this function unsanitized, and an
+ * unreadable or oversized body still leaves the HTTP status intact.
+ */
+async function readDiscoveryFailureDetail(response: Response): Promise<string | undefined> {
+  try {
+    const body = await readBoundedResponseText(response, MAX_ERROR_RESPONSE_BYTES);
+    return sanitizeErrorBody(body) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function toDiscoveryFailure(error: unknown): DiscoveryFailure {
+  return error instanceof ModelDiscoveryError ? error : {};
 }
 
 function isAbortError(error: unknown): boolean {
