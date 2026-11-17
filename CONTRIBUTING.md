@@ -20,7 +20,7 @@ npm run package
 
 For interactive extension work, open the repository in VS Code and press `F5` to launch an Extension Development Host.
 
-CI publishes a lockfile-based dependency audit report with package, severity, dependency type, and installed path. Existing advisories are non-blocking while maintainers triage the baseline; see [`docs/DEPENDENCY-AUDIT.md`](docs/DEPENDENCY-AUDIT.md) before proposing a blocking policy.
+CI publishes a lockfile-based dependency audit report with package, severity, dependency type, and installed path. Existing advisories are non-blocking while maintainers triage the baseline; see [`docs/DEPENDENCY-AUDIT.md`](docs/DEPENDENCY-AUDIT.md). Separately, the Dependency review workflow blocks PRs that **introduce new** vulnerable versions, and dependency updates themselves arrive through Renovate with supply-chain cooldowns (3/7/14 days by semver bump) plus npm's `min-release-age` guard on lockfile regeneration — see [`docs/agentic-pipeline.md`](docs/agentic-pipeline.md#dependency-updates--supply-chain).
 
 Create a branch named `codex/<short-topic>` and keep commits small. Commit messages and PR titles must follow [Conventional Commits](https://www.conventionalcommits.org/); Husky validates local commits and CI validates the complete PR.
 
@@ -40,12 +40,17 @@ Releases are automated by Semantic Release from `main`. The generated [`CHANGELO
 
 ### Marketplace publishing
 
-The release workflow attaches the versioned VSIX to the GitHub Release first, then passes that same VSIX to a separate Marketplace publishing job for `svg153.nan-builders-vscode`. The publishing job is bound to the `marketplace` GitHub Environment and runs only when the repository variable `MARKETPLACE_PUBLISH_ENABLED` is exactly `true`.
+Marketplace publication is never automatic. Every merge to `main` produces two artifacts:
 
-- Before enabling `MARKETPLACE_PUBLISH_ENABLED`, a repository administrator must create the `marketplace` environment, add required reviewers, restrict deployments to `main`, and disable administrator bypass where repository policy allows. The workflow reference alone does not configure or enforce those environment rules; until the environment is protected and the variable is enabled, Marketplace publishing is skipped while the GitHub Release still keeps the VSIX.
+- a rolling **preview VSIX** attached to the `preview` prerelease (version stamped `<x.y.z>-preview.<run>.<attempt>`), and
+- when Semantic Release bumps a version, a stable GitHub Release carrying the versioned VSIX asset.
+
+After validating the preview (Install from VSIX in a disposable profile, see below), the maintainer promotes a stable release manually: **Actions → Publish stable to Marketplace → Run workflow** with the release tag (e.g. `v1.6.0`). The job is bound to the `marketplace` GitHub Environment; configure required reviewers there so publishing also needs an explicit approval click. The repository variable `MARKETPLACE_PUBLISH_ENABLED` and the old automatic publishing job were removed; delete the variable if it still exists.
+
+- A repository administrator must create the `marketplace` environment, add required reviewers, and disable administrator bypass where repository policy allows. The workflow reference alone does not configure or enforce those environment rules.
 - Store `VSCE_PAT` as an environment secret on `marketplace`, not as a repository secret. Remove any repository-level `VSCE_PAT`. The publisher job receives it only in the final publish step; the release/build job and CI jobs do not receive it. The token must be an Azure DevOps personal access token with the **Marketplace: Manage** scope for the `svg153` publisher (`vsce verify-pat svg153` runs first). The value is masked in logs and must never be committed or printed.
-- The release job gets only `contents: write` for Semantic Release; the publisher job gets `contents: read` and `actions: read` to check out the package manifest and download the VSIX artifact. The VSIX transfer artifact expires after seven days; the GitHub Release asset remains available for recovery.
-- If `VSCE_PAT` is missing or rejected, the Marketplace job fails with an explicit error and the GitHub Release VSIX remains available for recovery.
+- Preview releases are never published to the Marketplace, and prerelease versions sort below the matching stable, so installs self-heal on promotion.
+- If `VSCE_PAT` is missing or rejected, the promote job fails with an explicit error and the GitHub Release VSIX remains available for recovery.
 - Microsoft Entra ID workload identity federation (`vsce publish --azure-credential`) is the preferred long-term credential once the publisher is linked to Entra ID; global Azure DevOps PATs are scheduled for retirement on 2026-12-01.
 - The listing is a community publication under `svg153`; keep README and Marketplace wording accurate about ownership and support.
 
@@ -82,6 +87,7 @@ In that window verify activation, **NaN Builders: Manage Provider**, Chat/Agent 
 Project policy and research live in [`docs/`](docs/):
 
 - [`docs/REPOSITORY.md`](docs/REPOSITORY.md): merge policy, ruleset, topics, and labels.
+- [`docs/agentic-pipeline.md`](docs/agentic-pipeline.md): automated discovery → Copilot PR → preview → promote pipeline.
 - [`docs/VALIDATION.md`](docs/VALIDATION.md): local validation checklist.
 - [`docs/PROVIDER-RESEARCH.md`](docs/PROVIDER-RESEARCH.md): provider and VS Code API research.
 - [`docs/DECISIONS.md`](docs/DECISIONS.md): implementation decisions.

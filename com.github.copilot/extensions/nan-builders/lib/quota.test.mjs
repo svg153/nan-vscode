@@ -1,36 +1,235 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  CREDITS_UNAVAILABLE_NOTE,
   compactTokens,
-  monthlyQuotaProgress,
-  nonMonthlyQuotaNote,
+  composeUsage,
+  creditProgress,
+  creditsNote,
+  creditsView,
+  formatCredits,
+  percentOf,
   quotaCapLabel,
+  sumCredits,
+  unmeteredNote,
+  windowCredits,
 } from "./quota.mjs";
 
-test("monthlyQuotaProgress only covers documented fixed monthly counters", () => {
-  const progress = monthlyQuotaProgress([
-    { model: "qwen3.8-flash", totalTokens: 250_000_000 },
-    { model: "glm5.3", totalTokens: 1_500_000_000 }, // billing period, not monthly
-    { model: "gemma4", totalTokens: 10 }, // no counter
-    { model: "deepseek-v4-flash", totalTokens: 3_000_000_000 },
-    { model: "some-new-model", totalTokens: 999 }, // no published cap
-  ]);
-  assert.deepEqual(progress.map((p) => p.model), ["deepseek-v4-flash", "qwen3.8-flash"]);
-  assert.equal(progress[0].percent, 100);
-  assert.equal(progress[1].percent, 50);
+const ALLOWANCE = 7000;
+const PERIOD = { allowance: ALLOWANCE, used: 1234.5, remaining: 5765.5, periodStart: "2026-11-01", periodEnd: "2026-12-01" };
+
+function report({ byModel = [], credits } = {}) {
+  const rows = byModel.map((entry) => ({
+    promptTokens: 0,
+    completionTokens: 0,
+    apiRequests: 0,
+    totalTokens: 0,
+    ...entry,
+  }));
+  return {
+    startDate: "2026-11-01",
+    endDate: "2026-11-16",
+    truncated: false,
+    credits,
+    totals: {
+      promptTokens: 0,
+      completionTokens: 0,
+      apiRequests: rows.reduce((total, row) => total + row.apiRequests, 0),
+      totalTokens: rows.reduce((total, row) => total + row.totalTokens, 0),
+      byModel: rows,
+    },
+  };
+}
+
+test("creditProgress measures each model against the plan allowance", () => {
+  const progress = creditProgress(
+    [
+      { model: "deepseek-v4-flash", credits: 45.5 },
+      { model: "glm5.3", credits: 120 },
+      { model: "gemma4", credits: 999 }, // unmetered: never a percentage
+      { model: "brand-new-model", credits: 0 }, // nothing billed in the window
+    ],
+    ALLOWANCE,
+  );
+  assert.deepEqual(progress.map((entry) => entry.model), ["glm5.3", "deepseek-v4-flash"]);
+  assert.equal(progress[0].percent, 1.7);
+  assert.equal(progress[0].usedCredits, 120);
+  assert.equal(progress[0].allowance, ALLOWANCE);
+  assert.equal(progress[1].percent, 0.7);
 });
 
-test("percent is rounded to one decimal", () => {
-  const [entry] = monthlyQuotaProgress([{ model: "qwen3.8-flash", totalTokens: 123_456_789 }]);
-  assert.equal(entry.percent, 24.7);
+test("creditProgress never fabricates a percentage without a usable allowance", () => {
+  assert.deepEqual(creditProgress([{ model: "glm5.3", credits: 10 }], undefined), []);
+  assert.deepEqual(creditProgress([{ model: "glm5.3", credits: 10 }], 0), []);
+  assert.deepEqual(creditProgress([{ model: "glm5.3", credits: 10 }], Number.NaN), []);
 });
 
-test("non-monthly quotas produce notes, never percentages", () => {
-  assert.equal(nonMonthlyQuotaNote("glm5.3"), "3.0B tokens per billing period · 400.0M tokens per rolling 4h (not a fixed monthly counter)");
-  assert.equal(nonMonthlyQuotaNote("qwen3.8-flash"), undefined);
-  assert.equal(quotaCapLabel("gemma4"), "No token counter");
-  assert.equal(quotaCapLabel("glm5.3"), "3.0B tokens per billing period · 400.0M tokens per rolling 4h");
-  assert.equal(quotaCapLabel("brand-new-model"), "No published quota limit");
+test("percentOf and credit helpers keep NaN's one-decimal precision", () => {
+  assert.equal(percentOf(1, 3), 33.3);
+  assert.equal(percentOf(5, 0), 0);
+  assert.equal(percentOf(Number.NaN, 10), 0);
+  assert.equal(formatCredits(1234.5), "1234.5");
+  assert.equal(formatCredits(7000), "7000");
+  assert.equal(formatCredits(Number.NaN), "0");
+  assert.equal(sumCredits([0.1, 0.2]), 0.3);
+  assert.equal(sumCredits([1, Number.NaN, 2]), 3);
+});
+
+test("windowCredits sums the billed rows and is undefined when nothing was billed", () => {
+  assert.equal(windowCredits([{ credits: 0.1 }, { credits: 0.2 }, {}]), 0.3);
+  assert.equal(windowCredits([{ credits: 0 }, { credits: undefined }]), undefined);
+});
+
+test("unmetered models carry the published note, never a percentage", () => {
+  for (const model of ["qwen3.6", "gemma4", "qwen3-embedding", "rerank", "kokoro", "whisper", "flux-2-klein", "qwen-image-2.1"]) {
+    assert.equal(unmeteredNote(model), "Does not draw credits", model);
+    assert.equal(quotaCapLabel(model), "Does not draw credits", model);
+  }
+  assert.equal(unmeteredNote("glm5.3"), undefined);
+  assert.equal(quotaCapLabel("glm5.3"), "Paid from plan credits");
+  assert.equal(quotaCapLabel("brand-new-model"), "Billed in credits; no documented allowance");
+  // qwen4-max and hy4-flash are metered from the shared pool, like the other November models.
+  for (const model of ["qwen4-max", "hy4-flash", "kimi-k3.1-pro", "qwen3.8-max", "deepseek-v4-pro", "hy4"]) {
+    assert.equal(unmeteredNote(model), undefined, model);
+    assert.equal(quotaCapLabel(model), "Paid from plan credits", model);
+  }
+  assert.equal(creditsNote("gemma4", 0), "Does not draw credits");
+  assert.equal(creditsNote("gemma4", undefined), "Does not draw credits");
+  assert.equal(creditsNote("glm5.3", 0), "No credits billed in this window");
+  assert.equal(creditsNote("glm5.3", 2.5), undefined);
+  assert.equal(creditsNote("glm5.3", undefined), CREDITS_UNAVAILABLE_NOTE);
+  assert.equal(creditsNote("glm5.3", null), CREDITS_UNAVAILABLE_NOTE);
+  assert.equal(creditsNote("glm5.3", Number.NaN), CREDITS_UNAVAILABLE_NOTE);
+});
+
+test("creditsView ignores a block with no usable field", () => {
+  assert.equal(creditsView({}), null);
+  assert.equal(creditsView({ frozen: false }), null);
+  assert.equal(creditsView({ allowance: "invalid", used: null }), null);
+  assert.equal(creditsView({ frozen: true }).frozen, true);
+});
+
+test("creditsView exposes the period headline from the API credits block", () => {
+  assert.deepEqual(creditsView(PERIOD), {
+    allowance: ALLOWANCE,
+    used: 1234.5,
+    remaining: 5765.5,
+    packCredits: null,
+    packExpiresAt: null,
+    periodStart: "2026-11-01",
+    periodEnd: "2026-12-01",
+    frozen: false,
+    percent: 17.6,
+  });
+  assert.equal(creditsView(undefined), null);
+});
+
+test("creditsView reports the optional credit pack", () => {
+  const view = creditsView({ ...PERIOD, pack_credits: 500, pack_expires_at: "2027-01-01" });
+  assert.equal(view.packCredits, null); // snake_case is normalized by lib/nan.mjs, not here
+  assert.equal(view.packExpiresAt, null);
+  const normalized = creditsView({ ...PERIOD, packCredits: 500, packExpiresAt: "2027-01-01" });
+  assert.equal(normalized.packCredits, 500);
+  assert.equal(normalized.packExpiresAt, "2027-01-01");
+});
+
+test("composeUsage renders the credit headline and every per-model row", () => {
+  const usage = composeUsage(
+    report({
+      credits: PERIOD,
+      byModel: [
+        { model: "glm5.3", totalTokens: 900_000, apiRequests: 12, credits: 120 },
+        { model: "gemma4", totalTokens: 50_000, apiRequests: 3, credits: 0 },
+        { model: "some-new-model", totalTokens: 10, apiRequests: 1, credits: 0 },
+      ],
+    }),
+  );
+  assert.equal(usage.credits.percent, 17.6);
+  assert.equal(usage.windowCredits, 120);
+  assert.equal(usage.items.length, 3);
+
+  const [glm, gemma, unknown] = usage.items;
+  assert.equal(glm.model, "glm5.3");
+  assert.equal(glm.credits, 120);
+  assert.equal(glm.percent, 1.7);
+  assert.equal(glm.note, undefined);
+
+  assert.equal(gemma.percent, null);
+  assert.equal(gemma.note, "Does not draw credits");
+
+  assert.equal(unknown.model, "some-new-model");
+  assert.equal(unknown.percent, null);
+  assert.equal(unknown.note, "No credits billed in this window");
+  assert.equal(unknown.cap, "Billed in credits; no documented allowance");
+});
+
+test("composeUsage renders a model unknown to the local catalog without filtering it", () => {
+  const usage = composeUsage(
+    report({ credits: PERIOD, byModel: [{ model: "future-model-9", totalTokens: 42, credits: 7 }] }),
+  );
+  assert.equal(usage.items.length, 1);
+  assert.equal(usage.items[0].model, "future-model-9");
+  assert.equal(usage.items[0].percent, 0.1);
+  assert.equal(usage.items[0].credits, 7);
+});
+
+test("composeUsage suppresses every percentage while the pool is frozen", () => {
+  const usage = composeUsage(
+    report({
+      credits: { ...PERIOD, frozen: true },
+      byModel: [{ model: "glm5.3", totalTokens: 900_000, credits: 120 }],
+    }),
+  );
+  assert.equal(usage.credits.frozen, true);
+  assert.equal(usage.credits.percent, null);
+  assert.equal(usage.items[0].percent, null);
+  assert.equal(usage.items[0].credits, 120);
+  assert.equal(usage.items[0].note, undefined);
+});
+
+test("composeUsage tolerates a gateway without the credits block", () => {
+  const usage = composeUsage(
+    report({ credits: undefined, byModel: [{ model: "deepseek-v4-flash", totalTokens: 1234, credits: 0 }] }),
+  );
+  assert.equal(usage.credits, null);
+  assert.equal(usage.windowCredits, null);
+  assert.equal(usage.items[0].percent, null);
+  assert.equal(usage.items[0].note, "No credits billed in this window");
+});
+
+test("composeUsage marks a metered row without credit data as unavailable, not zero", () => {
+  const usage = composeUsage(
+    report({ byModel: [{ model: "glm5.3", totalTokens: 5000, apiRequests: 2 }] }),
+  );
+  assert.equal(usage.credits, null);
+  assert.equal(usage.items[0].credits, null);
+  assert.equal(usage.items[0].percent, null);
+  assert.equal(usage.items[0].note, CREDITS_UNAVAILABLE_NOTE);
+  assert.equal(usage.windowCredits, null);
+  assert.equal(usage.windowCreditsPartial, true);
+});
+
+test("composeUsage keeps an explicit zero distinct from unavailable credit data", () => {
+  const usage = composeUsage(
+    report({ byModel: [{ model: "glm5.3", totalTokens: 5000, apiRequests: 2, credits: 0 }] }),
+  );
+  assert.equal(usage.items[0].credits, 0);
+  assert.equal(usage.items[0].note, "No credits billed in this window");
+  assert.equal(usage.windowCreditsPartial, false);
+});
+
+test("composeUsage flags a partially reported window but keeps the known sum", () => {
+  const usage = composeUsage(
+    report({
+      byModel: [
+        { model: "glm5.3", totalTokens: 5000, credits: 4.5 },
+        { model: "deepseek-v4-flash", totalTokens: 3000 },
+        { model: "gemma4", totalTokens: 1000 },
+      ],
+    }),
+  );
+  assert.equal(usage.windowCredits, 4.5);
+  assert.equal(usage.windowCreditsPartial, true);
 });
 
 test("compactTokens picks the largest readable unit", () => {

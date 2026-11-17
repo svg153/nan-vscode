@@ -45,10 +45,32 @@ Expected: the extension is loaded in an isolated Insiders profile, discovers the
 2. Enter an invalid key and confirm validation reports a clear authentication error.
 3. Enter a valid `sk-...` key.
 4. Confirm the key is not written to `settings.json`, `chatLanguageModels.json`, the workspace, or extension logs.
-5. Compare the picker with `GET /v1/models` for the same key. Every known chat ID returned there should be offered: `deepseek-v4-flash`, `deepseek-v4-pro`, `glm5.3-flash`, `qwen3.8-flash`, `qwen3.8-max`, `mimo-v2.6-flash`, `kimi-k3.1-pro`, `hy4`, `gemma4`, `qwen3.6`, and, for keys with access, `glm5.3`. Models absent from `/v1/models` must stay absent from the picker.
+5. Compare the picker with `GET /v1/models` for the same key. Every known chat ID returned there should be offered: `deepseek-v4-flash`, `deepseek-v4-pro`, `glm5.3-flash`, `qwen3.8-flash`, `qwen3.8-max`, `qwen4-max`, `mimo-v2.6-flash`, `kimi-k3.1-pro`, `hy4`, `hy4-flash`, `gemma4`, `qwen3.6`, and, for keys with access, `glm5.3`. Models absent from `/v1/models` must stay absent from the picker.
 6. Confirm known non-chat IDs such as embeddings, rerank, audio, and image generation are not exposed as chat models.
 
-Important: treat `/v1/models` as the definitive API-key-filtered list. A model must not be exposed just because it exists in the local metadata catalog. In particular, the larger models (`glm5.3`, `kimi-k3.1-pro`, `qwen3.8-max`, `deepseek-v4-pro`, `hy4`) should only appear for keys whose `/v1/models` response contains them.
+Important: treat `/v1/models` as the definitive API-key-filtered list. A model must not be exposed just because it exists in the local metadata catalog. In particular, the larger models (`glm5.3`, `kimi-k3.1-pro`, `qwen3.8-max`, `qwen4-max`, `deepseek-v4-pro`, `hy4`) should only appear for keys whose `/v1/models` response contains them.
+
+## API key profiles
+
+1. Run **NaN Builders: Manage Provider** and confirm the profile actions appear
+   only after a first API key exists, and that they never print a key.
+2. Add profiles `work` and `personal`, set a different mock key for each,
+   and set the active profile to `personal`.
+3. Assign `glm5.3` to `work` from the provider management flow and confirm
+   `nanBuilders.reasoningEffortByModel` gains a `work::glm5.3` entry.
+4. Send one message to `glm5.3` and one to another model. The first request
+   must carry the `work` key and the second the `personal` key (check the
+   gateway logs for the key suffix only, never the full key).
+5. Clear the active profile key and confirm the next request fails before any
+   gateway call with a message naming the profile.
+6. Delete `work` and confirm its SecretStorage entry disappears, its
+   `work::model` overrides are removed, and `glm5.3` falls back to the
+   active profile.
+7. **NaN Builders: Show Diagnostics** must list profile IDs and `key: set` /
+   `key: missing` only. No SecretStorage value may appear in diagnostics,
+   `settings.json`, or the extension log.
+8. With no profiles configured, the legacy `nanBuilders.apiKey` keeps working
+   unchanged; no migration prompt appears.
 
 ## Basic streaming chat
 
@@ -98,6 +120,19 @@ Delete the test file afterwards.
 With `deepseek-v4-flash`, attach a simple image and ask for a one-sentence description.
 
 Expected: the request succeeds and the model describes the image. Repeat with `glm5.3` and confirm VS Code does not offer image input for that model.
+
+## Chat request timeouts
+
+Chat requests run two independent timers instead of one overall deadline:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `nanBuilders.connectTimeoutSeconds` | `20` | Deadline for the response headers of a chat request. |
+| `nanBuilders.streamIdleTimeoutSeconds` | `120` | Maximum silence between streamed chunks; the timer restarts on every chunk. |
+
+Expected: a slow stream that keeps emitting chunks is never aborted, regardless of total duration. A gateway that accepts the connection and never sends headers fails after `connectTimeoutSeconds` with a timeout error, and a stream that stays silent for `streamIdleTimeoutSeconds` is aborted, its slot is released, and the error message names the corresponding setting. Canceling the request from Chat still reports cancellation rather than a timeout, and no timer survives the request.
+
+Unit tests use a fake clock to cover re-arming on chunks, firing on silence, firing on missing headers, and clearing both timers on cancellation.
 
 ## Cancellation
 

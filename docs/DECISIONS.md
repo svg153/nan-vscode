@@ -95,3 +95,164 @@ The marker `AUTONOMOUS-DECISION` is used for decisions made during implementatio
 **Question:** Should the first package present itself as an official NaN Builders extension?
 
 **Decision:** No. The code can use the descriptive name `NaN Builders for VS Code`, but documentation states that it is community-maintained unless NaN Builders explicitly adopts or publishes it. Marketplace publisher ownership and official branding need explicit agreement before public release.
+
+## AUTONOMOUS-DECISION: gateway errors map to a shared taxonomy
+
+**Question:** Should each call site format its own error text, or should HTTP statuses and transport failures go through one mapping?
+
+**Options:**
+
+- Keep per-call messages (the 402 hint shipped in `src/openai/request.ts`).
+- Add a pure `ProviderErrorCode` taxonomy that every chat failure goes through.
+
+**Decision:** One pure mapping in `src/providerErrors.ts`, used by the chat request path.
+
+| Signal | Code | Message points at | Retryable |
+| --- | --- | --- | --- |
+| 401 | `invalid_api_key` | Update the key with **NaN Builders: Manage Provider**. | No |
+| 403 | `invalid_api_key` | Update the key, or ask the key owner for model access. | No |
+| 402, or 429 with `insufficient_quota` / `insufficient_balance` | `insufficient_quota` | One credits pool: spent allowance, frozen credits, or no active pack; **Show Usage**. | No |
+| 404, or `model_not_found` / `no_such_model` | `model_not_found` | **NaN Builders: Refresh Models**, or check `nanBuilders.apiBaseUrl`. | No |
+| `context_length_exceeded` / `prompt_too_long` | `context_length_exceeded` | Trim the chat history or start a new chat. | No |
+| 408, 504, `TimeoutError`, `ProviderTimeoutError` | `timeout` | Retry, or check the network if it persists. | Yes |
+| 429 without a quota code | `rate_limit_exceeded` | Wait, citing `Retry-After` seconds when the response carries them. | Yes |
+| 5xx | `gateway_error` | Retry shortly, or try another model. | Yes |
+| `TypeError` from `fetch`, `ENOTFOUND`, `ECONNREFUSED`, `ECONNRESET` | `network` | Check the network and `nanBuilders.apiBaseUrl`. | Yes |
+| Abort without a timeout | `cancelled` | The request was cancelled. | No |
+| Anything else | `unknown` | The existing sanitized body summary, or a generic failure. | No |
+
+Details:
+
+- The status wins for 401/403 and 402, because a key that cannot authenticate or a billing refusal is never a throttle or a model problem. Everywhere else `error.code` / `error.type` / `error.param` from the JSON body takes precedence over the bare status, and a specific `code` wins over a broader `type`, so a 429 whose body pairs `type: rate_limit_exceeded` with `code: insufficient_quota` points at **Show Usage** instead of a wait.
+- `httpError` attaches the typed `ProviderError` (code + retryability) and accepts the parsed `Retry-After` value. `parseRetryAfter` now lives in the taxonomy module and is re-exported from `src/usageApi.ts`.
+- Timeouts are never reported as cancellations. Issue #113 can throw `ProviderTimeoutError` from the connect or stream-idle timers; `toProviderError` turns it into the timeout message, and the mapper also recognizes `name === "TimeoutError"` and `code === "timeout"` so the hook stays usable before #113 lands.
+- Every message that includes upstream text goes through `sanitizeErrorBody`, which keeps only structural `type`/`code`/`param` fields, redacts `sk-...` and `Bearer ...` tokens, bounds each field and the summary, and drops free-form messages. Request headers, the API key, and the full endpoint URL are never interpolated.
+
+**Non-goals:** automatic retries or backoff, message localization, and changes to the streaming protocol.
+
+## AUTONOMOUS-DECISION: agentic workflows stay on Copilot with explicit budget caps
+
+**Question:** Should the two agentic workflows keep running on the Copilot engine with the GitHub-hosted runner, or move to a self-managed model provider, and does a public repository make either free?
+
+**Options:**
+
+- Keep Copilot and add explicit cost caps.
+- Move `feature-scout` to the NaN Builders gateway with `engine: codex` and a NaN API key stored as a repository secret.
+- Keep Copilot where the repository is public and free to run, and route the private copies through the NaN gateway so the spend lands on the NaN account instead of Copilot AI Credits.
+
+**Research:** GitHub's billing documentation separates the two costs. Standard GitHub-hosted runners are free for public repositories and draw from included compute usage (~$0.006/min on Linux) for private ones. Inference is not free for public repositories: Copilot usage is billed in AI Credits (1 AIC = $0.01) against the plan or organization allowance regardless of visibility, and Anthropic/OpenAI/Google usage is billed to that provider's account. Authentication options are `COPILOT_GITHUB_TOKEN` (fine-grained PAT, billed to the PAT owner), `permissions: copilot-requests: write` (uses `${{ github.token }}`, bills to an organization Copilot tenant, needs no secret), and keyless federation (Anthropic WIF, Google WIF, Azure Entra OIDC for Codex). `engine:` accepts `claude`, `codex`, `gemini`, `pi` and `agy`, plus declarative third-party engines through `secret-strategy: universal-llm-consumer`.
+
+**Decision:** Keep Copilot on both workflows and cap the spend in frontmatter.
+
+- `copilot-triage`: `max-ai-credits: 150`, `max-daily-ai-credits: 300`.
+- `feature-scout`: `max-ai-credits: 400`, `max-daily-ai-credits: 400`.
+- Auth stays on the `COPILOT_GITHUB_TOKEN` PAT because `copilot-requests: write` only applies to organization-owned repositories, and `svg153/nan-vscode` is user-owned.
+- The provider swap targets the NaN Builders gateway (`https://api.nan.builders/v1`), the same OpenAI-compatible endpoint the extension uses, so the private deployment can bill NaN credits rather than Copilot AI Credits. It is staged as a commented `engine:` draft (`codex`, `deepseek-v4-flash`, `OPENAI_BASE_URL`, `api.nan.builders`) in `feature-scout.md` and documented in `docs/agentic-pipeline.md#swapping-the-model-provider-draft`.
+- It is deliberately not enabled, for two reasons. `copilot-triage` hands work to the Copilot coding agent through `safe-outputs: assign-to-agent`, which makes Copilot load-bearing there, so only `feature-scout` is a candidate. And the Codex engine speaks the Responses API (`/v1/responses`), which the extension does not exercise today, so the gateway's Responses support has to be verified before the draft can be turned on.
+
+**Follow-up:** Revisit if the repository moves under an organization (which unlocks `copilot-requests: write` and central billing), or if `feature-scout` becomes the dominant AI Credit consumer. The next concrete step for a private deployment is the `/v1/responses` check in `docs/agentic-pipeline.md#swapping-the-model-provider-draft`, then a priced `feature-scout` run from `gh aw logs --json` before switching.
+
+## AUTONOMOUS-DECISION: November model reasoning ladders follow the published bullets
+
+**Question:** Which `reasoningEffortValues` should `qwen4-max` and `hy4-flash` declare, given that NaN's "Controlling reasoning" ladder table does not cover the November additions (`kimi-k3.1-pro`, `qwen3.8-max`, `deepseek-v4-pro`, `hy4`, `qwen4-max`, `hy4-flash`)?
+
+**Options:**
+
+- `[]` for both, treating every model outside the ladder table as model-managed (the `kimi-k3.1-pro` / `deepseek-v4-pro` convention).
+- The full canonical ladder for both, assuming the November models accept `none` through `max`.
+- Per-model: the ladder only where the model's own bullet enumerates the levels, `[]` otherwise.
+
+**Research:** https://nan.builders/docs/models gives each model a reasoning bullet outside the ladder table. `qwen4-max` says `reasoning_effort` accepts `none` to turn reasoning off and `minimal` to `max` to steer depth, and that `max_tokens` bounds reasoning plus answer (up to 131,000). `hy4-flash` says it reasons by default with no default level applied, that `none` turns it off, and that `max_tokens` bounds reasoning plus answer (up to 64,000); it does not enumerate the levels. `hy4`, added in the same wave, already declares `["none","minimal","low","medium","high","max"]`.
+
+**Decision:** Per-model. `qwen4-max` declares `["none","minimal","low","medium","high","xhigh","max"]` because its bullet enumerates `none` plus `minimal`..`max`. `hy4-flash` declares `[]` because no per-level contract is published, matching `kimi-k3.1-pro` and `deepseek-v4-pro`; an empty ladder keeps VS Code's depth control away from an undocumented surface while `defaultReasoningEffortForModel([])` still resolves to `low`, which is inside the documented range.
+
+**Follow-up:** Replace `[]` with the enumerated ladder once NaN publishes the levels for `hy4-flash` or adds the November models to the ladder table, and add a validation step that compares picker depth choices with the published levels.
+
+## PENDING-DECISION: vendor id vs. the nan-builders collision
+
+**Question:** `PROVIDER_VENDOR` is `nan-builders`, and `SrScorpio/nan-bridge` registers the same vendor id (#118), so the two extensions can expose duplicate models. Should the vendor id stay `nan-builders`, be renamed now, or be frozen as a contract?
+
+**Options:**
+
+- (A) Keep `nan-builders` and document the coexistence problem only.
+- (B) Rename to `svg153-nan-builders` now.
+- (C) Keep `nan-builders` and treat the string as an immutable contract, recording the naming/brand-handover implications in the entry with an explicit follow-up for a future handover.
+
+**Research:** The vendor id reaches the API surface in four places: `src/constants.ts` (`PROVIDER_VENDOR`), `src/extension.ts` (`vscode.lm.registerLanguageModelChatProvider`), `package.json` (`contributes.languageModelChatProviders[0].vendor`, a separate literal rather than a derived value) and `test/insidersIntegration.ts` (`selectChatModels({ vendor: "nan-builders" })`). The token is also overloaded inside this repository: the Copilot app plugin at `com.github.copilot/extensions/nan-builders` uses `nan-builders` as its plugin name in a different namespace. Issue #118 reports that VS Code treats `(vendor, model id)` as model identity, which is why a shared vendor can duplicate model entries.
+
+*Assumption (not verifiable in this repository):* VS Code persists model selections and chat-history model references against the provider that produced them, so renaming the vendor id would silently break stored selections. The repository contains no code that reads or migrates that store, so option B would need a migration design before it ships.
+
+**Decision:** Pending maintainer approval (recorded 2026-11-16). Recommendation: option C. It keeps today's stored selections working, treats the collision as a coexistence/documentation problem instead of a data-loss risk, and leaves a rename possible later only through a documented migration. The vendor id is an internal identifier rather than the product name, so a future brand handover or rebrand does not require changing it.
+
+**Follow-up:** If C is approved, open a child issue for (a) a documented rename/migration procedure if coexistence proves unacceptable in practice, (b) the runtime duplicate-provider warning from #118 option (c), and (c) a public note about the shared vendor id once concurrent README edits are safe. Any handover agreement must state whether the vendor id transfers with the extension identity.
+
+## AUTONOMOUS-DECISION: trim history in atomic units, middle-out
+
+**Question:** When a conversation exceeds the model's input budget, what should be dropped before the request is sent, and in what order?
+
+**Options:**
+
+- Drop individual messages or characters until the estimate fits. This is the simplest rule, but an assistant `tool_calls` entry can lose the `tool` results that reference it, and the gateway then rejects the payload with a validation error that is harder to act on than the context-length 400 it was meant to prevent.
+- Drop atomic units from the oldest end. That keeps payloads valid but removes the conversation opening, which is where the user's framing and the first instructions live.
+- Drop atomic units from the middle outward, preserving system framing, the first unit, and the trailing unit (chosen).
+
+**Research:** OpenAI-compatible gateways require every `tool` message to reference a `tool_calls` id declared earlier in the same request, so a trim unit must be an assistant message together with its `tool_calls` and every result that references them. `SrScorpio/nan-bridge` trims with the same atomic rule and preserves the first unit and the current turn. The older turns in the middle of a long agent conversation are the least load-bearing: the opening still anchors the task and the trailing unit is the request being answered.
+
+**Decision:** `src/openai/historyTrim.ts` groups the converted payload into atomic units and discards whole units from the middle outward until the input estimate fits `maxInputTokens`, which `toModelInfo` already derives as `max(1, min(context - maxOutput, 0.9 * context))`. System messages, the first unit (including the first user turn after leading system framing), and the trailing unit are never trim candidates; when those alone exceed the budget the request is still sent, because dropping the current request would be worse than a context error. Trimming is silent when the history already fits: the same array is sent unchanged, which is covered by a no-op regression test. The estimate comes from `countOpenAIMessageTokens` in `src/openai/tokens.ts`, the same module `provideTokenCount` uses, so the trim decision and the host-reported counts cannot drift apart. Each trim writes one `chat.history.trimmed` diagnostic line with unit counts and estimated tokens before/after, never message content, and the user sees at most one warning per conversation, keyed by a hash of the first unit rather than by stored text.
+
+**Follow-up:** Revisit if the gateway rejects a middle trim with a validation error (which would mean the unit boundary needs to include more context than the `tool_calls` pair), or when image counting changes, since a cheaper estimate would delay the trim. Summarizing discarded history stays a non-goal until the trim itself is proven in long agent turns.
+
+## AUTONOMOUS-DECISION: queue requests per API key at the gateway limit
+
+**Question:** The NaN gateway serves 7 concurrent requests per API key across every endpoint, and answers the eighth with HTTP 429. Agent turns fire several tool calls at once and opt-in inline completions add more, so bursts run into the limit. How should the extension stay under it without slowing the ordinary single-request case?
+
+**Options:**
+
+- Let the 429s happen and retry them. This hides the burst instead of preventing it, multiplies load exactly when the gateway is already saturated, and a retry is a second billed attempt the user never asked for.
+- Serialize every request to one at a time. Correct but needlessly slow: it wastes six of the seven slots the plan already pays for.
+- One first-in-first-out queue per API key whose capacity is the gateway limit, shared by chat and inline completions (chosen).
+
+**Research:** The limit is per key, not per model, per endpoint, or per extension, so the correct scope for the queue is the credential. Issue #120 adds multi-key profiles, which means the queue has to be addressable by a credential identifier rather than by a single module-level queue. Node offers no timer-free semaphore, but a FIFO queue of promises takes a slot synchronously when one is free, so the uncontended path never schedules a timer and adds no latency. A queued request must be cancellable: VS Code cancels chat turns and inline completions constantly, and an abandoned waiter that later receives a slot would send a request for work nobody wants and hold the slot until it finished.
+
+**Decision:** `src/openai/slotQueue.ts` holds a `SlotQueue` (FIFO waiters, `capacity` slots, `acquire(signal)` returning an idempotent `SlotLease` whose `waited` flag records queueing) and a `SlotQueueRegistry` that keeps one queue per credential. The registry keys queues by a truncated SHA-256 fingerprint of the API key, so the raw secret is never a map key and #120 can pass its profile id to `forCredential` with no change to the queue. `nanBuilders.maxParallelRequests` (default 7, minimum 1, capped at the documented gateway maximum of 7) is read live on every acquire and release, and `SlotQueueRegistry.refresh()` applies a change to waiters already parked. A signal that aborts while waiting rejects with `SlotQueueCancelledError`, which uses the `AbortError` name so the existing cancellation mapping treats it as a cancel, and the waiter leaves the queue without consuming a slot or sending a fetch. Slots are acquired after endpoint authorization, so the HTTP consent prompt never holds one, and are held until the response is finished: `sendChatRequest` acquires, covers its compatibility fallback re-send with the same lease, releases and rethrows on failure, and returns the lease to `provideLanguageModelChatResponse`, which releases it in its existing `finally` after the stream reader is done or cancelled. Inline completions acquire in `requestInlineCompletion` around the `/completions` fetch and release in `finally`, so HTTP errors, network failures, oversized bodies, and cancellation all free the slot. `src/extension.ts` creates one registry per window and passes it to both providers. There is no automatic 429 retry: a 429 that still arrives propagates through `src/providerErrors.ts` with its `Retry-After` hint.
+
+**Follow-up:** #120 replaces the key fingerprint with the profile id it resolves for each request. If inline completions ever starve interactive chat, add priority to the queue rather than a second queue, so the per-key total still cannot exceed the gateway limit.
+## AUTONOMOUS-DECISION: one key per profile, routed by `profile::model`
+
+**Question:** Several NaN API keys on one machine must serve different models, without a second settings table, without storing keys anywhere but SecretStorage, and without breaking single-key installs. Which profile does a request use, and where does that routing live?
+
+**Options:**
+
+- A new `nanBuilders.modelProfiles` map of model id to profile id. It reads clearly, but it duplicates the store that already answers "what per-model configuration applies", so two tables can disagree about the same model.
+- Encode the profile in the model id offered to VS Code. Routing then happens implicitly, but every assigned model appears twice in the picker and chat history references a synthesized id that survives only until the profile is renamed.
+- One composite key `profile::model` inside the existing `nanBuilders.reasoningEffortByModel` store, whose value is the reasoning effort for that model under that profile (chosen).
+
+**Research:** Model ids from `/v1/models` are opaque but never contain `::`, so a composite key cannot collide with a plain model id, and a store that is a plain object keeps insertion order for stable menus. #112 keys its slot queue by a fingerprint of the API key, which means routing a request with its resolved profile key already yields one queue per key: no change to `src/openai/slotQueue.ts` was needed, and two profiles sharing a key correctly share one queue because the gateway limit is per key. #118 (vendor identity, still pending) shares the failure mode the issue warns about: two installed providers with vendor `nan-builders` can list duplicate models, so profile ownership is documented as per-extension rather than inferred from the vendor.
+
+**Decision:** `src/profiles.ts` is a vscode-free module that owns the whole contract: `nanBuilders.profiles` holds ids only, `nanBuilders.activeProfile` selects the default, keys live under `nanBuilders.profileKey.<profileId>`, and `resolveModelRoute` answers with a profile id plus its provenance (`native`, `assignment`, `active`, `first`, `legacy`). `src/provider.ts` resolves the credential once, at the boundary where the API key was already read, and throws `ProfileKeyMissingError` naming the profile before any request is built; `effortOverride` prefers the composite entry, where `auto` means "routing only". Deleting a profile writes settings first, then clears the secret and its assignments, and `assignedProfileForModel` ignores assignments naming an unconfigured profile, so a stale entry can never resolve a key. With no profiles configured the route is `legacy` and `nanBuilders.apiKey` behaves exactly as before. Diagnostics print ids, routing, and key presence only; `describeRoute` and the `chat.credential`/`inline.credential` events carry the profile id and a boolean, never a value.
+
+**Follow-up:** If a maintainer decision on #118 renames the vendor, profiles keep working unchanged because nothing in this design keys off the vendor string. If automatic failover lands (#119), it must reuse `resolveModelRoute` rather than invent a second precedence order.
+
+## AUTONOMOUS-DECISION: multi-key rotation stays off; fixed routing, opt-in failover only
+
+**Question:** #120 makes several of the user's own NaN keys addressable by profile and #112 gives each key its own slot queue, so the extension could rotate across them. Should it, and with which strategy: `fixed` (today's behaviour), `round-robin`, or `failover-on-429` with a short per-key cooldown? NaN publishes its limits per API key, so rotation is mechanically the way to get more than one key's worth of throughput, which makes this a policy question before it is a code question.
+
+**Options:**
+
+- `fixed` (chosen): the key `resolveModelRoute` resolves is the key that serves the request. A throttled or exhausted key surfaces its own error, and moving to another key stays a manual act: switch the active profile, or assign the model to another profile.
+- `round-robin`: spread requests across every configured key so aggregate throughput approaches the sum of the per-key limits. Billing becomes unpredictable, two keys can be throttled at once, and the feature's only purpose is to exceed what one key allows.
+- `failover-on-429`: when a key is throttled, retry the request once on the next configured profile, cooldown the throttled key briefly, and surface the error once every candidate is cooling down.
+
+**Research:** NaN's public pages, checked 2026-11-17. `https://nan.builders/terms` (last updated 2026-11-10) says, under "The community", that "Every inference member gets a personal, non-transferable API key"; under "Acceptable use", "Do not share, resell or transfer your API key", "Do not abuse the shared cluster or attempt to exceed the published limits", and "NaN is inference, not training: use the cluster to run models, not to fine-tune them"; under "Credits", "Credits do not lift any other limit: concurrency, rate limits and fair use still apply"; and under "Holds and bans", the penalty for a breach: "If your account is banned for a breach of these terms, your API key is revoked, automatic recharges are turned off and any remaining pack balance is forfeited without refund." The same section treats a card "used on more accounts than we allow" as a hold trigger. `https://nan.builders/docs` publishes the limits per key, "a cap on requests per minute and a maximum number of requests at once", and `/docs/models` gives the figures: 60 requests per minute, 7 concurrent requests per key on the base plan and 10 on Premium, with a lower per-model concurrency of 5 on `mimo-v2.6-flash`, `qwen3.6` and `gemma4`.
+
+What those pages do not say, and this entry does not invent: they never address several keys on one account, several accounts belonging to one person, or a client rotating between keys, and they never state whether the published per-key caps are an engineering ceiling on one credential or an allowance per member. The portal's plural "API Keys" section in `/docs` suggests more than one key per account is possible, but no published page says what that means for limits. Nothing on those pages may be read as permission for rotation, and the one clause that speaks to it, "attempt to exceed the published limits", reads against it. Treat multi-key rotation as an unverified risk, not a documented right.
+
+**Decision:** `fixed` is the only supported default: rotation is OFF, and this issue ships no rotation code. Multi-key stays a routing feature (#120), not a throughput feature. Rejected outright: `round-robin` in any form, and any rotation triggered by `insufficient_quota` (a 402, or a 429 whose `error.code` reports an empty credit pool, which `src/providerErrors.ts` already separates from a throttle), because moving spend between credit pools is credit trading under another name. Rotation on `invalid_api_key` (401/403) or on a request-level 4xx is rejected too: it would hide a broken configuration instead of relieving a limit.
+
+The only variant this decision leaves open is the opt-in `failover-on-429` of #144, and only in this shape: off by default; own accounts only, configured by the user in *Manage Provider*; triggered solely by a throttle classification (`rate_limit_exceeded`), never by quota or auth failures; at most one hop per request, so a request cannot walk a chain of keys; a per-key cooldown that honours `Retry-After` and is visible in diagnostics; the original error surfaced unchanged once every candidate is cooling down, naming which profiles were tried; and a one-time acknowledgement that several accounts' allowances are not pooled and that the risk is the user's. Even that variant may not create accounts, buy or transfer credits, or read a key the user did not type into SecretStorage. Permanently out of scope: sharing keys between people, storing a key anywhere but SecretStorage, moving balances between accounts, and anything that makes a second account cheaper to obtain.
+
+**Data model:** unchanged from #120. `nanBuilders.profiles` holds ids only (machine scope), each key lives at the SecretStorage name `nanBuilders.profileKey.<profileId>`, and `src/profiles.ts` never returns a credential: `resolveModelRoute` answers with a profile id plus `native`/`assignment`/`active`/`first`/`legacy` provenance, `describeRoute` projects `{ profile, profileSource }` for logs, and `profileKeyPresence` compares SecretStorage names to report `configured`/`missing`. `src/provider.ts` reads the secret at one boundary, inside `resolveCredential`, so a keyless profile throws `ProfileKeyMissingError` with the profile id before any fetch. Any rotation added later must keep that boundary: a policy chooses among profile ids and re-enters `resolveCredential`, so no new path ever holds a key it did not read from SecretStorage, and the `chat.credential`/`inline.credential` payload stays `{ modelId, profile, profileSource, hasKey }`.
+
+**Consumption surface:** a future policy has three hooks and needs no rework to use them. Routing: `resolveModelRoute` in `src/profiles.ts` is the single precedence order, so a policy becomes a wrapper that asks it for an ordered candidate list instead of one route; precedence stays in one place, which is exactly what the #120 follow-up requires. Concurrency: `SlotQueueRegistry.forCredential` keys queues by a truncated SHA-256 fingerprint of the resolved key, so a hop to another profile queues against that key's queue with no change to `src/openai/slotQueue.ts`, and two profiles sharing a key keep sharing one queue. Presentation and state: the *Manage Provider* profile selector owns the ids and the acknowledgement, and profile ids plus cooldown state belong in *Show Diagnostics*, never a key.
+
+**Follow-up:** The opt-in variant is #144; if it lands, this default stays `fixed` and the setting stays off. Two implementation constraints bind it, because both already exist and a second mechanism would be a bug: `src/providerErrors.ts` classifies a 429 as `rate_limit_exceeded` or `insufficient_quota` from `error.code`, so failover must key off that classification rather than the HTTP status, and `resolveModelRoute` plus the #112 per-key slot queue are the only allowed hooks — no second precedence order and no second queue. Two findings from this research belong to other work: the published per-key concurrency is plan-dependent (7 base, 10 Premium) while `nanBuilders.maxParallelRequests` caps at 7, so Premium users leave three slots unused and the ceiling is stale; and three models cap concurrency at 5 per key, which a single per-key queue of 7 cannot distinguish. Both are queue improvements, not rotation ones. #118 (vendor id) is still pending; this decision does not depend on it, and under option C each installed provider keeps its own profiles, which is the safe outcome for a policy that spends the user's credits.

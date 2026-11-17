@@ -4,9 +4,10 @@ import {
   convertMessages,
   convertTools,
   estimateTokens,
-  httpError,
   isImagePart,
+  RequestTimeoutError,
 } from "../src/openai/request";
+import { httpError } from "../src/providerErrors";
 
 const noMapping = new Map<string, string>();
 
@@ -138,11 +139,20 @@ test("estimates tokens with a floor of one", () => {
 
 test("formats HTTP errors with status, status text and structural error fields", () => {
   const error = httpError(429, "Too Many Requests", '{"error":{"type":"rate_limit","code":"slow_down"}}');
-  assert.equal(error.message, "NaN Builders API error 429 Too Many Requests: rate_limit slow_down");
+  assert.equal(
+    error.message,
+    "NaN Builders API error 429 Too Many Requests: rate_limit slow_down — NaN Builders rate limited this " +
+      "request. Wait a moment before retrying.",
+  );
+  assert.equal(error.code, "rate_limit_exceeded");
 });
 
 test("omits the body suffix when the response body is empty", () => {
-  assert.equal(httpError(500, "Internal Server Error", "   ").message, "NaN Builders API error 500 Internal Server Error");
+  assert.equal(
+    httpError(500, "Internal Server Error", "   ").message,
+    "NaN Builders API error 500 Internal Server Error — NaN Builders returned a gateway error. Retry shortly, " +
+      "or try a different model if it persists.",
+  );
 });
 
 test("redacts and bounds untrusted HTTP status text", () => {
@@ -151,7 +161,7 @@ test("redacts and bounds untrusted HTTP status text", () => {
   assert.equal(error.message.includes("abcdef123456"), false);
   assert.equal(error.message.includes("\r"), false);
   assert.equal(error.message.includes("Injected"), false);
-  assert.equal(error.message, `NaN Builders API error 500 ****** ${"x".repeat(57)}`);
+  assert.equal(error.message.startsWith(`NaN Builders API error 500 ****** ${"x".repeat(57)} — `), true);
 });
 
 test("does not echo prompt content from long upstream bodies", () => {
@@ -163,13 +173,25 @@ test("does not echo prompt content from long upstream bodies", () => {
 
 test("drops non-JSON bodies instead of surfacing them", () => {
   const error = httpError(502, "Bad Gateway", "<html>upstream echoed the request body</html>");
-  assert.equal(error.message, "NaN Builders API error 502 Bad Gateway");
+  assert.equal(error.message.includes("upstream echoed the request body"), false);
+  assert.equal(
+    error.message,
+    "NaN Builders API error 502 Bad Gateway — NaN Builders returned a gateway error. Retry shortly, or try a " +
+      "different model if it persists.",
+  );
 });
 
 test("redacts credential-like tokens in structural error fields", () => {
   const error = httpError(401, "Unauthorized", '{"error":{"code":"sk-live-abc123456","type":"auth"}}');
   assert.equal(error.message.includes("sk-live-abc123456"), false);
-  assert.equal(error.message, "NaN Builders API error 401 Unauthorized: auth ******");
+  assert.equal(
+    error.message.startsWith(
+      "NaN Builders API error 401 Unauthorized: auth ****** — NaN Builders rejected the API key. Update it with " +
+        "'NaN Builders: Manage Provider'.",
+    ),
+    true,
+  );
+  assert.equal(error.code, "invalid_api_key");
 });
 
 test("redacts bearer tokens in structural error fields", () => {
@@ -189,6 +211,23 @@ test("explains the credit reasons behind an HTTP 402 instead of leaving it crypt
   assert.match(error.message, /credits are frozen/);
   assert.match(error.message, /NaN Builders: Show Usage/);
   assert.match(httpError(402, "Payment Required", "").message, /does not draw credits\.$/);
+});
+
+test("timeout errors are explicit, actionable, and never worded as cancellation", () => {
+  const connect = new RequestTimeoutError("connect", 20);
+  assert.equal(connect.name, "RequestTimeoutError");
+  assert.equal(connect.kind, "connect");
+  assert.match(connect.message, /did not send response headers within 20 seconds/);
+  assert.match(connect.message, /nanBuilders\.connectTimeoutSeconds/);
+
+  const idle = new RequestTimeoutError("stream-idle", 120);
+  assert.match(idle.message, /no stream data for 120 seconds/);
+  assert.match(idle.message, /nanBuilders\.streamIdleTimeoutSeconds/);
+
+  for (const error of [connect, idle]) {
+    assert.match(error.message, /timed out/);
+    assert.equal(/cancel/i.test(error.message), false);
+  }
 });
 
 test("detects image parts only for image mime types backed by bytes", () => {

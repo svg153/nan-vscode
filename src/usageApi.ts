@@ -8,6 +8,7 @@
 // - Rate limit: 30 requests per minute per member; a 429 carries Retry-After.
 
 import { sanitizeUpstreamText } from "./text";
+import { parseRetryAfter } from "./providerErrors";
 import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
 import {
   MAX_ERROR_RESPONSE_BYTES,
@@ -405,15 +406,7 @@ function sanitizeErrorText(text: string): string {
   return sanitizeUpstreamText(text, 200);
 }
 
-export function parseRetryAfter(header: string | null, now: number = Date.now()): number | undefined {
-  if (!header) return undefined;
-  const seconds = Number(header);
-  if (Number.isFinite(seconds)) return seconds >= 0 ? Math.ceil(seconds) : undefined;
-
-  const retryAt = Date.parse(header);
-  if (!Number.isFinite(retryAt) || !Number.isFinite(now) || retryAt <= now) return undefined;
-  return Math.ceil((retryAt - now) / 1_000);
-}
+export { parseRetryAfter };
 
 function parseRow(value: unknown, index: number): UsageRow {
   const row = asObject(value, `usage row ${index}`);

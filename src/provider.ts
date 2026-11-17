@@ -12,12 +12,36 @@ import {
   type DiscoveredModel,
   type ModelMetadata,
 } from "./modelCatalog";
-import { convertMessages, convertTools, estimateTokens, httpError, isImagePart } from "./openai/request";
+import { historyConversationKey, trimHistoryToBudget } from "./openai/historyTrim";
+import { convertMessages, convertTools } from "./openai/request";
+import { countContentTokens, estimateTokens } from "./openai/tokens";
+import type { SlotLease, SlotQueueRegistry } from "./openai/slotQueue";
 import { OpenAIStreamDecoder, StreamLimitError, type StreamEvent } from "./openai/stream";
+import {
+  ChatTimeoutController,
+  DEFAULT_CONNECT_TIMEOUT_SECONDS,
+  DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS,
+  resolveTimeoutSeconds,
+  type ChatTimeouts,
+} from "./openai/timeouts";
 import type { OpenAIUsage } from "./openai/types";
+import { httpError, parseRetryAfter, sanitizeErrorBody, toProviderError } from "./providerErrors";
 import { sanitizeUpstreamText } from "./text";
 import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
 import type { UsageTracker } from "./usageTracker";
+import type { DiscoveryFailure } from "./providerDiagnostics";
+import {
+  describeRoute,
+  effortOverride,
+  normalizeProfileIds,
+  profileSecretName,
+  readConfiguredCredential,
+  resolveActiveProfile,
+  resolveModelRoute,
+  type ModelRoute,
+  type ProfileRouteSource,
+  type ProfileSettings,
+} from "./profiles";
 import {
   MAX_ERROR_RESPONSE_BYTES,
   MAX_JSON_RESPONSE_BYTES,
@@ -25,6 +49,36 @@ import {
   readBoundedJson,
   readBoundedResponseText,
 } from "./responseBody";
+
+/**
+ * Model-discovery failure raised at the HTTP boundary. The response body is
+ * sanitized and bounded here, so downstream formatters only ever see
+ * structural identifiers plus the status.
+ */
+export class ModelDiscoveryError extends Error implements DiscoveryFailure {
+  constructor(
+    message: string,
+    readonly status?: number,
+    readonly detail?: string,
+  ) {
+    super(message);
+    this.name = "ModelDiscoveryError";
+  }
+}
+
+/**
+ * Raised when the profile a request resolved to has no key in SecretStorage.
+ * The message names the profile and is thrown at the single credential
+ * boundary, before any gateway call is built.
+ */
+export class ProfileKeyMissingError extends Error {
+  constructor(readonly profileId: string) {
+    super(
+      `NaN Builders profile "${profileId}" has no API key. Run 'NaN Builders: Manage Provider', open Profiles, and set the key for that profile.`,
+    );
+    this.name = "ProfileKeyMissingError";
+  }
+}
 
 interface ModelListResponse {
   data?: DiscoveredModel[];
@@ -41,11 +95,16 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
 
   private cache: CachedModels | undefined;
   private nativeBaseUrl: string | undefined;
+  private lastDiscoveryError: DiscoveryFailure | undefined;
+  /** Conversations already warned about, so the trim warning appears once. */
+  private readonly warnedTrimmedConversations = new Set<string>();
 
   constructor(
     private readonly context: Pick<vscode.ExtensionContext, "secrets">,
     private readonly usage: Pick<UsageTracker, "record">,
     private readonly endpointAuthorizer: HttpEndpointAuthorizer,
+    /** Per-credential slots shared with inline completions. */
+    private readonly slots: Pick<SlotQueueRegistry, "acquire">,
   ) {}
 
   dispose(): void {
@@ -87,7 +146,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       return cached.models;
     }
 
-    const apiKey = nativeApiKey ?? (await this.getApiKey(options.silent));
+    const apiKey = nativeApiKey ?? (await this.getDiscoveryApiKey(options.silent));
     if (!apiKey) {
       diagnostic("models.provide.noKey", { silent: options.silent });
       return [];
@@ -97,11 +156,13 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     let discoveryFailed = false;
     try {
       models = await this.fetchModelIds(apiKey, token);
+      this.lastDiscoveryError = undefined;
     } catch (error) {
       if (isAbortError(error)) {
         return [];
       }
       discoveryFailed = true;
+      this.lastDiscoveryError = toDiscoveryFailure(error);
       diagnostic("models.fetch.failed", {
         errorName: error instanceof Error ? error.name : typeof error,
         message: error instanceof Error ? error.message.slice(0, 200) : typeof error,
@@ -154,20 +215,37 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     const startedAt = Date.now();
     diagnostic("chat.begin", { modelId: model.id, messageCount: messages.length, toolCount: options.tools?.length ?? 0 });
     const modelConfiguration = (options as { modelConfiguration?: Record<string, unknown> }).modelConfiguration;
-    const apiKey = providerConfigString(modelConfiguration, "apiKey") ?? (await this.getApiKey(false));
-    if (!apiKey) {
-      diagnostic("chat.noKey", { modelId: model.id });
-      throw new Error("NaN Builders API key is not configured. Run 'NaN Builders: Manage Provider'.");
-    }
+    // Single credential boundary: the profile (and therefore the key) is
+    // resolved here, so a keyless profile fails with its name before any
+    // gateway call, and the resolved key is what the slot queue fingerprints.
+    const credential = await this.resolveCredential(
+      model.id,
+      providerConfigString(modelConfiguration, "apiKey"),
+    );
+    const apiKey = credential.apiKey;
 
     const toolMapping = convertTools(options.tools ?? [], options.toolMode === vscode.LanguageModelChatToolMode.Required);
-    const openaiMessages = convertMessages(
+    const history = convertMessages(
       messages.map((message) => ({
         role: message.role === vscode.LanguageModelChatMessageRole.User ? "user" : "assistant",
         content: message.content ?? [],
       })),
       toolMapping.originalToSanitized,
     );
+    const trimmed = trimHistoryToBudget(history, this.inputBudgetTokens(model));
+    if (trimmed.trimmed) {
+      // Counts only: message content never reaches the diagnostic log.
+      diagnostic("chat.history.trimmed", {
+        modelId: model.id,
+        unitCount: trimmed.unitCount,
+        discardedUnits: trimmed.discardedUnits,
+        tokensBefore: trimmed.tokensBefore,
+        tokensAfter: trimmed.tokensAfter,
+        fits: trimmed.fits,
+      });
+      this.warnHistoryTrimmed(historyConversationKey(history));
+    }
+    const openaiMessages = trimmed.messages;
     const requestBody: Record<string, unknown> = {
       model: model.id,
       messages: openaiMessages,
@@ -176,7 +254,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       max_tokens: model.maxOutputTokens || 4096,
       // NaN can spend several minutes in silent reasoning unless this is bounded.
       // The effort is remapped to the closest level the model actually documents.
-      reasoning_effort: this.resolveEffort(model.id, options.modelOptions),
+      reasoning_effort: this.resolveEffort(model.id, options.modelOptions, credential.profileId),
     };
 
     if (toolMapping.definitions.length > 0) {
@@ -184,11 +262,22 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       requestBody.tool_choice = toolMapping.toolChoice ?? "auto";
     }
 
-    const cancellation = cancellationSignal(token);
+    let timeoutController: ChatTimeoutController | undefined;
+    const cancellation = cancellationSignal(token, () => timeoutController?.settle());
+    timeoutController = new ChatTimeoutController(this.chatTimeouts(), (reason) => cancellation.abort(reason));
+    if (token.isCancellationRequested) {
+      timeoutController.settle();
+    }
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let slot: SlotLease | undefined;
     let chunkCount = 0;
     try {
-      const response = await this.sendChatRequest(apiKey, requestBody, cancellation.signal);
+      const sent = await this.sendChatRequest(apiKey, requestBody, cancellation.signal, timeoutController);
+      slot = sent.slot;
+      if (slot.waited) {
+        diagnostic("chat.slot.queued", { modelId: model.id, waitedMs: Date.now() - startedAt });
+      }
+      const response = sent.response;
       diagnostic("chat.http.response", { modelId: model.id, status: response.status, elapsedMs: Date.now() - startedAt });
       if (!response.body) {
         throw new Error("NaN Builders returned an empty streaming response.");
@@ -223,10 +312,12 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
         if (done) {
           break;
         }
+        timeoutController.touch();
         chunkCount += 1;
         reportStreamEvents(streamDecoder.push(textDecoder.decode(value, { stream: true })));
       }
 
+      timeoutController.settle();
       if (!token.isCancellationRequested) {
         reportStreamEvents(streamDecoder.push(textDecoder.decode()));
         reportStreamEvents(streamDecoder.finish());
@@ -247,9 +338,10 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
         }
       }
     } catch (error) {
-      if (error instanceof StreamLimitError && reader) {
+      const timeoutError = timeoutController.timeoutError;
+      if ((error instanceof StreamLimitError || timeoutError) && reader) {
         try {
-          await reader.cancel(error);
+          await reader.cancel(timeoutError ?? error);
         } catch (cancelError) {
           diagnostic("chat.stream.cancel.error", {
             modelId: model.id,
@@ -257,19 +349,36 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
           });
         }
       }
+      const reported = timeoutError ?? error;
       diagnostic("chat.error", {
         modelId: model.id,
         elapsedMs: Date.now() - startedAt,
-        errorName: error instanceof Error ? error.name : typeof error,
+        errorName: reported instanceof Error ? reported.name : typeof reported,
+        timedOut: Boolean(timeoutError),
         cancelled: token.isCancellationRequested,
       });
+      // A timeout is always surfaced, even if the user canceled afterwards,
+      // so an aborted signal is never reported as a plain cancellation.
+      if (timeoutError) {
+        throw timeoutError;
+      }
       if (!token.isCancellationRequested && !isAbortError(error)) {
-        throw error;
+        // Transport failures (timeouts, DNS, refused connections) become
+        // actionable messages here; application errors pass through unchanged.
+        throw toProviderError(error);
       }
     } finally {
+      // The slot covers the stream body too, so it is freed only once the
+      // reader is done or cancelled, never on headers alone.
+      slot?.release();
+      timeoutController.settle();
       reader?.releaseLock();
       cancellation.dispose();
-      diagnostic("chat.finally", { modelId: model.id, cancelled: token.isCancellationRequested });
+      diagnostic("chat.finally", {
+        modelId: model.id,
+        timedOut: Boolean(timeoutController.timeoutError),
+        cancelled: token.isCancellationRequested,
+      });
     }
   }
 
@@ -282,17 +391,36 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       return estimateTokens(text);
     }
 
-    let characters = 0;
-    for (const part of text.content ?? []) {
-      if (part instanceof vscode.LanguageModelTextPart) {
-        characters += part.value.length;
-      } else if (isImagePart(part)) {
-        characters += Math.ceil(part.data.byteLength / 3);
-      } else {
-        characters += 64;
-      }
+    // Shares `src/openai/tokens.ts` with the history trimmer: images cost a flat
+    // IMAGE_TOKENS each and tool-call names/arguments are counted as text.
+    return countContentTokens(text.content ?? []);
+  }
+
+  /**
+   * Input budget the model advertises, already reduced from the context window
+   * by `toModelInfo`. Unknown or non-positive values disable trimming.
+   */
+  private inputBudgetTokens(model: vscode.LanguageModelChatInformation): number {
+    const budget = model.maxInputTokens;
+    return typeof budget === "number" && Number.isFinite(budget) && budget > 0
+      ? Math.floor(budget)
+      : Number.POSITIVE_INFINITY;
+  }
+
+  /** One interruption per conversation; later trims only reach the log. */
+  private warnHistoryTrimmed(conversationKey: string): void {
+    if (this.warnedTrimmedConversations.has(conversationKey)) {
+      return;
     }
-    return Math.max(1, Math.ceil(characters / 4));
+    // Bound the set so a long-lived window cannot accumulate keys forever.
+    if (this.warnedTrimmedConversations.size >= 64) {
+      this.warnedTrimmedConversations.clear();
+    }
+    this.warnedTrimmedConversations.add(conversationKey);
+    void vscode.window.showWarningMessage(
+      "NaN Builders trimmed the middle of this conversation to fit the model's input limit, keeping the first turn and the current request. " +
+        "Start a new chat if the model needs those earlier details.",
+    );
   }
 
   async setApiKey(apiKey: string): Promise<void> {
@@ -305,23 +433,158 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     this.refresh();
   }
 
+  /** Stores one profile's key. Settings only ever hold profile ids. */
+  async setProfileKey(profileId: string, apiKey: string): Promise<void> {
+    await this.context.secrets.store(profileSecretName(profileId), apiKey.trim());
+    this.refresh();
+  }
+
+  async clearProfileKey(profileId: string): Promise<void> {
+    await this.context.secrets.delete(profileSecretName(profileId));
+    this.refresh();
+  }
+
+  /** Moves a profile's key to its new id, never leaving two copies behind. */
+  async renameProfileSecret(fromProfileId: string, toProfileId: string): Promise<void> {
+    if (fromProfileId === toProfileId) {
+      return;
+    }
+    const existing = await this.context.secrets.get(profileSecretName(fromProfileId));
+    if (existing) {
+      await this.context.secrets.store(profileSecretName(toProfileId), existing);
+    } else {
+      await this.context.secrets.delete(profileSecretName(toProfileId));
+    }
+    await this.context.secrets.delete(profileSecretName(fromProfileId));
+    this.refresh();
+  }
+
   async validateConfiguredKey(): Promise<number> {
-    const apiKey = await this.context.secrets.get(SECRET_API_KEY);
+    return (await this.probeConfiguredKey()).length;
+  }
+
+  /**
+   * Silent model discovery for "Test Connection": reads the stored key
+   * directly (never prompting for one) and returns the IDs it can reach.
+   * Discovery is the only request sent - no chat completion is made.
+   */
+  async probeConfiguredKey(): Promise<string[]> {
+    const { apiKey, profileId } = await this.configuredCredential();
     if (!apiKey) {
-      throw new Error("No NaN Builders API key is configured.");
+      throw profileId
+        ? new ProfileKeyMissingError(profileId)
+        : new Error("No NaN Builders API key is configured. Run 'NaN Builders: Manage Provider'.");
     }
     const source = new vscode.CancellationTokenSource();
     try {
-      const ids = await this.fetchModelIds(apiKey, source.token);
-      return ids.length;
+      const models = await this.fetchModelIds(apiKey, source.token);
+      this.lastDiscoveryError = undefined;
+      return models.map((model) => model.id);
+    } catch (error) {
+      this.lastDiscoveryError = toDiscoveryFailure(error);
+      throw error;
     } finally {
       source.dispose();
     }
   }
 
-  refresh(): void {
-    this.cache = undefined;
-    this.changedEmitter.fire();
+  /** Stored credential for the active profile, else the legacy shared key. */
+  async configuredCredential(): Promise<{ apiKey: string | undefined; profileId: string | undefined }> {
+    return readConfiguredCredential(
+      this.profileSettings(),
+      (name) => this.context.secrets.get(name),
+      SECRET_API_KEY,
+    );
+  }
+
+  /** Profiles are ids only; keys live in SecretStorage under a prefixed name. */
+  profileSettings(): ProfileSettings {
+    const configuration = vscode.workspace.getConfiguration("nanBuilders");
+    return {
+      profiles: normalizeProfileIds(configuration.get<unknown>("profiles", [])),
+      activeProfile: configuration.get<string>("activeProfile", ""),
+    };
+  }
+
+  private effortOverrides(): Record<string, unknown> {
+    return vscode.workspace.getConfiguration("nanBuilders").get<Record<string, unknown>>("reasoningEffortByModel", {}) ?? {};
+  }
+
+  /** Profile a model's requests resolve to, with its provenance. */
+  modelRoute(modelId: string): ModelRoute {
+    return resolveModelRoute(this.profileSettings(), this.effortOverrides(), modelId);
+  }
+
+  /**
+   * Resolves the key one chat request uses. A native per-model configuration
+   * wins (VS Code "Manage Models"); otherwise `profile::model` routing and the
+   * active profile decide, and the legacy shared key remains the fallback when
+   * no profile is configured.
+   */
+  private async resolveCredential(
+    modelId: string,
+    nativeApiKey: string | undefined,
+  ): Promise<{
+    apiKey: string;
+    profileId: string | undefined;
+    source: ProfileRouteSource | "native";
+  }> {
+    if (nativeApiKey) {
+      diagnostic("chat.credential", { modelId, source: "native" });
+      return { apiKey: nativeApiKey, profileId: undefined, source: "native" };
+    }
+    const route = this.modelRoute(modelId);
+    if (!route.profileId) {
+      const apiKey = await this.getApiKey(false);
+      if (!apiKey) {
+        diagnostic("chat.noKey", { modelId, source: route.source });
+        throw new Error("NaN Builders API key is not configured. Run 'NaN Builders: Manage Provider'.");
+      }
+      diagnostic("chat.credential", { modelId, source: route.source });
+      return { apiKey, profileId: undefined, source: route.source };
+    }
+    const apiKey = await this.context.secrets.get(profileSecretName(route.profileId));
+    diagnostic("chat.credential", { modelId, ...describeRoute(route), hasKey: Boolean(apiKey) });
+    if (!apiKey) {
+      throw new ProfileKeyMissingError(route.profileId);
+    }
+    return { apiKey, profileId: route.profileId, source: route.source };
+  }
+
+  /** Discovery credential: active profile key when profiles exist, else legacy. */
+  private async getDiscoveryApiKey(silent: boolean): Promise<string | undefined> {
+    const settings = this.profileSettings();
+    const activeProfile = resolveActiveProfile(settings);
+    if (!activeProfile) {
+      diagnostic("models.provide.legacyKey");
+      return this.getApiKey(silent);
+    }
+    const stored = await this.context.secrets.get(profileSecretName(activeProfile));
+    diagnostic("models.provide.profile", { profile: activeProfile, hasKey: Boolean(stored) });
+    if (stored || silent) {
+      return stored;
+    }
+    const entered = await this.promptForKey(
+      `NaN Builders profile "${activeProfile}" API Key`,
+      `Paste the API key for profile "${activeProfile}". It is stored in VS Code SecretStorage.`,
+    );
+    if (!entered) {
+      return undefined;
+    }
+    await this.setProfileKey(activeProfile, entered);
+    return entered;
+  }
+
+  private async promptForKey(title: string, prompt: string): Promise<string | undefined> {
+    const entered = await vscode.window.showInputBox({
+      title,
+      prompt,
+      password: true,
+      ignoreFocusOut: true,
+      placeHolder: "sk-...",
+    });
+    const trimmed = entered?.trim();
+    return trimmed ? trimmed : undefined;
   }
 
   private async getApiKey(silent: boolean): Promise<string | undefined> {
@@ -330,20 +593,37 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       return apiKey;
     }
 
-    const entered = await vscode.window.showInputBox({
-      title: "NaN Builders API Key",
-      prompt: "Paste your NaN Builders API key. It will be stored in VS Code SecretStorage.",
-      password: true,
-      ignoreFocusOut: true,
-      placeHolder: "sk-...",
-    });
-    if (!entered?.trim()) {
+    const entered = await this.promptForKey(
+      "NaN Builders API Key",
+      "Paste your NaN Builders API key. It will be stored in VS Code SecretStorage.",
+    );
+    if (!entered) {
       return undefined;
     }
 
-    apiKey = entered.trim();
+    apiKey = entered;
     await this.setApiKey(apiKey);
     return apiKey;
+  }
+
+  /** Endpoint used for discovery, chat, and usage; native provider configuration wins. */
+  getBaseUrl(): string {
+    return this.apiBaseUrl();
+  }
+
+  /** Model IDs tracked locally: the warm discovery cache, else the curated catalog. */
+  trackedModelIds(): string[] {
+    return this.cache?.models.map((model) => model.id) ?? knownChatModelIds();
+  }
+
+  /** Last model-discovery failure; already stripped of response bodies. */
+  discoveryError(): DiscoveryFailure | undefined {
+    return this.lastDiscoveryError;
+  }
+
+  refresh(): void {
+    this.cache = undefined;
+    this.changedEmitter.fire();
   }
 
   private async fetchModelIds(apiKey: string, token: vscode.CancellationToken): Promise<DiscoveredModel[]> {
@@ -366,12 +646,18 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       });
       diagnostic("models.fetch.response", { status: response.status, elapsedMs: Date.now() - startedAt });
       if (!response.ok) {
-        await response.body?.cancel();
+        const detail = await readDiscoveryFailureDetail(response);
         if (response.status === 401 || response.status === 403) {
-          throw new Error("NaN Builders rejected the API key. Update it with 'NaN Builders: Manage Provider'.");
+          throw new ModelDiscoveryError(
+            `NaN Builders rejected the API key (HTTP ${response.status}). Update it with 'NaN Builders: Manage Provider'.`,
+            response.status,
+            detail,
+          );
         }
-        throw new Error(
+        throw new ModelDiscoveryError(
           `Unable to discover NaN Builders models: HTTP ${response.status} ${sanitizeUpstreamText(response.statusText, 200)}`,
+          response.status,
+          detail,
         );
       }
       body = (await readBoundedJson(response, MAX_JSON_RESPONSE_BYTES)) as ModelListResponse;
@@ -394,11 +680,15 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     apiKey: string,
     body: Record<string, unknown>,
     signal: AbortSignal,
-  ): Promise<Response> {
+    timeouts: ChatTimeoutController,
+  ): Promise<{ response: Response; slot: SlotLease }> {
     const baseUrl = this.apiBaseUrl();
-    await this.endpointAuthorizer.authorize(baseUrl, signal);
-    const send = async (requestBody: Record<string, unknown>): Promise<Response> =>
-      fetch(`${baseUrl}/chat/completions`, {
+    // Each send arms its own headers deadline *after* authorization, so endpoint
+    // consent never counts against it, and each send clears whatever timer the
+    // previous request or its error body left running before starting.
+    const send = async (requestBody: Record<string, unknown>): Promise<Response> => {
+      timeouts.armConnect();
+      const response = await fetch(`${baseUrl}/chat/completions`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${apiKey}`,
@@ -409,28 +699,68 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
         body: JSON.stringify(requestBody),
         signal,
       });
+      // Headers are in: the remaining time is body time, not connect time.
+      timeouts.startStream();
+      return response;
+    };
 
-    let response = await send(body);
-    if (!response.ok) {
-      const text = await readChatErrorText(response);
-      if (
-        response.status === 400 &&
-        "stream_options" in body &&
-        /stream[_ -]?options|include[_ -]?usage/i.test(text)
-      ) {
-        const fallback = { ...body };
-        delete fallback.stream_options;
-        response = await send(fallback);
-      } else {
-        throw httpError(response.status, response.statusText, text);
+    await this.endpointAuthorizer.authorize(baseUrl, signal);
+    // One slot per send attempt covers the compatibility fallback re-send too:
+    // the failed response is drained before the retry, so only one request is
+    // ever in flight against the gateway for this lease.
+    const slot = await this.slots.acquire(apiKey, signal);
+    try {
+      let response = await send(body);
+      if (!response.ok) {
+        const text = await readChatErrorText(response);
+        if (
+          response.status === 400 &&
+          "stream_options" in body &&
+          /stream[_ -]?options|include[_ -]?usage/i.test(text)
+        ) {
+          const fallback = { ...body };
+          delete fallback.stream_options;
+          response = await send(fallback);
+        } else {
+          throw httpError(
+            response.status,
+            response.statusText,
+            text,
+            parseRetryAfter(response.headers.get("Retry-After")),
+          );
+        }
       }
-    }
 
-    if (!response.ok) {
-      const text = await readChatErrorText(response);
-      throw httpError(response.status, response.statusText, text);
+      if (!response.ok) {
+        const text = await readChatErrorText(response);
+        throw httpError(
+          response.status,
+          response.statusText,
+          text,
+          parseRetryAfter(response.headers.get("Retry-After")),
+        );
+      }
+      return { response, slot };
+    } catch (error) {
+      // Failures and cancellations release here; the caller releases once it
+      // has drained the stream body.
+      slot.release();
+      throw error;
     }
-    return response;
+  }
+
+  private chatTimeouts(): ChatTimeouts {
+    const configuration = vscode.workspace.getConfiguration("nanBuilders");
+    return {
+      connectTimeoutSeconds: resolveTimeoutSeconds(
+        configuration.get<number>("connectTimeoutSeconds", DEFAULT_CONNECT_TIMEOUT_SECONDS),
+        DEFAULT_CONNECT_TIMEOUT_SECONDS,
+      ),
+      streamIdleTimeoutSeconds: resolveTimeoutSeconds(
+        configuration.get<number>("streamIdleTimeoutSeconds", DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS),
+        DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS,
+      ),
+    };
   }
 
   private apiBaseUrl(): string {
@@ -449,10 +779,15 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   }
 
   /** Effective reasoning effort for a model, honoring per-model overrides. */
-  private resolveEffort(modelId: string, modelOptions: { readonly [name: string]: unknown } | undefined): string {
+  private resolveEffort(
+    modelId: string,
+    modelOptions: { readonly [name: string]: unknown } | undefined,
+    profileId?: string,
+  ): string {
     const configuration = vscode.workspace.getConfiguration("nanBuilders");
     const overrides = configuration.get<Record<string, unknown>>("reasoningEffortByModel", {});
-    const perModel = typeof overrides?.[modelId] === "string" ? (overrides[modelId] as string) : undefined;
+    const routeProfile = profileId ?? resolveActiveProfile(this.profileSettings());
+    const perModel = effortOverride(overrides, modelId, routeProfile);
     const requested = typeof modelOptions?.reasoning_effort === "string" ? modelOptions.reasoning_effort : undefined;
     return resolveReasoningEffort({
       requested,
@@ -517,14 +852,22 @@ function providerConfigString(configuration: Record<string, unknown> | undefined
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function cancellationSignal(token: vscode.CancellationToken): { signal: AbortSignal; dispose: () => void } {
+function cancellationSignal(
+  token: vscode.CancellationToken,
+  onCancel?: () => void,
+): { signal: AbortSignal; abort: (reason?: unknown) => void; dispose: () => void } {
   const controller = new AbortController();
+  const abort = (reason?: unknown): void => controller.abort(reason);
   if (token.isCancellationRequested) {
+    onCancel?.();
     controller.abort();
-    return { signal: controller.signal, dispose: () => {} };
+    return { signal: controller.signal, abort, dispose: () => {} };
   }
-  const listener = token.onCancellationRequested(() => controller.abort());
-  return { signal: controller.signal, dispose: () => listener.dispose() };
+  const listener = token.onCancellationRequested(() => {
+    onCancel?.();
+    controller.abort();
+  });
+  return { signal: controller.signal, abort, dispose: () => listener.dispose() };
 }
 
 async function readChatErrorText(response: Response): Promise<string> {
@@ -536,6 +879,24 @@ async function readChatErrorText(response: Response): Promise<string> {
     }
     throw error;
   }
+}
+
+/**
+ * Reads a bounded discovery failure body and reduces it to safe structural
+ * identifiers. Nothing from the body leaves this function unsanitized, and an
+ * unreadable or oversized body still leaves the HTTP status intact.
+ */
+async function readDiscoveryFailureDetail(response: Response): Promise<string | undefined> {
+  try {
+    const body = await readBoundedResponseText(response, MAX_ERROR_RESPONSE_BYTES);
+    return sanitizeErrorBody(body) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function toDiscoveryFailure(error: unknown): DiscoveryFailure {
+  return error instanceof ModelDiscoveryError ? error : {};
 }
 
 function isAbortError(error: unknown): boolean {

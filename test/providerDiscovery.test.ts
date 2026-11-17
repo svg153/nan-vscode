@@ -3,6 +3,8 @@ import { createRequire } from "node:module";
 import test from "node:test";
 import type * as vscode from "vscode";
 import { SECRET_API_KEY } from "../src/constants";
+import { RequestTimeoutError } from "../src/openai/request";
+import { DEFAULT_MAX_PARALLEL_REQUESTS, SlotQueueRegistry, credentialId } from "../src/openai/slotQueue";
 import { MAX_ERROR_RESPONSE_BYTES, MAX_JSON_RESPONSE_BYTES, ResponseTooLargeError } from "../src/responseBody";
 import { MAX_SSE_LINE_CHARS, StreamLimitError } from "../src/openai/stream";
 
@@ -83,7 +85,13 @@ class TestCancellationToken implements vscode.CancellationToken {
   }
 }
 
-function createHarness(fetcher: typeof fetch) {
+function createHarness(
+  fetcher: typeof fetch,
+  endpointAuthorizer: { authorize: (baseUrl: string, signal?: AbortSignal) => Promise<void> } = {
+    authorize: async () => undefined,
+  },
+  slots: SlotQueueRegistry = new SlotQueueRegistry(DEFAULT_MAX_PARALLEL_REQUESTS),
+) {
   settings.clear();
   settings.set("apiBaseUrl", "https://unit.test/v1/");
   settings.set("includeUnknownModels", false);
@@ -108,9 +116,10 @@ function createHarness(fetcher: typeof fetch) {
         recordedUsage += 1;
       },
     },
-    { authorize: async () => undefined },
+    endpointAuthorizer,
+    slots,
   );
-  return { provider, calls, get recordedUsage() { return recordedUsage; } };
+  return { provider, calls, slots, get recordedUsage() { return recordedUsage; } };
 }
 
 function modelListResponse(body: unknown, init?: ResponseInit): Response {
@@ -150,6 +159,38 @@ function findByteSequence(bytes: Uint8Array, sequence: Uint8Array): number {
 
 function chatProgress(reported: unknown[]): vscode.Progress<vscode.LanguageModelResponsePart> {
   return { report: (part) => reported.push(part) };
+}
+
+/** Drains pending promise continuations while `setTimeout` is faked. */
+async function flushAsyncWork(): Promise<void> {
+  for (let turn = 0; turn < 20; turn += 1) {
+    // oxlint-disable-next-line eslint/no-await-in-loop
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
+
+function ssePayload(content: string): string {
+  return `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n`;
+}
+
+function chatOutcome(
+  provider: InstanceType<typeof NanChatModelProvider>,
+  model: vscode.LanguageModelChatInformation,
+  reported: unknown[],
+  token: TestCancellationToken = new TestCancellationToken(),
+): Promise<unknown> {
+  return provider
+    .provideLanguageModelChatResponse(
+      model,
+      [],
+      { toolMode: 1 as vscode.LanguageModelChatToolMode },
+      chatProgress(reported),
+      token,
+    )
+    .then(
+      () => undefined,
+      (error: unknown) => error,
+    );
 }
 
 test("model discovery caches results and refresh invalidates them after a setting change", async () => {
@@ -268,6 +309,53 @@ test("validateConfiguredKey still surfaces discovery errors for the manage comma
     await assert.rejects(harness.provider.validateConfiguredKey(), /rejected the API key/);
   } finally {
     harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("discovery failures preserve the HTTP status and sanitized body identifiers", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const cases = [
+    {
+      name: "HTTP 401 keeps gateway identifiers",
+      status: 401,
+      body: JSON.stringify({
+        error: { type: "invalid_api_key", code: "bad_key", message: "Incorrect API key provided: sk-live-SENTINEL" },
+      }),
+      expectedDetail: "invalid_api_key bad_key",
+    },
+    {
+      name: "HTTP 503 keeps gateway identifiers",
+      status: 503,
+      body: JSON.stringify({ error: { type: "server_error", code: "upstream_unavailable" } }),
+      expectedDetail: "server_error upstream_unavailable",
+    },
+    {
+      name: "non-JSON body leaves only the status",
+      status: 502,
+      body: "sk-live-SENTINEL",
+      expectedDetail: undefined,
+    },
+  ];
+
+  try {
+    for (const testCase of cases) {
+        // oxlint-disable-next-line eslint/no-await-in-loop
+        await t.test(testCase.name, async () => {
+          const harness = createHarness(async () => new Response(testCase.body, { status: testCase.status }));
+          try {
+            // oxlint-disable-next-line eslint/no-await-in-loop
+            await assert.rejects(harness.provider.validateConfiguredKey(), new RegExp(`HTTP ${testCase.status}`));
+            const failure = harness.provider.discoveryError();
+            assert.equal(failure?.status, testCase.status);
+            assert.equal(failure?.detail, testCase.expectedDetail);
+            assert.equal(JSON.stringify(failure).includes("sk-live-SENTINEL"), false);
+          } finally {
+            harness.provider.dispose();
+          }
+        });
+    }
+  } finally {
     globalThis.fetch = originalFetch;
   }
 });
@@ -456,6 +544,7 @@ test("native provider configuration overrides the stored key and settings for di
     { secrets },
     { record: async () => undefined },
     { authorize: async () => undefined },
+    new SlotQueueRegistry(DEFAULT_MAX_PARALLEL_REQUESTS),
   );
   try {
     const token = new TestCancellationToken();
@@ -703,6 +792,249 @@ test("chat cancels the upstream stream when an unterminated SSE line exceeds its
         error.message === "NaN Builders chat stream exceeded the maximum SSE line size.",
     );
     assert.equal(cancelled, true);
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("slow endpoint consent does not consume the response-headers deadline", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const originalFetch = globalThis.fetch;
+  let authorizeCalls = 0;
+  let resolveConsent!: () => void;
+  const consent = new Promise<void>((resolve) => {
+    resolveConsent = resolve;
+  });
+  let signalAbortedAtFetch: boolean | undefined;
+  const harness = createHarness(
+    async (input, init) => {
+      if (String(input).endsWith("/models")) {
+        return modelListResponse({ data: [{ id: "mimo-v2.6-flash" }] });
+      }
+      signalAbortedAtFetch = init?.signal?.aborted;
+      return new Response(ssePayload("ok"));
+    },
+    {
+      authorize: () => {
+        authorizeCalls += 1;
+        // The consent prompt only gates the chat request, not discovery.
+        return authorizeCalls === 1 ? Promise.resolve() : consent;
+      },
+    },
+  );
+  // Settings must be written after createHarness, which resets the settings map.
+  settings.set("connectTimeoutSeconds", 5);
+  const reported: unknown[] = [];
+  try {
+    const model = await discoverChatModel(harness.provider);
+    const outcome = chatOutcome(harness.provider, model, reported);
+    await flushAsyncWork();
+    // The consent prompt stays open for longer than the whole headers deadline.
+    t.mock.timers.tick(30_000);
+    await flushAsyncWork();
+    assert.deepEqual(harness.calls, ["https://unit.test/v1/models"]);
+
+    resolveConsent();
+    assert.equal(await outcome, undefined);
+    assert.equal(signalAbortedAtFetch, false);
+    assert.deepEqual(reported, [new FakeLanguageModelTextPart("ok")]);
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("the compatibility fallback gets its own response-headers deadline after a late 400", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const originalFetch = globalThis.fetch;
+  const chatSignals: AbortSignal[] = [];
+  const chatBodies: Record<string, unknown>[] = [];
+  let resolveFirst!: (response: Response) => void;
+  let resolveFallback!: (response: Response) => void;
+  const firstAttempt = new Promise<Response>((resolve) => {
+    resolveFirst = resolve;
+  });
+  const fallbackAttempt = new Promise<Response>((resolve) => {
+    resolveFallback = resolve;
+  });
+  const harness = createHarness(async (input, init) => {
+    if (String(input).endsWith("/models")) {
+      return modelListResponse({ data: [{ id: "mimo-v2.6-flash" }] });
+    }
+    chatSignals.push(init?.signal as AbortSignal);
+    chatBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+    return chatSignals.length === 1 ? firstAttempt : fallbackAttempt;
+  });
+  settings.set("connectTimeoutSeconds", 5);
+  const reported: unknown[] = [];
+  try {
+    const model = await discoverChatModel(harness.provider);
+    const outcome = chatOutcome(harness.provider, model, reported);
+    await flushAsyncWork();
+    assert.equal(chatSignals.length, 1);
+
+    // The first attempt sends headers only after using 3 of its 5 seconds.
+    t.mock.timers.tick(3_000);
+    resolveFirst(
+      new Response('{"error":{"message":"stream_options is not supported"}}', {
+        status: 400,
+        statusText: "Bad Request",
+      }),
+    );
+    await flushAsyncWork();
+    assert.equal(chatSignals.length, 2);
+    assert.equal("stream_options" in chatBodies[1]!, false);
+
+    // Four more seconds beat the original deadline, but leave the fallback,
+    // which started its own deadline, still inside its headers window.
+    t.mock.timers.tick(4_000);
+    await flushAsyncWork();
+    assert.equal(chatSignals[1]!.aborted, false);
+
+    resolveFallback(new Response(ssePayload("ok")));
+    assert.equal(await outcome, undefined);
+    assert.deepEqual(reported, [new FakeLanguageModelTextPart("ok")]);
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("response headers end the connect deadline while a slow error body is still being read", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const originalFetch = globalThis.fetch;
+  let bodyController: ReadableStreamDefaultController<Uint8Array> | undefined;
+  let chatSignal: AbortSignal | undefined;
+  const harness = createHarness(async (input, init) => {
+    if (String(input).endsWith("/models")) {
+      return modelListResponse({ data: [{ id: "mimo-v2.6-flash" }] });
+    }
+    chatSignal = init?.signal as AbortSignal;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        bodyController = controller;
+      },
+    });
+    chatSignal.addEventListener("abort", () => bodyController?.error(chatSignal?.reason), { once: true });
+    return new Response(body, { status: 400, statusText: "Bad Request" });
+  });
+  settings.set("connectTimeoutSeconds", 5);
+  settings.set("streamIdleTimeoutSeconds", 30);
+  const reported: unknown[] = [];
+  try {
+    const model = await discoverChatModel(harness.provider);
+    const outcome = chatOutcome(harness.provider, model, reported);
+    await flushAsyncWork();
+    assert.ok(bodyController);
+
+    // Headers arrived; only the error body is pending. Six seconds of silence
+    // would report a headers timeout if the connect deadline still ran.
+    t.mock.timers.tick(6_000);
+    await flushAsyncWork();
+    assert.equal(chatSignal!.aborted, false);
+
+    // Because headers switched the timer to body-idle, the timeout that
+    // reports this stalled body is an idle timeout, not a headers timeout.
+    t.mock.timers.tick(24_001);
+    await flushAsyncWork();
+    const failure = await outcome;
+    assert.ok(failure instanceof RequestTimeoutError);
+    assert.equal(failure.kind, "stream-idle");
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("chat requests beyond the concurrency limit wait instead of racing the gateway", async () => {
+  const originalFetch = globalThis.fetch;
+  const slots = new SlotQueueRegistry(1);
+  let inFlight = 0;
+  let peakInFlight = 0;
+  const harness = createHarness(async (input) => {
+    if (String(input).endsWith("/models")) {
+      return modelListResponse({ data: [{ id: "mimo-v2.6-flash" }] });
+    }
+    inFlight += 1;
+    peakInFlight = Math.max(peakInFlight, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    inFlight -= 1;
+    return new Response(ssePayload("hi"));
+  }, undefined, slots);
+  try {
+    const model = await discoverChatModel(harness.provider);
+    const reported: unknown[] = [];
+    await Promise.all([
+      chatOutcome(harness.provider, model, reported),
+      chatOutcome(harness.provider, model, []),
+    ]);
+
+    assert.equal(peakInFlight, 1);
+    assert.equal(harness.recordedUsage, 2);
+    assert.equal(reported.length, 1);
+    assert.equal(slots.forCredential(credentialId("unit-test-key")).inUse, 0);
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("chat cancelled while queued never reaches the gateway", async () => {
+  const originalFetch = globalThis.fetch;
+  const slots = new SlotQueueRegistry(1);
+  const harness = createHarness(
+    async (input) =>
+      String(input).endsWith("/models")
+        ? modelListResponse({ data: [{ id: "mimo-v2.6-flash" }] })
+        : new Response(ssePayload("hi")),
+    undefined,
+    slots,
+  );
+  const chatCalls = (): string[] =>
+    harness.calls.filter((call) => call.endsWith("/chat/completions"));
+  try {
+    const model = await discoverChatModel(harness.provider);
+    const held = await slots.acquire("unit-test-key");
+    const token = new TestCancellationToken();
+    const pending = chatOutcome(harness.provider, model, [], token);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.deepEqual(chatCalls(), []);
+
+    token.cancel();
+    assert.equal(await pending, undefined);
+    assert.deepEqual(chatCalls(), []);
+    held.release();
+  } finally {
+    harness.provider.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a failed chat response releases its slot for the next request", async () => {
+  const originalFetch = globalThis.fetch;
+  const slots = new SlotQueueRegistry(1);
+  let chatAttempts = 0;
+  const harness = createHarness(async (input) => {
+    if (String(input).endsWith("/models")) {
+      return modelListResponse({ data: [{ id: "mimo-v2.6-flash" }] });
+    }
+    chatAttempts += 1;
+    if (chatAttempts === 1) {
+      return new Response("rate limited", { status: 429 });
+    }
+    return new Response(ssePayload("hi"));
+  }, undefined, slots);
+  try {
+    const model = await discoverChatModel(harness.provider);
+    const failed = await chatOutcome(harness.provider, model, []);
+    assert.ok(failed instanceof Error);
+    assert.equal(slots.forCredential(credentialId("unit-test-key")).inUse, 0);
+
+    const reported: unknown[] = [];
+    assert.equal(await chatOutcome(harness.provider, model, reported), undefined);
+    assert.equal(reported.length, 1);
+    assert.equal(chatAttempts, 2);
   } finally {
     harness.provider.dispose();
     globalThis.fetch = originalFetch;
