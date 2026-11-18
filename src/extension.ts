@@ -202,7 +202,12 @@ export function activate(context: vscode.ExtensionContext): {
           onDidChange: (listener) => context.secrets.onDidChange(listener),
         }
       : context.secrets;
-  const inlineCompletions = new NanInlineCompletionProvider(inlineSecrets, endpointGuard, slotQueues);
+  const inlineCompletions = new NanInlineCompletionProvider(
+    inlineSecrets,
+    endpointGuard,
+    slotQueues,
+    usage,
+  );
   const registerInlineCompletions = (selector: vscode.DocumentSelector): vscode.Disposable => {
     inlineRegistrationSelector = selector;
     return vscode.languages.registerInlineCompletionItemProvider(selector, inlineCompletions);

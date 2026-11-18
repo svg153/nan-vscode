@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { addUsage, normalizeHistory, type DailyUsage } from "../src/usageHistory";
+import { addUsage, formatHistory, normalizeHistory, type DailyUsage } from "../src/usageHistory";
 
 const today = "2026-09-24";
 
@@ -43,4 +43,24 @@ test("bounds retained data to 30 days and 1000 model/day rows", () => {
     completionTokens: 0,
   }));
   assert.equal(normalizeHistory(many, today).length, 1000);
+});
+
+test("shows inline completion usage alongside chat usage for the same day", () => {
+  const chat = addUsage([], "glm5.3-flash", { prompt_tokens: 120, completion_tokens: 30 }, today);
+  const both = addUsage(chat, "qwen3.8-flash", { prompt_tokens: 4_000, completion_tokens: 64 }, today);
+
+  assert.deepEqual(both, [
+    { date: today, modelId: "glm5.3-flash", requests: 1, promptTokens: 120, completionTokens: 30 },
+    { date: today, modelId: "qwen3.8-flash", requests: 1, promptTokens: 4_000, completionTokens: 64 },
+  ] satisfies DailyUsage[]);
+
+  const formatted = formatHistory(both);
+  assert.ok(
+    formatted.includes(`glm5.3-flash · 1 request(s) · prompt ${(120).toLocaleString()} + completion 30`),
+  );
+  assert.ok(
+    formatted.includes(
+      `qwen3.8-flash · 1 request(s) · prompt ${(4_000).toLocaleString()} + completion 64`,
+    ),
+  );
 });
