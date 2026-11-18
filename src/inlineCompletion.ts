@@ -6,6 +6,7 @@
  */
 
 import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
+import type { OpenAIUsage } from "./openai/types";
 import { MAX_JSON_RESPONSE_BYTES, ResponseTooLargeError, readBoundedJson } from "./responseBody";
 import type { SlotLease, SlotQueueRegistry } from "./openai/slotQueue";
 
@@ -40,10 +41,20 @@ export interface CompletionRequest {
 export type CompletionFailureReason = "cancelled" | "http" | "network" | "malformed" | "empty" | "too_large";
 
 export type CompletionOutcome =
-  | { ok: true; text: string }
+  | { ok: true; text: string; usage?: OpenAIUsage }
   | { ok: false; reason: CompletionFailureReason; status?: number };
 
-export type CompletionParseResult = { ok: true; text: string } | { ok: false; reason: "malformed" | "empty" };
+export type CompletionParseResult =
+  | { ok: true; text: string; usage?: OpenAIUsage }
+  | { ok: false; reason: "malformed" | "empty" };
+
+/**
+ * Minimal view of `UsageTracker` needed to record one completion, so this
+ * module stays free of `vscode` imports and testable with a fake tracker.
+ */
+export interface CompletionUsageRecorder {
+  record(modelId: string, usage: OpenAIUsage | undefined): Promise<unknown>;
+}
 
 /**
  * Build the request body for one completion, or `undefined` when the feature
@@ -75,6 +86,27 @@ export function buildCompletionRequest(options: {
   };
 }
 
+/**
+ * Keep only the non-negative integer counters of a provider `usage` object.
+ * Strings, negatives, NaN, and fractions are dropped so local history cannot be
+ * corrupted by a malformed body; an object without a usable counter yields
+ * `undefined`, which callers treat as "no usage reported".
+ */
+export function parseCompletionUsage(value: unknown): OpenAIUsage | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const usage: OpenAIUsage = {};
+  for (const key of ["prompt_tokens", "completion_tokens", "total_tokens"] as const) {
+    const count = record[key];
+    if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) {
+      usage[key] = count;
+    }
+  }
+  return Object.keys(usage).length > 0 ? usage : undefined;
+}
+
 /** Extract and sanitize the ghost text from a `text_completion` payload. */
 export function parseCompletionResponse(payload: unknown): CompletionParseResult {
   if (typeof payload !== "object" || payload === null) {
@@ -97,7 +129,30 @@ export function parseCompletionResponse(payload: unknown): CompletionParseResult
   if (!truncated.trim()) {
     return { ok: false, reason: "empty" };
   }
-  return { ok: true, text: truncated };
+  const usage = parseCompletionUsage((payload as { usage?: unknown }).usage);
+  return { ok: true, text: truncated, ...(usage ? { usage } : {}) };
+}
+
+/**
+ * Record one settled completion in the local usage history. Cancelled, failed,
+ * and usage-less responses are skipped so the aggregate only reflects requests
+ * the gateway actually billed. Only the model ID and token counters reach the
+ * recorder; prompt and suggestion text never leave this module.
+ */
+export async function recordCompletionUsage(
+  recorder: CompletionUsageRecorder,
+  modelId: string,
+  outcome: CompletionOutcome,
+): Promise<boolean> {
+  if (!outcome.ok || !outcome.usage) {
+    return false;
+  }
+  try {
+    await recorder.record(modelId, outcome.usage);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

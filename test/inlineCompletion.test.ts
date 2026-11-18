@@ -7,11 +7,16 @@ import {
   MAX_SUGGESTION_CHARS,
   buildCompletionRequest,
   parseCompletionResponse,
+  parseCompletionUsage,
+  recordCompletionUsage,
   requestInlineCompletion,
   waitForInlineCompletionDebounce,
+  type CompletionOutcome,
 } from "../src/inlineCompletion";
+import type { OpenAIUsage } from "../src/openai/types";
 import { MAX_JSON_RESPONSE_BYTES } from "../src/responseBody";
 import { SlotQueueRegistry, credentialId } from "../src/openai/slotQueue";
+import { addUsage, type DailyUsage } from "../src/usageHistory";
 
 const LONG_TEXT = "x".repeat(MAX_PROMPT_CHARS * 2);
 
@@ -150,6 +155,118 @@ test("parseCompletionResponse truncates oversized suggestions", () => {
   }
 });
 
+test("parseCompletionResponse keeps sanitized usage counters", () => {
+  const result = parseCompletionResponse({
+    choices: [{ text: "done" }],
+    usage: {
+      prompt_tokens: 40,
+      completion_tokens: 8,
+      total_tokens: 48,
+      estimated: true,
+    },
+  });
+  assert.deepEqual(result, {
+    ok: true,
+    text: "done",
+    usage: { prompt_tokens: 40, completion_tokens: 8, total_tokens: 48 },
+  });
+});
+
+test("parseCompletionResponse drops invalid usage values", () => {
+  const invalid: unknown[] = [
+    undefined,
+    null,
+    "usage",
+    7,
+    {},
+    { estimated: true },
+    { prompt_tokens: -1, completion_tokens: "8", total_tokens: 1.5 },
+    { prompt_tokens: Number.NaN },
+    { prompt_tokens: Number.MAX_SAFE_INTEGER + 1 },
+  ];
+  for (const usage of invalid) {
+    assert.equal(parseCompletionUsage(usage), undefined);
+  }
+  assert.deepEqual(
+    parseCompletionResponse({ choices: [{ text: "done" }], usage: { prompt_tokens: -1 } }),
+    { ok: true, text: "done" },
+  );
+  assert.deepEqual(parseCompletionUsage({ prompt_tokens: 3, completion_tokens: "nope" }), {
+    prompt_tokens: 3,
+  });
+});
+
+test("recordCompletionUsage adds one request and its token counts to local history", async () => {
+  const calls: Array<{ modelId: string; usage: OpenAIUsage | undefined }> = [];
+  let history: DailyUsage[] = [];
+  const tracker = {
+    record: async (modelId: string, usage: OpenAIUsage | undefined) => {
+      calls.push({ modelId, usage });
+      history = addUsage(history, modelId, usage, "2026-09-24");
+    },
+  };
+  const outcome: CompletionOutcome = {
+    ok: true,
+    text: "secret suggestion text",
+    usage: { prompt_tokens: 4_000, completion_tokens: 64 },
+  };
+
+  assert.equal(await recordCompletionUsage(tracker, "glm5.3-flash", outcome), true);
+  assert.deepEqual(calls, [
+    { modelId: "glm5.3-flash", usage: { prompt_tokens: 4_000, completion_tokens: 64 } },
+  ]);
+  assert.deepEqual(history, [
+    {
+      date: "2026-09-24",
+      modelId: "glm5.3-flash",
+      requests: 1,
+      promptTokens: 4_000,
+      completionTokens: 64,
+    },
+  ]);
+  assert.equal(JSON.stringify(calls).includes("secret suggestion text"), false);
+});
+
+test("recordCompletionUsage skips cancelled, failed, and usage-less responses", async () => {
+  const calls: string[] = [];
+  const tracker = {
+    record: async (modelId: string) => {
+      calls.push(modelId);
+    },
+  };
+  const outcomes: CompletionOutcome[] = [
+    { ok: false, reason: "cancelled" },
+    { ok: false, reason: "http", status: 429 },
+    { ok: false, reason: "network" },
+    { ok: false, reason: "malformed" },
+    { ok: false, reason: "empty" },
+    { ok: false, reason: "too_large" },
+    { ok: true, text: "no usage reported" },
+  ];
+
+  for (const outcome of outcomes) {
+    // oxlint-disable-next-line eslint/no-await-in-loop
+    assert.equal(await recordCompletionUsage(tracker, "m", outcome), false);
+  }
+  assert.deepEqual(calls, []);
+});
+
+test("recordCompletionUsage reports false when the recorder fails", async () => {
+  const tracker = {
+    record: async () => {
+      throw new Error("storage unavailable");
+    },
+  };
+  assert.equal(
+    await recordCompletionUsage(tracker, "m", {
+      ok: true,
+      text: "done",
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    }),
+    false,
+  );
+});
+
 test("parseCompletionResponse rejects suggestions that are whitespace-only after truncation", () => {
   const text = " ".repeat(MAX_SUGGESTION_CHARS + 100) + "code();";
   assert.deepEqual(parseCompletionResponse({ choices: [{ text }] }), {
@@ -188,6 +305,46 @@ test("requestInlineCompletion posts a bounded payload to {base}/completions", as
     max_tokens: 64,
     temperature: 0,
   });
+});
+
+test("requestInlineCompletion surfaces the usage reported with a suggestion", async () => {
+  const fetchImpl = (() =>
+    Promise.resolve(
+      jsonResponse({
+        choices: [{ text: "suggestion" }],
+        usage: { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 },
+      }),
+    )) as unknown as typeof fetch;
+
+  const outcome = await requestInlineCompletion({
+    baseUrl: "https://api.example.com/v1",
+    apiKey: "sk-test",
+    userAgent: "test",
+    request: { model: "qwen3.8-flash", prompt: "const ", max_tokens: 64, temperature: 0 },
+    fetchImpl,
+  });
+
+  assert.deepEqual(outcome, {
+    ok: true,
+    text: "suggestion",
+    usage: { prompt_tokens: 12, completion_tokens: 3, total_tokens: 15 },
+  });
+});
+
+test("requestInlineCompletion omits usage when the response has none", async () => {
+  const fetchImpl = (() =>
+    Promise.resolve(jsonResponse({ choices: [{ text: "suggestion" }] }))) as unknown as typeof fetch;
+
+  const outcome = await requestInlineCompletion({
+    baseUrl: "https://api.example.com/v1",
+    apiKey: "sk-test",
+    userAgent: "test",
+    request: { model: "qwen3.8-flash", prompt: "const ", max_tokens: 64, temperature: 0 },
+    fetchImpl,
+  });
+
+  assert.equal(outcome.ok, true);
+  assert.equal("usage" in outcome, false);
 });
 
 test("requestInlineCompletion does not send the API key when endpoint authorization is canceled", async () => {
