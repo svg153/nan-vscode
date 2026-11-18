@@ -91,6 +91,25 @@ free: both workflows call Copilot, and Copilot usage is measured in AI Credits
 on every repository, public or private. The only genuinely free path is a
 deterministic workflow that never invokes an agent.
 
+### Model selection
+
+Both workflows pin no model, and gh-aw v1.3.x would answer that by routing the
+model per task (`goal: cost`, `mode: auto`) on Copilot inference. The workloads
+here are narrow and their budgets are hand-sized, so the frontmatter keeps the
+pre-v1.3 behavior instead:
+
+```yaml
+engine:
+  id: copilot
+  model-routing: false
+```
+
+That leaves one fixed engine and model per workflow, overridable at run time
+with the `GH_AW_MODEL_AGENT_COPILOT` (agent) or `GH_AW_DEFAULT_MODEL_COPILOT`
+(default) repository variables. `engine.model-routing: false` needs the
+`model-routing` key under an object-form `engine:` block; a bare `engine:
+model-routing: false` fails to compile.
+
 ### Cost guardrails
 
 Both workflows therefore declare a budget instead of inheriting the 1000 AIC
@@ -124,13 +143,21 @@ of detection. To tighten the detection side, set the
 per-workflow frontmatter field for it, so `gh aw compile` will not preserve a
 hand edit to the lock file.
 
-**Manual dispatch bypasses the daily guardrail.** In the pinned gh-aw v1.2.2
+**Manual dispatch bypasses the daily guardrail.** In the pinned gh-aw v1.3.1
 runtime the daily AIC guardrail is skipped for `workflow_dispatch`, and
 `feature-scout` exposes that trigger next to its daily `schedule`. A maintainer
 can therefore keep launching scout runs after the 400 AIC daily threshold is
 crossed; those runs still enforce the per-run `max-ai-credits` limit on the
 agent, but the 24-hour sum stops being a hard stop. `copilot-triage` only
 listens to `issues`, so it has no manual escape hatch.
+
+**The guardrail fails closed when GitHub's API quota is exhausted.** gh-aw
+v1.3.x reports a `quota_blocked` guardrail status when it cannot finish
+accounting the previous 24 hours of runs, and both workflows gate the agent job
+on that status, so an unverifiable daily sum stops the run instead of letting it
+spend unmeasured. The same fail-closed path applies to threat detection, which
+is deferred rather than counted as a pass when AWF attestation verification
+cannot complete.
 
 Inference auth stays on the `COPILOT_GITHUB_TOKEN` PAT. The
 `permissions: copilot-requests: write` alternative authenticates with
@@ -255,7 +282,9 @@ your approval. If you later want low-risk churn removed, set
 ## One-time repository setup (owner only)
 
 1. **Install the CLI** (maintainers editing workflows):
-   `gh extension install github/gh-aw`
+   `gh extension install github/gh-aw --pin v1.3.1` — v1.3.1 is a prerelease, so
+   a plain install still resolves to the older `latest` (v1.2.2) and would
+   recompile the locks against the wrong runtime.
 2. **Create the queue label:**
    ```powershell
    gh label create agent:ready --repo svg153/nan-vscode `
