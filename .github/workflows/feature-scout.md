@@ -10,6 +10,14 @@ permissions:
 
 network: defaults
 
+# gh-aw v1.3.x routes model selection by default (`goal: cost`, `mode: auto`)
+# when a workflow pins no model. Keep the pre-upgrade behavior: one fixed
+# engine/model per workflow, chosen by `GH_AW_MODEL_*` repository variables if
+# set, so scout cost and output stay predictable.
+engine:
+  id: copilot
+  model-routing: false
+
 # Cost guardrails: the scout reads PRs, issues and diffs, so it needs more
 # budget than triage, but nowhere near the 1000 AIC default.
 max-ai-credits: 400
@@ -22,7 +30,8 @@ max-daily-ai-credits: 400
 #   2. replace `network: defaults` above with
 #      network:
 #        allowed: [defaults, api.nan.builders]
-#   3. uncomment the engine block below.
+#   3. replace the `engine:` block above (it only pins `model-routing: false`,
+#      which does not apply to non-Copilot engines) with the block below.
 # gh-aw's OpenAI route speaks the Responses API, so confirm the gateway serves
 # /v1/responses before enabling. See
 # docs/agentic-pipeline.md#swapping-the-model-provider-draft.

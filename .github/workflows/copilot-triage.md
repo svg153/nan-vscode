@@ -9,6 +9,14 @@ permissions:
 
 network: defaults
 
+# gh-aw v1.3.x routes model selection by default (`goal: cost`, `mode: auto`)
+# when a workflow pins no model. Keep the pre-upgrade behavior: one fixed
+# engine/model per workflow, chosen by `GH_AW_MODEL_*` repository variables if
+# set, so triage cost and output stay predictable.
+engine:
+  id: copilot
+  model-routing: false
+
 # Cost guardrails: a triage run is a label check plus one assignment. The
 # default budget (1000 AIC = $10) is far above what this needs, so cap it.
 max-ai-credits: 150
