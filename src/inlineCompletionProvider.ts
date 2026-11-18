@@ -4,11 +4,13 @@ import { diagnostic } from "./diagnostics";
 import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
 import {
   buildCompletionRequest,
+  recordCompletionUsage,
   requestInlineCompletion,
   waitForInlineCompletionDebounce,
 } from "./inlineCompletion";
 import type { SlotQueueRegistry } from "./openai/slotQueue";
 import { describeRoute, normalizeProfileIds, profileSecretName, resolveModelRoute } from "./profiles";
+import type { UsageTracker } from "./usageTracker";
 
 /**
  * Opt-in inline ghost-text completions through the legacy `POST /completions`
@@ -23,6 +25,8 @@ export class NanInlineCompletionProvider implements vscode.InlineCompletionItemP
     private readonly endpointAuthorizer: HttpEndpointAuthorizer,
     /** Slots shared with chat so both paths respect one per-key limit. */
     private readonly slots: Pick<SlotQueueRegistry, "acquire">,
+    /** Local usage history shared with chat; counts and model IDs only. */
+    private readonly usage: Pick<UsageTracker, "record">,
   ) {}
 
   async provideInlineCompletionItems(
@@ -96,6 +100,9 @@ export class NanInlineCompletionProvider implements vscode.InlineCompletionItemP
       ) {
         return undefined;
       }
+      // Fire-and-forget: a local memento write must never delay the ghost text
+      // or race the next trigger, and `recordCompletionUsage` never throws.
+      void recordCompletionUsage(this.usage, model, outcome);
       return [{ insertText: outcome.text, range: new vscode.Range(position, position) }];
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
