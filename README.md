@@ -98,6 +98,23 @@ Available settings:
 | `nanBuilders.maxParallelRequests` | `7` | Requests allowed in flight per API key, shared by chat and inline completions. NaN serves 7 per key and answers more with HTTP 429, so extra requests wait in a FIFO queue. Values above 7 are capped at the gateway limit. |
 | `nanBuilders.maxRetries` | `2` | Transparent retries for a chat request that fails **before** its stream emits the first byte: throttle 429 with `Retry-After`, gateway errors (502/503/504 and other 5xx), connect timeouts, and network failures. The wait is the gateway's `Retry-After` (capped at 8 s), otherwise jittered exponential backoff starting at 0.5 s and capped at 8 s. Retries reuse the same key, never run once the stream has started, and never apply to an exhausted-credit 429 or any other 4xx. `0` disables retries. Values above 5 are capped at 5. |
 
+## Shared vendor id and other NaN integrations
+
+VS Code identifies a chat model by the pair `(vendor, model ID)`. This extension registers the vendor id `nan-builders`, so its models appear as `nan-builders/<model-id>`. That string is an internal model identifier, not the extension's product or Marketplace name (`svg153.nan-builders-vscode`), and it is deliberately not exclusive: another NaN integration that registers the same vendor — `SrScorpio/nan-bridge`, for example — can be installed alongside this one.
+
+With two integrations on the same vendor, expect:
+
+- **Duplicate model entries.** The picker can list the same model ID more than once, and the entry does not say which extension published it.
+- **Ambiguous selections.** VS Code stores a selection as `(vendor, model ID)`, so a saved model does not name the extension that produced it and may be answered by the other one.
+- **No shared keys or configuration.** Each extension keeps its own API keys, profiles, and settings, so a key entered in one is never used by the other. A selection that ends up served by the other extension uses that extension's key.
+
+What you can do:
+
+- Keep one integration active per vendor: disable or uninstall the other one before selecting a NaN model.
+- If you want both, select the model under the provider you intend, and re-check the selection when a model behaves or fails in a way you did not expect.
+
+The vendor id is treated as an immutable contract rather than a value that follows the product name. Renaming it would invalidate existing model selections, so a rename would only arrive as a documented migration; the extension keeps `nan-builders` today. The decision and its follow-ups are recorded in [docs/DECISIONS.md](docs/DECISIONS.md#autonomous-decision-vendor-id-stays-nan-builders-as-an-immutable-contract).
+
 ## API key profiles
 
 When you hold more than one NaN API key (for example a work key and a personal key), profiles let one model use one key and everything else use another.
@@ -127,7 +144,7 @@ Notes:
 - **Opt-in failover, one hop.** `nanBuilders.failoverOnThrottle` (machine-scoped, off by default) retries a single chat request with the next profile that has its own key when the routed key answers `rate_limit_exceeded` — only that classification: an exhausted-credits 429 (`insufficient_quota`), a 401/403, or any other error still fails as it does today. Routing stays fixed, so the key `resolveModelRoute` chose is always tried first and the retry never jumps ahead of an assignment; a request never chains more than one hop. Transparent retries (`nanBuilders.maxRetries`, see [Usage and limitations](#usage-and-limitations)) run first and stay on the routed key, so this hop only happens once that key's retry budget is spent. The throttled key then rests for the gateway's `Retry-After`, or 60 s when the header is absent, capped at 300 s, and a key in cooldown is skipped by later requests until the window lapses (two profiles storing the same key share one cooldown). Enabling it shows a one-time notice, **Show Diagnostics** lists the cooldowns by profile ID with whole seconds left and never a key, and when no profile can serve the retry the original error propagates with the IDs of the profiles tried appended.
 - **Own accounts only, and no automatic rotation by default.** Profile keys must be accounts you own and pay for. NaN's terms describe each member's key as personal and non-transferable, forbid sharing or transferring a key, and forbid attempting to exceed the published limits; the limits are per key (60 requests per minute and 7 concurrent requests on the base plan) and credits do not lift them. Besides the opt-in hop above, the extension never rotates keys on its own: the setting defaults to off, and moving a model to another key stays a manual choice (switch the active profile, or assign the model to another profile). Do not configure a key you do not own, and do not expect several profiles to add up to one larger allowance (see [docs/DECISIONS.md](docs/DECISIONS.md)).
 - **No profiles, no change.** With `nanBuilders.profiles` empty, the extension behaves exactly as before and the single `nanBuilders.apiKey` keeps working; no migration is required.
-- **One vendor, several providers.** Profiles are read from this extension's settings and SecretStorage. If another extension registers the same `nan-builders` vendor, VS Code can list duplicate model entries and the two extensions do not share profile configuration (see [docs/DECISIONS.md](docs/DECISIONS.md)).
+- **One vendor, several providers.** Profiles are read from this extension's settings and SecretStorage only, so another extension registering the same `nan-builders` vendor never sees or reuses them; see [Shared vendor id and other NaN integrations](#shared-vendor-id-and-other-nan-integrations) for duplicate model entries and ambiguous selections.
 
 ## Diagnostics
 
