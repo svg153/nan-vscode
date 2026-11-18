@@ -17,6 +17,8 @@ const c8Result = spawnSync(
     cwd: root,
     stdio: "inherit",
     env: { ...process.env, NODE_OPTIONS: "--no-warnings" },
+    // .cmd shims cannot be spawned directly on Windows/Node >= 22 (EINVAL).
+    shell: process.platform === "win32",
   },
 );
 
