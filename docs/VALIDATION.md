@@ -173,12 +173,18 @@ not be enabled by default without an explicit maintainer decision.
    Agent Host); test both separately. A successful raw LM stream test does **not**
    establish that the Chat UI or Agent Host consumes the part correctly.
 3. Run `npm run test:insiders` with its mock gateway (no real NaN key). It
-   checks the raw usage data part when available and normal local persistence.
+   checks the raw usage data part when available, that a request retried after a
+   pre-stream throttle still reports exactly one part for the settled turn, and
+   normal local persistence.
 4. Test a response without a `usage` chunk, cancelled streams, NaN
    reasoning-only truncation and malformed counts: none should produce a
    misleading native success token count.
 5. Confirm older VS Code versions remain functional with the opt-in feature
    skipped, and that experimental part failures never fail a chat request.
+6. With `nanBuilders.maxRetries` and `nanBuilders.failoverOnThrottle` enabled,
+   verify a retried or failed-over request reports native usage **once**, for the
+   attempt that finally served it: never once per attempt, and never for an
+   attempt that failed, was cancelled or was truncated.
 
 Do not infer cached input or reasoning tokens from prompt/completion counts.
 Agent Host cache forwarding is separately tracked by microsoft/vscode#348390.
