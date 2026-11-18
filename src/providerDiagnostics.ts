@@ -3,6 +3,7 @@ import { SHARED_KEY_LABEL, type FailoverDiagnostics } from "./failover";
 import { profileKeyPresence } from "./profiles";
 import { sanitizeErrorBody } from "./providerErrors";
 import { sanitizeUpstreamText } from "./text";
+import { formatVendorConflictDiagnosticLine, type VendorConflict } from "./vendorConflict";
 
 /**
  * Read-only troubleshooting helpers behind "Test Connection" and
@@ -94,6 +95,11 @@ export interface DiagnosticsInput {
   /** Override for tests; defaults to the current time. */
   readonly generatedAt?: string;
   readonly vendor?: string;
+  /**
+   * Another provider registering the same vendor, when the runtime check saw
+   * one. Ids and counts only: the report line never names a key.
+   */
+  readonly vendorConflict?: VendorConflict;
 }
 
 /**
@@ -138,6 +144,10 @@ export function collectDiagnostics(input: DiagnosticsInput): string {
       `\`vscode.lm.selectChatModels\` returned no model for vendor \`${vendor}\`. ` +
         "Reload the window, then run **NaN Builders: Refresh Models**.",
     );
+  }
+
+  if (input.vendorConflict) {
+    lines.push("", "## Vendor conflict", "", formatVendorConflictDiagnosticLine(input.vendorConflict));
   }
 
   lines.push(

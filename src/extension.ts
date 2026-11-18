@@ -45,6 +45,14 @@ import {
 } from "./usagePresentation";
 import { UsageTracker } from "./usageTracker";
 import { FAILOVER_SETTING, FAILOVER_WARNING, failoverWarningPending } from "./failover";
+import {
+  MANAGE_PROVIDER_ACTION,
+  SHOW_DIAGNOSTICS_ACTION,
+  announceVendorConflictOnce,
+  detectVendorConflict,
+  vendorConflictDiagnosticDetails,
+  type VendorConflict,
+} from "./vendorConflict";
 
 const USAGE_LINK_ICON = "$(link-external)";
 /** Global-state key recording that the own-accounts failover warning was shown. */
@@ -390,6 +398,29 @@ export function activate(context: vscode.ExtensionContext): {
     }),
   );
   diagnostic("activate.complete", { subscriptionCount: context.subscriptions.length });
+
+  // Runtime vendor-collision check (#169): a second extension may register the
+  // same immutable `nan-builders` vendor. Non-blocking and best-effort, so an
+  // empty, partial, or failing answer never delays activation or throws.
+  if (context.extensionMode !== vscode.ExtensionMode.Test) {
+    void (async () => {
+      const conflict = await detectHostVendorConflict(provider);
+      if (!conflict) {
+        return;
+      }
+      diagnostic("provider.vendorConflict", vendorConflictDiagnosticDetails(conflict));
+      announceVendorConflictOnce({
+        conflict,
+        state: context.globalState,
+        showWarningMessage: (message, ...actions) => vscode.window.showWarningMessage(message, ...actions),
+        onAction: (action) => {
+          void vscode.commands.executeCommand(
+            action === SHOW_DIAGNOSTICS_ACTION ? "nanBuilders.showDiagnostics" : "nanBuilders.manage",
+          );
+        },
+      });
+    })();
+  }
 
   // Initial account-wide usage fetch. Skipped in tests: the integration mock has no /v1/usage.
   if (context.extensionMode !== vscode.ExtensionMode.Test) {
@@ -1206,9 +1237,59 @@ async function testConnection(provider: NanChatModelProvider): Promise<void> {
 }
 
 /**
+ * Model ids this extension publishes right now. `silent` never prompts for a
+ * key, so with no key configured this is an empty list (nothing published yet).
+ * `undefined` means the provider could not answer; detection then skips.
+ */
+async function publishedModelIds(provider: NanChatModelProvider): Promise<string[] | undefined> {
+  const cancellation = new vscode.CancellationTokenSource();
+  try {
+    const models = await provider.provideLanguageModelChatInformation({ silent: true }, cancellation.token);
+    return models.map((model) => model.id);
+  } catch (error) {
+    diagnostic("provider.vendorConflict.checkFailed", {
+      errorName: error instanceof Error ? error.name : typeof error,
+    });
+    return undefined;
+  } finally {
+    cancellation.dispose();
+  }
+}
+
+/**
+ * Compares the host's `nan-builders` models with the ids this extension
+ * publishes. Never throws: a failing `selectChatModels` is diagnostics-only.
+ * When the caller already selected the host models, pass them to avoid a
+ * second selection.
+ */
+async function detectHostVendorConflict(
+  provider: NanChatModelProvider,
+  hostModels?: Awaited<ReturnType<typeof selectHostModels>>,
+): Promise<VendorConflict | undefined> {
+  const ownIds = await publishedModelIds(provider);
+  if (!ownIds || ownIds.length === 0) {
+    return undefined;
+  }
+  let observed: Awaited<ReturnType<typeof selectHostModels>>;
+  try {
+    observed = hostModels ?? (await selectHostModels(vscode.lm, PROVIDER_VENDOR));
+  } catch (error) {
+    diagnostic("provider.vendorConflict.checkFailed", {
+      errorName: error instanceof Error ? error.name : typeof error,
+    });
+    return undefined;
+  }
+  return detectVendorConflict(
+    observed.map((model) => model.id),
+    ownIds,
+  );
+}
+
+/**
  * "Show Diagnostics": a pasteable Markdown dump of versions, endpoint, the
- * models this VS Code host actually exposes, the configured key count, and the
- * locally tracked models. Never includes key material.
+ * models this VS Code host actually exposes, the configured key count, the
+ * locally tracked models, and any runtime vendor conflict. Never includes key
+ * material.
  */
 async function showDiagnostics(
   context: vscode.ExtensionContext,
@@ -1228,6 +1309,7 @@ async function showDiagnostics(
 
   const secretKeys = await context.secrets.keys();
   const settings = profileSettings();
+  const vendorConflict = await detectHostVendorConflict(provider, hostModels);
   let markdown: string;
   try {
     markdown = collectDiagnostics({
@@ -1239,6 +1321,7 @@ async function showDiagnostics(
       secretKeys,
       trackedModels: provider.trackedModelIds(),
       lastDiscoveryError: provider.discoveryError(),
+      vendorConflict,
       profiles: settings.profiles,
       activeProfile: resolveActiveProfile(settings),
       profileAssignments: Object.keys(effortOverrides())
