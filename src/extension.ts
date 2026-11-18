@@ -3,6 +3,7 @@ import { NAN_DASHBOARD_URL, NAN_DOCS_URL, PROVIDER_VENDOR, SECRET_API_KEY, DEFAU
 import { configureDiagnosticFile, diagnostic } from "./diagnostics";
 import { HttpEndpointConsentDeniedError, HttpEndpointGuard } from "./httpEndpointGuard";
 import { NanInlineCompletionProvider } from "./inlineCompletionProvider";
+import { buildCompletionModelPickItems, completionModelFromPick } from "./completionModelPicker";
 import { NanChatModelProvider, ModelDiscoveryError } from "./provider";
 import { collectDiagnostics, formatConnectionOk, formatConnectionWarning, selectHostModels } from "./providerDiagnostics";
 import {
@@ -311,6 +312,7 @@ export function activate(context: vscode.ExtensionContext): {
       showDiagnostics(context, provider, reportOutputChannel()),
     ),
     vscode.commands.registerCommand("nanBuilders.setReasoningEffort", () => setModelReasoningEffort(provider)),
+    vscode.commands.registerCommand("nanBuilders.setCompletionModel", () => setCompletionModel(provider)),
     vscode.commands.registerCommand("nanBuilders.showUsage", () => {
       const picker = vscode.window.createQuickPick<vscode.QuickPickItem>();
       picker.title = "NaN Builders usage";
@@ -523,10 +525,70 @@ async function setModelReasoningEffort(provider: NanChatModelProvider): Promise<
   );
 }
 
+/**
+ * "Set Inline Completion Model": picks a discovered model, or clears
+ * `nanBuilders.completionModel` to turn the feature off. The existing setting
+ * listener registers or disposes the inline provider.
+ */
+async function setCompletionModel(provider: NanChatModelProvider): Promise<void> {
+  const cancellation = new vscode.CancellationTokenSource();
+  // A failure recorded by an earlier command must not veto a warm cache, so
+  // only a failure produced by this discovery call blocks the picker.
+  const previousFailure = provider.discoveryError();
+  let models: vscode.LanguageModelChatInformation[];
+  try {
+    models = await provider.provideLanguageModelChatInformation({ silent: true }, cancellation.token);
+  } finally {
+    cancellation.dispose();
+  }
+  const failure = provider.discoveryError();
+  if (failure && failure !== previousFailure) {
+    vscode.window.showWarningMessage(formatConnectionWarning(provider.getBaseUrl(), failure));
+    return;
+  }
+  if (models.length === 0) {
+    vscode.window.showWarningMessage(
+      "NaN Builders cannot set an inline completion model yet: no usable models were discovered for the configured API key. Run 'NaN Builders: Manage Provider' to add or validate a key, then try again.",
+    );
+    return;
+  }
+  const configuration = vscode.workspace.getConfiguration("nanBuilders");
+  const current = currentCompletionModel();
+  const pick = await vscode.window.showQuickPick(buildCompletionModelPickItems(models, current), {
+    title: "NaN Builders: Set Inline Completion Model",
+    placeHolder: "Choose the model used for ghost-text inline completions",
+    matchOnDescription: true,
+  });
+  const next = completionModelFromPick(pick);
+  if (next === undefined) {
+    return;
+  }
+  if (next === current) {
+    vscode.window.showInformationMessage(
+      next
+        ? `NaN Builders: inline completions already use ${next}.`
+        : "NaN Builders: inline completions are already disabled.",
+    );
+    return;
+  }
+  await configuration.update("completionModel", next, vscode.ConfigurationTarget.Global);
+  vscode.window.showInformationMessage(
+    next
+      ? `NaN Builders: inline completions now use ${next}.`
+      : "NaN Builders: inline completions disabled.",
+  );
+}
+
+/** Configured inline completion model, or "" when the feature is off. */
+function currentCompletionModel(): string {
+  return vscode.workspace.getConfiguration("nanBuilders").get<string>("completionModel", "").trim();
+}
+
 type ProviderAction =
   | "set"
   | "validate"
   | "clear"
+  | "completionModel"
   | "profiles"
   | "assign"
   | "unassign"
@@ -549,6 +611,7 @@ async function manageProvider(
   const existing = credential.apiKey;
   const scope = credentialScope(activeProfile);
   const assignments = Object.keys(effortOverrides()).filter((key) => parseProfileModelAssignment(key) !== undefined);
+  const completionModel = currentCompletionModel();
 
   const items: Array<vscode.QuickPickItem & { action?: ProviderAction }> = [
     {
@@ -572,6 +635,12 @@ async function manageProvider(
   }
 
   items.push(
+    { kind: vscode.QuickPickItemKind.Separator, label: "Inline completions" },
+    {
+      label: "$(edit) Set inline completion model",
+      description: completionModel ? `Current: ${completionModel}` : "Off",
+      action: "completionModel",
+    },
     { kind: vscode.QuickPickItemKind.Separator, label: "Profiles" },
     {
       label: "$(account) Manage profiles",
@@ -676,6 +745,9 @@ async function manageProvider(
       vscode.window.showInformationMessage(
         `NaN Builders API key removed from VS Code SecretStorage (${scope}).`,
       );
+      return;
+    case "completionModel":
+      await setCompletionModel(provider);
       return;
     case "profiles":
       await manageProfiles(context, provider, onKeyChanged);
