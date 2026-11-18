@@ -25,6 +25,12 @@
       "matchManagers": ["github-actions"],
       "matchUpdateTypes": ["major", "minor", "patch"],
       "minimumReleaseAge": "7 days"
+    },
+    {
+      "description": "gh-aw lock files are compiled artifacts: `gh aw compile` regenerates them and overwrites hand edits, and runtime pins such as node-version belong to the pinned gh-aw release. Upgrade them only through a gh-aw upgrade (see docs/agentic-pipeline.md), never via Renovate.",
+      "matchManagers": ["github-actions"],
+      "matchFileNames": [".github/workflows/*.lock.yml"],
+      "enabled": false
     }
   ]
 }
