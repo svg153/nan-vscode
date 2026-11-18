@@ -11,6 +11,7 @@ import {
   type ChatModelSelector,
 } from "../src/providerDiagnostics";
 import { profileSecretName } from "../src/profiles";
+import { detectVendorConflict } from "../src/vendorConflict";
 
 const SENTINEL_KEY = "sk-live-SENTINEL-8f4c2b";
 
@@ -109,6 +110,48 @@ test("diagnostics report explains an empty host model list", async () => {
   assert.match(markdown, /^- Configured keys\/profiles: 0/m);
   assert.match(markdown, /- Count: 0/);
   assert.match(markdown, /- Last discovery error: none recorded\./);
+});
+
+test("diagnostics report names a vendor conflict with counts only and no secrets", async () => {
+  const vendorConflict = detectVendorConflict(
+    ["glm5.3-flash", "gemma4", "foreign-model", "gemma4"],
+    ["glm5.3-flash", "gemma4"],
+  );
+  assert.ok(vendorConflict);
+  const markdown = collectDiagnostics({
+    extensionVersion: "1.5.1",
+    vscodeVersion: "1.104.0",
+    baseUrl: "https://api.nan.builders/v1",
+    configuration: stubSettings(),
+    hostModels: await hostModels([
+      { id: "glm5.3-flash", vendor: "nan-builders" },
+      { id: "gemma4", vendor: "nan-builders" },
+      { id: "foreign-model", vendor: "nan-builders" },
+      { id: "gemma4", vendor: "nan-builders" },
+    ]),
+    secretKeys: ["nanBuilders.apiKey"],
+    trackedModels: ["glm5.3-flash", "gemma4"],
+    vendorConflict,
+  });
+
+  assert.match(markdown, /## Vendor conflict/);
+  assert.match(markdown, /`provider\.vendorConflict`: vendor `nan-builders`; 2 model\(s\) observed from another provider/);
+  assert.match(markdown, /this extension is active \(2 model\(s\) published\)/);
+  assert.match(markdown, /Duplicate ids: `gemma4`\./);
+  assert.equal(markdown.includes(SENTINEL_KEY), false);
+});
+
+test("diagnostics report omits the vendor-conflict section when nothing conflicted", async () => {
+  const markdown = collectDiagnostics({
+    extensionVersion: "1.5.1",
+    vscodeVersion: "1.104.0",
+    baseUrl: "https://api.nan.builders/v1",
+    configuration: stubSettings(),
+    hostModels: await hostModels([{ id: "glm5.3-flash", vendor: "nan-builders" }]),
+    secretKeys: [],
+    trackedModels: ["glm5.3-flash"],
+  });
+  assert.doesNotMatch(markdown, /provider\.vendorConflict/);
 });
 
 test("diagnostics report shows the failover setting and any key cooldown with ids only", async () => {
