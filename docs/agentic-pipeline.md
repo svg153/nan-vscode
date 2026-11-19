@@ -308,7 +308,7 @@ your approval. If you later want low-risk churn removed, set
      publishing with a warning annotation and a job-summary note instead of
      failing; the rolling `preview` release still carries the VSIX.
    - `VSCE_PAT` at **repository** level (not only inside an environment): the
-     pre-release publish runs unattended on every merge and cannot wait for a
+     pre-release publish runs unattended for release-producing merges and cannot wait for a
      deployment approval. Scope the token to the `svg153` publisher.
    - **Preferred: trusted publishing (OIDC).** Azure DevOps global PATs are
      retired on 2026-12-01. In the
