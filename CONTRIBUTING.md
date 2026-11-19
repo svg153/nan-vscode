@@ -40,11 +40,6 @@ Releases are automated by Semantic Release from `main`. The generated [`CHANGELO
 
 ### Marketplace publishing
 
-Marketplace publication is never automatic. Every merge to `main` produces two artifacts:
-
-- a rolling **preview VSIX** attached to the `preview` prerelease (version stamped `<x.y.z>-preview.<run>.<attempt>`), and
-- when Semantic Release bumps a version, a stable GitHub Release carrying the versioned VSIX asset.
-
 After validating the preview (Install from VSIX in a disposable profile, see below), the maintainer promotes a stable release manually: **Actions → Publish stable to Marketplace → Run workflow** with the release tag (e.g. `v1.6.0`). The job is bound to the `marketplace` GitHub Environment; configure required reviewers there so publishing also needs an explicit approval click. The repository variable `MARKETPLACE_PUBLISH_ENABLED` and the old automatic publishing job were removed; delete the variable if it still exists.
 
 - A repository administrator must create the `marketplace` environment, add required reviewers, and disable administrator bypass where repository policy allows. The workflow reference alone does not configure or enforce those environment rules.
