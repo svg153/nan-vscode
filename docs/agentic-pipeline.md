@@ -382,9 +382,6 @@ your approval. If you later want low-risk churn removed, set
 ## Safety properties
 
 - Issues created by the scout always need a human `agent:ready` label.
-- Nothing reaches the Marketplace **stable** channel without: CI + Insiders
-  smoke test passing, a human PR approval, a stable GitHub release, and an
-  environment-gated manual dispatch (optionally a second reviewer).
 - The pre-release channel is automatic, but it can never publish a stable
   version: `vsce publish --pre-release` only updates the pre-release channel,
   and promoting needs the separate, environment-gated workflow.
