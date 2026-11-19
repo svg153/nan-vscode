@@ -11,7 +11,7 @@ npm run test:coverage
 npm run package
 ```
 
-Expected: TypeScript compilation, `oxlint` lint, unit tests, and VSIX packaging all complete successfully. `npm run check` runs `clean → compile → lint → test:unit → test:insiders`.
+Expected: TypeScript compilation, unit tests, and VSIX packaging all complete successfully. `npm run check` runs `clean → compile → test:unit → test:extension → test:insiders`.
 
 ## GitHub Actions pin updates
 
