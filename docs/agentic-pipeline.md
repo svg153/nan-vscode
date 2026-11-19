@@ -258,7 +258,7 @@ releases out of the codebase:
    `npm install` / lockfile refreshes — including transitive dependencies
    Renovate can't see — npm refuses versions younger than 3 days. `npm ci`
    (CI) installs the vetted lockfile unchanged, so builds never break.
-   One-off exceptions: `npm config set min-release-age-exclude '["pkg"]'`.
+   One-off exceptions: `npm install --min-release-age-exclude=pkg`.
    Requires npm >= 11.10 (Node 26 bundles 11.20; older npm ignores the key).
 3. **Advisory gate** (`.github/workflows/dependency-review.yml`): every PR is
    diffed against `main` and fails if it *introduces* a package version with a
