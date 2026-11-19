@@ -258,7 +258,7 @@ releases out of the codebase:
    `npm install` / lockfile refreshes — including transitive dependencies
    Renovate can't see — npm refuses versions younger than 3 days. `npm ci`
    (CI) installs the vetted lockfile unchanged, so builds never break.
-   One-off exceptions: `npm config set min-release-age-exclude '["pkg"]'`.
+   One-off exceptions: `npm install --min-release-age-exclude=pkg`.
    Requires npm >= 11.10 (Node 26 bundles 11.20; older npm ignores the key).
 3. **Advisory gate** (`.github/workflows/dependency-review.yml`): every PR is
    diffed against `main` and fails if it *introduces* a package version with a
@@ -308,7 +308,7 @@ your approval. If you later want low-risk churn removed, set
      publishing with a warning annotation and a job-summary note instead of
      failing; the rolling `preview` release still carries the VSIX.
    - `VSCE_PAT` at **repository** level (not only inside an environment): the
-     pre-release publish runs unattended on every merge and cannot wait for a
+     pre-release publish runs unattended for release-producing merges and cannot wait for a
      deployment approval. Scope the token to the `svg153` publisher.
    - **Preferred: trusted publishing (OIDC).** Azure DevOps global PATs are
      retired on 2026-12-01. In the
@@ -352,10 +352,9 @@ your approval. If you later want low-risk churn removed, set
   dedup happens at PR time because each PR must pass required checks.
 - **Merge**: approve the Copilot code review, then
   `gh pr merge <n> --auto --squash` (or click *Enable auto-merge*).
-- **Validate a build**: the merge publishes the pre-release to the
+- **Validate a build**: a merge that cuts a release publishes the pre-release to the
   Marketplace once credentials are configured (before that, the job warns and
-  skips). Either way you can enable *Switch to Pre-Release Version*
-  for the extension and update normally. To test the exact artifact without
+  skips). To test the exact artifact without
   changing your channel, download the VSIX from the
   [`preview` release](https://github.com/svg153/nan-vscode/releases/tag/preview)
   and use *Extensions: Install from VSIX…* (or
@@ -379,16 +378,10 @@ your approval. If you later want low-risk churn removed, set
 1. Edit the `.md` file under `.github/workflows/` (never the `.lock.yml`).
 2. `gh aw compile` and commit both files.
 3. `gh aw status` / `gh aw logs feature-scout` for health and run logs.
-4. Dry-run a scout without creating issues by commenting nothing and using
-   `gh aw run feature-scout` on a test branch, or lower the `max` in
-   `safe-outputs.create-issue` while tuning.
 
 ## Safety properties
 
 - Issues created by the scout always need a human `agent:ready` label.
-- Nothing reaches the Marketplace **stable** channel without: CI + Insiders
-  smoke test passing, a human PR approval, a stable GitHub release, and an
-  environment-gated manual dispatch (optionally a second reviewer).
 - The pre-release channel is automatic, but it can never publish a stable
   version: `vsce publish --pre-release` only updates the pre-release channel,
   and promoting needs the separate, environment-gated workflow.
