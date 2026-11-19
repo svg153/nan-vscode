@@ -352,7 +352,7 @@ your approval. If you later want low-risk churn removed, set
   dedup happens at PR time because each PR must pass required checks.
 - **Merge**: approve the Copilot code review, then
   `gh pr merge <n> --auto --squash` (or click *Enable auto-merge*).
-- **Validate a build**: the merge publishes the pre-release to the
+- **Validate a build**: a merge that cuts a release publishes the pre-release to the
   Marketplace once credentials are configured (before that, the job warns and
   skips). Either way you can enable *Switch to Pre-Release Version*
   for the extension and update normally. To test the exact artifact without
