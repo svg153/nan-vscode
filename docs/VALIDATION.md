@@ -15,7 +15,7 @@ Expected: TypeScript compilation, unit tests, and VSIX packaging all complete su
 
 ## GitHub Actions pin updates
 
-Workflow actions are pinned to full commit SHAs, with the corresponding release tag in a trailing comment. Dependabot checks the GitHub Actions ecosystem weekly and opens reviewable update pull requests. For each update, verify the SHA against the action's upstream release/tag, update the version comment, inspect release notes and the workflow diff (permissions, inputs, artifact paths/retention, and release behavior), then require the pull-request CI checks before merging. Do not broaden workflow permissions or alter secret use as part of a routine pin update.
+Workflow actions are pinned to full commit SHAs, with the corresponding release tag in a trailing comment. For each update, verify the SHA against the action's upstream release/tag, update the version comment, inspect release notes and the workflow diff (permissions, inputs, artifact paths/retention, and release behavior), then require the pull-request CI checks before merging. Do not broaden workflow permissions or alter secret use as part of a routine pin update.
 
 ## Unit-test coverage gate
 
