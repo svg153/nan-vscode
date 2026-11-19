@@ -19,7 +19,7 @@ Workflow actions are pinned to full commit SHAs, with the corresponding release 
 
 ## Unit-test coverage gate
 
-`npm run test:coverage` measures compiled files under `src/` with c8; tests and generated output are excluded. It enforces a minimum of **58.99% total source line coverage**, the measured round-two baseline. The gate reads c8's `coverage/coverage-summary.json` and reports both measured and required percentages when it fails. Its unit test uses temporary summaries just above and below the floor to exercise both outcomes without changing generated coverage artifacts.
+`npm run test:coverage` measures compiled files under `src/` with c8; tests and generated output are excluded. It enforces a minimum of **58.99% total source line coverage**, the measured round-two baseline. To inspect per-file coverage, read each `files` entry's source `path` and `line.pct` in `coverage/coverage-summary.json`, generated from LCOV by `scripts/generate-coverage-summary.cjs`; the gate reports measured and required percentages on failure. Its unit test uses temporary summaries just above and below the floor to exercise both outcomes without changing generated coverage artifacts.
 
 Raise the floor only after a new coverage report establishes a higher baseline and the corresponding test improvements are included. Keep the `src/` include and `test/` exclusion aligned with the documented source-only scope; do not lower the threshold to mask a regression.
 
