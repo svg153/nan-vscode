@@ -378,9 +378,6 @@ your approval. If you later want low-risk churn removed, set
 1. Edit the `.md` file under `.github/workflows/` (never the `.lock.yml`).
 2. `gh aw compile` and commit both files.
 3. `gh aw status` / `gh aw logs feature-scout` for health and run logs.
-4. Dry-run a scout without creating issues by commenting nothing and using
-   `gh aw run feature-scout` on a test branch, or lower the `max` in
-   `safe-outputs.create-issue` while tuning.
 
 ## Safety properties
 
