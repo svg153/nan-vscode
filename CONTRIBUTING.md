@@ -44,7 +44,6 @@ After validating the preview (Install from VSIX in a disposable profile, see bel
 
 - A repository administrator must create the `marketplace` environment, add required reviewers, and disable administrator bypass where repository policy allows. The workflow reference alone does not configure or enforce those environment rules.
 - `VSCE_PAT` must be an Azure DevOps personal access token with the **Marketplace: Manage** scope for the `svg153` publisher (`vsce verify-pat svg153` runs first). The value is masked in logs and must never be committed or printed.
-- Preview releases are never published to the Marketplace, and prerelease versions sort below the matching stable, so installs self-heal on promotion.
 - If `VSCE_PAT` is missing or rejected, the promote job fails with an explicit error and the GitHub Release VSIX remains available for recovery.
 - Microsoft Entra ID workload identity federation (`vsce publish --azure-credential`) is the preferred long-term credential once the publisher is linked to Entra ID; global Azure DevOps PATs are scheduled for retirement on 2026-12-01.
 - The listing is a community publication under `svg153`; keep README and Marketplace wording accurate about ownership and support.
