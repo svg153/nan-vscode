@@ -43,6 +43,7 @@
     "onCommand:nanBuilders.showModels",
     "onCommand:nanBuilders.testConnection",
     "onCommand:nanBuilders.showDiagnostics",
+    "onCommand:nanBuilders.copyDiagnostics",
     "onCommand:nanBuilders.setCompletionModel",
     "onCommand:nanBuilders.switchProfile"
   ],
@@ -119,6 +120,11 @@
         "command": "nanBuilders.showDiagnostics",
         "category": "NaN Builders",
         "title": "Show Diagnostics"
+      },
+      {
+        "command": "nanBuilders.copyDiagnostics",
+        "category": "NaN Builders",
+        "title": "Copy Diagnostics Report"
       }
     ],
     "configuration": {

@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  DIAGNOSTICS_COPIED_MESSAGE,
   MAX_REPORTED_MODEL_IDS,
   collectDiagnostics,
   describeDiscovery,
+  formatClipboardReport,
   formatConnectionOk,
   formatConnectionWarning,
   formatEndpointForDisplay,
@@ -34,6 +36,18 @@ function stubSettings(values: Record<string, unknown> = {}) {
     get<T>(key: string, defaultValue: T): T {
       return (values[key] as T | undefined) ?? defaultValue;
     },
+  };
+}
+
+/**
+ * Stub SecretStorage holding sentinel values. The diagnostics snapshot reads
+ * `keys()` only, so these values model a configured key that must never reach
+ * the copied report.
+ */
+function stubSecrets(values: Record<string, string>) {
+  return {
+    keys: async () => Object.keys(values),
+    get: async (key: string) => values[key],
   };
 }
 
@@ -92,6 +106,56 @@ test("diagnostics report never contains a key value, even when the gateway echoe
   assert.doesNotMatch(markdown, /Bearer/i);
   assert.match(markdown, /- Last discovery error: Gateway said: invalid_api_key bad_key\./);
   assert.match(markdown, /No API key, token, or Authorization header is included in this report\./);
+});
+
+test("clipboard report excludes a configured API key value", async () => {
+  const secrets = stubSecrets({
+    "nanBuilders.apiKey": SENTINEL_KEY,
+    [profileSecretName("work")]: SENTINEL_KEY,
+  });
+
+  const report = formatClipboardReport(
+    collectDiagnostics({
+      extensionVersion: "1.5.1",
+      vscodeVersion: "1.104.0",
+      baseUrl: "https://api.nan.builders/v1",
+      configuration: stubSettings(),
+      hostModels: await hostModels([{ id: "glm5.3-flash", vendor: "nan-builders", maxInputTokens: 1_000 }]),
+      secretKeys: await secrets.keys(),
+      profiles: ["work"],
+      activeProfile: "work",
+      trackedModels: ["glm5.3-flash"],
+    }),
+  );
+
+  assert.equal(report.includes(SENTINEL_KEY), false, "a configured key value must never reach the clipboard");
+  assert.doesNotMatch(report, /authorization\s*:/i);
+  assert.doesNotMatch(report, /Bearer/i);
+  assert.match(report, /safe to paste into a bug report/);
+  assert.match(report, /^- API key configured: yes$/m);
+  assert.match(report, /^- Configured keys\/profiles: 2 \(count only; key values are never read\)$/m);
+  assert.match(report, /^# NaN Builders diagnostics$/m);
+});
+
+test("clipboard report states that no API key is configured and still copies", async () => {
+  const secrets = stubSecrets({});
+
+  const report = formatClipboardReport(
+    collectDiagnostics({
+      extensionVersion: "1.5.1",
+      vscodeVersion: "1.104.0",
+      baseUrl: "https://api.nan.builders/v1",
+      configuration: stubSettings(),
+      hostModels: await hostModels([]),
+      secretKeys: await secrets.keys(),
+      trackedModels: [],
+    }),
+  );
+
+  assert.match(report, /^- API key configured: no$/m);
+  assert.match(report, /^# NaN Builders diagnostics$/m);
+  assert.ok(report.length > 0, "the report is copied even without a key");
+  assert.match(DIAGNOSTICS_COPIED_MESSAGE, /copied to the clipboard/);
 });
 
 test("diagnostics report explains an empty host model list", async () => {

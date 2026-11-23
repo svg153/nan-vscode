@@ -154,13 +154,14 @@ Notes:
 
 ## Diagnostics
 
-Three read-only commands help when the model picker is empty or a request fails. None of them sends a chat request, and none prints an API key, token, or `Authorization` header.
+Four read-only commands help when the model picker is empty or a request fails. None of them sends a chat request, and none prints an API key, token, or `Authorization` header.
 
 - **NaN Builders: Test Connection** runs model discovery silently and reports either `OK — N model(s) reachable (id, ...)` or an actionable warning naming the base URL, the HTTP status, the sanitized gateway error, and the command to run next.
-- **NaN Builders: Show Available Models** lists the chat models the configured key can reach, with the context window, output limit, and capability hints, and copies the selected model ID for `profile::model` routing or `nanBuilders.completionModel`. It reuses the model-discovery cache and never changes the chat model selection.
 - **NaN Builders: Show Diagnostics** opens a Markdown report with the VS Code and extension versions, the effective base URL, the discovery mode, the models this VS Code host exposes through `vscode.lm.selectChatModels` (ID and `maxInputTokens`), the number of configured keys/profiles (count only; values are never read), the configured profile IDs with whether each has a key (`configured`/`missing`) and which model is routed to which profile, whether failover on throttle is on and which profile keys are cooling down with the seconds left, and the locally tracked model IDs. When the report cannot be opened as a document, the same text is written to the output channel.
+- **NaN Builders: Copy Diagnostics Report** puts the same redacted report on the clipboard and confirms it, so a bug report can be pasted without selecting text by hand. It reuses the report above: key values, profile secret values, and the `Authorization` header are never included, and the clipboard text starts with a short comment saying it is safe to paste.
+- **NaN Builders: Show Available Models** lists the chat models the configured key can reach, with the context window, output limit, and capability hints, and copies the selected model ID for `profile::model` routing or `nanBuilders.completionModel`. It reuses the model-discovery cache and never changes the chat model selection.
 
-All three commands print a display-only form of the base URL: embedded credentials (`user:password@`) are removed and the values of credential-bearing query or fragment parameters (`api_key`, `key`, `token`, and similar) are replaced with `******`, so a shared report never leaks a secret. An unparseable base URL is reported as `(unparseable base URL)` instead of being echoed.
+All four commands print a display-only form of the base URL: embedded credentials (`user:password@`) are removed and the values of credential-bearing query or fragment parameters (`api_key`, `key`, `token`, and similar) are replaced with `******`, so a shared report never leaks a secret. An unparseable base URL is reported as `(unparseable base URL)` instead of being echoed.
 
 ## Reasoning effort per model
 
