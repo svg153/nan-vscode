@@ -5,7 +5,7 @@ import { HttpEndpointConsentDeniedError, HttpEndpointGuard } from "./httpEndpoin
 import { NanInlineCompletionProvider } from "./inlineCompletionProvider";
 import { buildCompletionModelPickItems, completionModelFromPick } from "./completionModelPicker";
 import { NanChatModelProvider, ModelDiscoveryError } from "./provider";
-import { collectDiagnostics, formatConnectionOk, formatConnectionWarning, selectHostModels } from "./providerDiagnostics";
+import { collectDiagnostics, DIAGNOSTICS_COPIED_MESSAGE, formatClipboardReport, formatConnectionOk, formatConnectionWarning, selectHostModels, type DiagnosticsInput } from "./providerDiagnostics";
 import {
   AUTO_EFFORT,
   MAX_PROFILE_ID_LENGTH,
@@ -319,6 +319,7 @@ export function activate(context: vscode.ExtensionContext): {
     vscode.commands.registerCommand("nanBuilders.showDiagnostics", () =>
       showDiagnostics(context, provider, reportOutputChannel()),
     ),
+    vscode.commands.registerCommand("nanBuilders.copyDiagnostics", () => copyDiagnostics(context, provider)),
     vscode.commands.registerCommand("nanBuilders.setReasoningEffort", () => setModelReasoningEffort(provider)),
     vscode.commands.registerCommand("nanBuilders.setCompletionModel", () => setCompletionModel(provider)),
     vscode.commands.registerCommand("nanBuilders.showUsage", () => {
@@ -1286,6 +1287,65 @@ async function detectHostVendorConflict(
 }
 
 /**
+ * Shared snapshot behind "Show Diagnostics" and "Copy Diagnostics Report".
+ * Selecting host models can run provider discovery, which updates the native
+ * endpoint, stored key, cache, and discovery error, so it is selected first and
+ * the returned input reflects the state those models were produced from. Only
+ * secret *names* are read here: key values never enter the snapshot.
+ */
+async function diagnosticsInput(
+  context: vscode.ExtensionContext,
+  provider: NanChatModelProvider,
+): Promise<DiagnosticsInput> {
+  let hostModels: Awaited<ReturnType<typeof selectHostModels>>;
+  try {
+    hostModels = await selectHostModels(vscode.lm, PROVIDER_VENDOR);
+  } catch (error) {
+    throw new Error(`NaN Builders diagnostics failed to read the host model list: ${errorMessage(error)}`);
+  }
+
+  let secretKeys: readonly string[];
+  try {
+    secretKeys = await context.secrets.keys();
+  } catch (error) {
+    throw new Error(`NaN Builders diagnostics failed to read the stored key list: ${errorMessage(error)}`);
+  }
+
+  const settings = profileSettings();
+  const vendorConflict = await detectHostVendorConflict(provider, hostModels);
+  return {
+    extensionVersion: String(context.extension.packageJSON.version ?? "unknown"),
+    vscodeVersion: vscode.version,
+    baseUrl: provider.getBaseUrl(),
+    configuration: vscode.workspace.getConfiguration("nanBuilders"),
+    hostModels,
+    secretKeys,
+    trackedModels: provider.trackedModelIds(),
+    lastDiscoveryError: provider.discoveryError(),
+    vendorConflict,
+    profiles: settings.profiles,
+    activeProfile: resolveActiveProfile(settings),
+    profileAssignments: Object.keys(effortOverrides())
+      .map((key) => parseProfileModelAssignment(key))
+      .filter((assignment): assignment is { profileId: string; modelId: string } => assignment !== undefined),
+    failover: provider.failoverState(),
+  };
+}
+
+/** Report text shared by both diagnostics commands; errors are user-facing. */
+async function diagnosticsReport(
+  context: vscode.ExtensionContext,
+  provider: NanChatModelProvider,
+): Promise<string> {
+  const input = await diagnosticsInput(context, provider);
+  try {
+    return collectDiagnostics(input);
+  } catch (error) {
+    throw new Error(`NaN Builders diagnostics failed to build the report: ${errorMessage(error)}`);
+  }
+}
+
+/**
  * "Show Diagnostics": a pasteable Markdown dump of versions, endpoint, the
  * models this VS Code host actually exposes, the configured key count, the
  * locally tracked models, and any runtime vendor conflict. Never includes key
@@ -1296,41 +1356,11 @@ async function showDiagnostics(
   provider: NanChatModelProvider,
   channel: vscode.OutputChannel,
 ): Promise<void> {
-  let hostModels: Awaited<ReturnType<typeof selectHostModels>>;
-  try {
-    // Selecting host models can run provider discovery, which updates the
-    // native endpoint, stored key, cache, and discovery error. Select first so
-    // the snapshot below reflects the state the host models were produced from.
-    hostModels = await selectHostModels(vscode.lm, PROVIDER_VENDOR);
-  } catch (error) {
-    vscode.window.showErrorMessage(`NaN Builders diagnostics failed to read the host model list: ${errorMessage(error)}`);
-    return;
-  }
-
-  const secretKeys = await context.secrets.keys();
-  const settings = profileSettings();
-  const vendorConflict = await detectHostVendorConflict(provider, hostModels);
   let markdown: string;
   try {
-    markdown = collectDiagnostics({
-      extensionVersion: String(context.extension.packageJSON.version ?? "unknown"),
-      vscodeVersion: vscode.version,
-      baseUrl: provider.getBaseUrl(),
-      configuration: vscode.workspace.getConfiguration("nanBuilders"),
-      hostModels,
-      secretKeys,
-      trackedModels: provider.trackedModelIds(),
-      lastDiscoveryError: provider.discoveryError(),
-      vendorConflict,
-      profiles: settings.profiles,
-      activeProfile: resolveActiveProfile(settings),
-      profileAssignments: Object.keys(effortOverrides())
-        .map((key) => parseProfileModelAssignment(key))
-        .filter((assignment): assignment is { profileId: string; modelId: string } => assignment !== undefined),
-      failover: provider.failoverState(),
-    });
+    markdown = await diagnosticsReport(context, provider);
   } catch (error) {
-    vscode.window.showErrorMessage(`NaN Builders diagnostics failed to build the report: ${errorMessage(error)}`);
+    vscode.window.showErrorMessage(errorMessage(error));
     return;
   }
 
@@ -1341,6 +1371,31 @@ async function showDiagnostics(
     channel.appendLine(markdown);
     channel.show(true);
   }
+}
+
+/**
+ * "Copy Diagnostics Report": the same redacted report as "Show Diagnostics" on
+ * the clipboard, ready to paste into a bug report, followed by a confirmation.
+ */
+async function copyDiagnostics(
+  context: vscode.ExtensionContext,
+  provider: NanChatModelProvider,
+): Promise<void> {
+  let report: string;
+  try {
+    report = formatClipboardReport(await diagnosticsReport(context, provider));
+  } catch (error) {
+    vscode.window.showErrorMessage(errorMessage(error));
+    return;
+  }
+
+  try {
+    await vscode.env.clipboard.writeText(report);
+  } catch (error) {
+    vscode.window.showErrorMessage(`NaN Builders could not copy the diagnostics report: ${errorMessage(error)}`);
+    return;
+  }
+  vscode.window.showInformationMessage(DIAGNOSTICS_COPIED_MESSAGE);
 }
 
 function accountItems(account: AccountUsageService): vscode.QuickPickItem[] {

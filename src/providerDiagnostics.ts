@@ -18,6 +18,9 @@ import { formatVendorConflictDiagnosticLine, type VendorConflict } from "./vendo
 /** How many reachable model IDs the Test Connection notification lists. */
 export const MAX_REPORTED_MODEL_IDS = 20;
 
+/** Confirmation shown after "Copy Diagnostics Report" writes the report. */
+export const DIAGNOSTICS_COPIED_MESSAGE = "NaN Builders diagnostics report copied to the clipboard.";
+
 /** Placeholder used in place of secrets and credential-bearing URL values. */
 const REDACTED = "******";
 
@@ -173,6 +176,21 @@ export function collectDiagnostics(input: DiagnosticsInput): string {
   );
 
   return lines.join("\n");
+}
+
+/**
+ * Clipboard form of the report behind "Copy Diagnostics Report". It wraps the
+ * same snapshot and redaction as "Show Diagnostics", so no API key value, no
+ * profile secret value, and no Authorization header can reach the clipboard;
+ * the leading notice tells the reader it is safe to paste into a bug report.
+ */
+export function formatClipboardReport(report: string): string {
+  return [
+    "<!-- NaN Builders diagnostics report: safe to paste into a bug report.",
+    "It contains versions, counts, model IDs, and display-only endpoints, never keys or Authorization headers. -->",
+    "",
+    report,
+  ].join("\n");
 }
 
 /**

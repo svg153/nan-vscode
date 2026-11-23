@@ -69,7 +69,10 @@ Important: treat `/v1/models` as the definitive API-key-filtered list. A model m
 7. **NaN Builders: Show Diagnostics** must list profile IDs and `key: set` /
    `key: missing` only. No SecretStorage value may appear in diagnostics,
    `settings.json`, or the extension log.
-8. With no profiles configured, the legacy `nanBuilders.apiKey` keeps working
+8. **NaN Builders: Copy Diagnostics Report** must put the same report on the
+   clipboard, confirm the copy, and contain no SecretStorage value or
+   `Authorization` header; with no key configured it must say so and still copy.
+9. With no profiles configured, the legacy `nanBuilders.apiKey` keeps working
    unchanged; no migration prompt appears.
 
 ## Basic streaming chat
