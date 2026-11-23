@@ -43,7 +43,8 @@
     "onCommand:nanBuilders.testConnection",
     "onCommand:nanBuilders.showDiagnostics",
     "onCommand:nanBuilders.copyDiagnostics",
-    "onCommand:nanBuilders.setCompletionModel"
+    "onCommand:nanBuilders.setCompletionModel",
+    "onCommand:nanBuilders.switchProfile"
   ],
   "main": "./out/src/extension.js",
   "contributes": {
@@ -93,6 +94,11 @@
         "command": "nanBuilders.setCompletionModel",
         "category": "NaN Builders",
         "title": "Set Inline Completion Model"
+      },
+      {
+        "command": "nanBuilders.switchProfile",
+        "category": "NaN Builders",
+        "title": "Switch Active Profile"
       },
       {
         "command": "nanBuilders.showUsage",
@@ -195,6 +201,22 @@
           "type": "string",
           "default": "",
           "description": "Model ID for opt-in inline (ghost-text) completions. Empty disables the feature and no completion request is sent. Requests use POST /completions with the last 4,000 characters before the cursor, are aborted when you keep typing, and never show stale text."
+                },
+                "nanBuilders.completionExcludedLanguages": {
+                  "type": "array",
+                  "default": ["plaintext", "dotenv", "properties"],
+                  "items": {
+                    "type": "string"
+                  },
+                  "markdownDescription": "Language IDs skipped by inline completions. When the active document reports one of these IDs, the extension sends no request, takes no queue slot, and records no usage. Matching is case-insensitive. Defaults to `plaintext`, `dotenv`, and `properties`; set to an empty array to disable language exclusions."
+                },
+                "nanBuilders.completionExcludedGlobs": {
+                  "type": "array",
+                  "default": ["**/.env*", "**/*.pem", "**/*.key", "**/secrets/**"],
+                  "items": {
+                    "type": "string"
+                  },
+                  "markdownDescription": "File globs skipped by inline completions. When the active document path matches one of these globs, the extension sends no request, takes no queue slot, and records no usage. Patterns support `**` (any path segments), `*` and `?` (within one segment), accept both `/` and `\\`, and are matched case-insensitively; a pattern without a leading `**` can match at any depth. Set to an empty array to disable path exclusions."
                 },
                 "nanBuilders.defaultReasoningEffort": {
                   "type": "string",

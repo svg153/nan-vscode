@@ -8,6 +8,12 @@ import { DEFAULT_MAX_PARALLEL_REQUESTS, SlotQueueRegistry, credentialId } from "
 import { ProviderError } from "../src/providerErrors";
 import { MAX_ERROR_RESPONSE_BYTES, MAX_JSON_RESPONSE_BYTES, ResponseTooLargeError } from "../src/responseBody";
 import { MAX_SSE_LINE_CHARS, StreamLimitError } from "../src/openai/stream";
+import {
+  MAX_PERSISTED_MODEL_AGE_MS,
+  PERSISTED_MODELS_KEY,
+  parsePersistedModelList,
+  serializeModelList,
+} from "../src/modelPersistence";
 
 type ModuleLoader = {
   _load: (request: string, parent: NodeJS.Module | null, isMain: boolean) => unknown;
@@ -69,6 +75,32 @@ try {
   moduleLoader._load = originalLoad;
 }
 
+type GlobalState = vscode.ExtensionContext["globalState"];
+
+/** In-memory stand-in for `context.globalState`. */
+class FakeMemento implements GlobalState {
+  private readonly values = new Map<string, unknown>();
+
+  keys(): readonly string[] {
+    return [...this.values.keys()];
+  }
+
+  get<T>(key: string, defaultValue?: T): T | undefined {
+    return (this.values.has(key) ? this.values.get(key) : defaultValue) as T | undefined;
+  }
+
+  update(key: string, value: unknown): Thenable<void> {
+    if (value === undefined) {
+      this.values.delete(key);
+    } else {
+      this.values.set(key, value);
+    }
+    return Promise.resolve();
+  }
+
+  setKeysForSync(): void {}
+}
+
 class TestCancellationToken implements vscode.CancellationToken {
   isCancellationRequested = false;
   private readonly listeners = new Set<(event: void) => unknown>();
@@ -92,6 +124,7 @@ function createHarness(
     authorize: async () => undefined,
   },
   slots: SlotQueueRegistry = new SlotQueueRegistry(DEFAULT_MAX_PARALLEL_REQUESTS),
+  globalState: GlobalState = new FakeMemento(),
 ) {
   settings.clear();
   settings.set("apiBaseUrl", "https://unit.test/v1/");
@@ -111,7 +144,7 @@ function createHarness(
     onDidChange: () => ({ dispose: () => undefined }),
   };
   const provider = new NanChatModelProvider(
-    { secrets },
+    { secrets, globalState },
     {
       record: async () => {
         recordedUsage += 1;
@@ -120,7 +153,7 @@ function createHarness(
     endpointAuthorizer,
     slots,
   );
-  return { provider, calls, slots, get recordedUsage() { return recordedUsage; } };
+  return { provider, calls, slots, globalState, get recordedUsage() { return recordedUsage; } };
 }
 
 function modelListResponse(body: unknown, init?: ResponseInit): Response {
@@ -272,6 +305,112 @@ test("malformed and unsuccessful model responses fall back to the static unverif
           }
         });
     }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("the last live list survives a restart and outranks the static catalog", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const first = createHarness(async () =>
+      modelListResponse({ data: [{ id: "future-chat-model", is_chat: true, context_window: 200_000 }] }),
+    );
+    await first.provider.provideLanguageModelChatInformation({ silent: true }, new TestCancellationToken());
+    assert.ok(first.globalState.get(PERSISTED_MODELS_KEY));
+    first.provider.dispose();
+
+    const second = createHarness(
+      async () => new Response("unavailable", { status: 503, statusText: "Service Unavailable" }),
+      undefined,
+      undefined,
+      first.globalState,
+    );
+    try {
+      const models = await second.provider.provideLanguageModelChatInformation(
+        { silent: true },
+        new TestCancellationToken(),
+      );
+      assert.deepEqual(models.map((model) => model.id), ["future-chat-model"]);
+      assert.equal(models[0]!.detail, "NaN Builders - not live-verified");
+      assert.match(String(models[0]!.tooltip), /Last discovered .* access is not verified/i);
+    } finally {
+      second.provider.dispose();
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("corrupted or stale persisted lists fall back to the static catalog", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const cases: Array<{ name: string; value: string }> = [
+    { name: "corrupt JSON", value: "{" },
+    {
+      name: "unknown schema version",
+      value: JSON.stringify({ version: 999, savedAt: Date.now(), models: [{ id: "future-chat-model" }] }),
+    },
+    {
+      name: "stale list",
+      value: serializeModelList([{ id: "future-chat-model" }], Date.now() - MAX_PERSISTED_MODEL_AGE_MS - 1),
+    },
+  ];
+
+  try {
+    for (const testCase of cases) {
+      // oxlint-disable-next-line eslint/no-await-in-loop
+      await t.test(testCase.name, async () => {
+        const globalState = new FakeMemento();
+        await globalState.update(PERSISTED_MODELS_KEY, testCase.value);
+        const harness = createHarness(
+          async () => new Response("", { status: 503 }),
+          undefined,
+          undefined,
+          globalState,
+        );
+        try {
+          // oxlint-disable-next-line eslint/no-await-in-loop
+          const models = await harness.provider.provideLanguageModelChatInformation(
+            { silent: true },
+            new TestCancellationToken(),
+          );
+          assert.ok(models.some((model) => model.id === "glm5.3-flash"));
+          assert.equal(models[0]!.detail, "NaN Builders - not live-verified");
+          assert.match(String(models[0]!.tooltip), /Static NaN Builders catalog/);
+          assert.ok(!models.some((model) => model.id === "future-chat-model"));
+        } finally {
+          harness.provider.dispose();
+        }
+      });
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a later successful discovery replaces the persisted list", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    const first = createHarness(async () =>
+      modelListResponse({ data: [{ id: "first-chat-model", is_chat: true }] }),
+    );
+    await first.provider.provideLanguageModelChatInformation({ silent: true }, new TestCancellationToken());
+    first.provider.dispose();
+
+    const second = createHarness(
+      async () => modelListResponse({ data: [{ id: "second-chat-model", is_chat: true }] }),
+      undefined,
+      undefined,
+      first.globalState,
+    );
+    try {
+      await second.provider.provideLanguageModelChatInformation({ silent: true }, new TestCancellationToken());
+    } finally {
+      second.provider.dispose();
+    }
+
+    const persisted = parsePersistedModelList(second.globalState.get<unknown>(PERSISTED_MODELS_KEY));
+    assert.deepEqual(persisted?.map((model) => model.id), ["second-chat-model"]);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -542,7 +681,7 @@ test("native provider configuration overrides the stored key and settings for di
     return modelListResponse({ data: [{ id: "mimo-v2.6-flash" }] });
   };
   const provider = new NanChatModelProvider(
-    { secrets },
+    { secrets, globalState: new FakeMemento() },
     { record: async () => undefined },
     { authorize: async () => undefined },
     new SlotQueueRegistry(DEFAULT_MAX_PARALLEL_REQUESTS),
@@ -1251,7 +1390,7 @@ test("retries on the same key before the opt-in failover hops to another profile
     onDidChange: () => ({ dispose: () => undefined }),
   };
   const provider = new NanChatModelProvider(
-    { secrets },
+    { secrets, globalState: new FakeMemento() },
     { record: async () => undefined },
     { authorize: async () => undefined },
     new SlotQueueRegistry(1),
