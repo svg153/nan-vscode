@@ -287,7 +287,6 @@ The only variant this decision leaves open is the opt-in `failover-on-429` of #1
 
 **Follow-up:** Inline completions are excluded on purpose — they are opt-in, latency-critical, and a retry would show ghost text for a cursor that has moved — so if that ever changes it needs its own budget. A retried request is a billed attempt, so if retries ever become frequent enough to matter, prefer making the gateway rarer (the queue) over raising the default. Two open items belong to other work: `nanBuilders.maxParallelRequests` still caps at 7 while Premium allows 10, and the per-model concurrency of 5 on `mimo-v2.6-flash`, `qwen3.6` and `gemma4` is invisible to a per-key queue.
 
-
 ## AUTONOMOUS-DECISION: choose the inline completion model from a command, without touching the request
 
 **Question:** #175 exposes the inline completion model as a command instead of a hand-edited setting, and the feature is turned off by clearing `nanBuilders.completionModel`. Should the command also change how ghost text is requested, and where should the picker rows live?
@@ -364,3 +363,35 @@ The only variant this decision leaves open is the opt-in `failover-on-429` of #1
 **Decision:** `src/extension.ts` splits the work into `diagnosticsInput` and `diagnosticsReport`. `diagnosticsInput` selects host models first because discovery mutates the provider state the report describes, reads secret names only, and returns a `DiagnosticsInput`; `diagnosticsReport` calls `collectDiagnostics` and turns a failure into a user-facing error. `showDiagnostics` and `copyDiagnostics` both consume `diagnosticsReport`, and only `copyDiagnostics` wraps it with `formatClipboardReport`, which prepends an HTML comment stating that the report is safe to paste and contains no keys or `Authorization` headers. `DIAGNOSTICS_COPIED_MESSAGE` confirms the copy, and a clipboard write failure surfaces its own message. Redaction stays in `src/providerDiagnostics.ts` and is applied once to the shared report, so the two commands cannot diverge.
 
 **Follow-up:** If the report ever includes a new category of user data, redact it in `collectDiagnostics` or `formatClipboardReport`, not in either command, so the single redaction path survives.
+
+## AUTONOMOUS-DECISION: the available-models picker reports live metadata and never moves the chat model
+
+**Question:** #190 adds a command that lists the models the configured key can call. Which numbers may the list show, and should selecting a row apply that model to the chat?
+
+**Options:**
+
+- Show every field the extension can produce, including curated values for models the live response did not describe.
+- Show `maxOutputTokens` and the capability flags only when they came from a live `/v1/models` response, and make selecting a row a read-only copy instead of a model switch (chosen).
+- Let the row selection call `selectChatModels`, so the command doubles as a model switcher. Rejected: a lookup the user ran to inspect their key would silently change the conversation they are in.
+
+**Research:** The curated catalog in `src/modelCatalog.ts` is a release-time guess: it cannot know the output ceiling, the modalities, or the tool support of the key that is actually configured, so rendering those fields as if they had been observed would be a promise the extension cannot keep. `provideLanguageModelChatInformation({ silent: true })` already returns the live list behind the same cache the chat picker fills, so the command reads a value it already has instead of adding a second request path.
+
+**Decision:** `src/provider.ts` records the live response in `lastDiscoveryMetadata` and exposes it through `cachedModelMetadata()`. The field is set only by a successful discovery and cleared on a base URL change, a key change, a discovery failure, the curated static fallback, and `refresh()`, so it cannot outlive the state it described and `undefined` means "these models are not live-verified". `src/availableModelPicker.ts` imports no `vscode` and exports `AvailableModelOption`, `AvailableModelPickItem`, `buildAvailableModelPickItems` and `formatTokenCount`; rows are deduplicated by id, the first occurrence of a duplicate wins, and the capability line is rendered from the same option the numbers come from. `showAvailableModels` in `src/extension.ts` builds the options through `toAvailableModelOptions` and refuses to show a list at all when `cachedModelMetadata()` is `undefined` ? no live proof, no picker ? rather than advertising curated numbers for a key nobody has verified. Selecting a row writes the model id to the clipboard and confirms it, so neither the chat model selection, the `profile::model` routing, nor `nanBuilders.completionModel` can change as a side effect of looking at the list.
+
+**Follow-up:** If a controlled way to switch the chat model from a command ever exists, add it as its own command and keep this one read-only.
+
+## AUTONOMOUS-DECISION: the fill-in-the-middle suffix is session-scoped and blamed only when the retry works
+
+**Question:** #188 sends the code after the cursor as a `suffix`, so a fill-in-the-middle gateway can complete in the middle of a file instead of guessing. Some gateways reject the field. Where should that knowledge live, and when may a model be marked suffix-unsupported?
+
+**Options:**
+
+- Persist the support flag in settings or `globalState`, so one rejection is remembered across reloads.
+- Keep the flag in memory for the session, retry once without the suffix, and mark the model unsupported only after that retry succeeds (chosen).
+- Skip the suffix permanently for any model that rejects it. Rejected: a failure that has nothing to do with the suffix would disable it for good.
+
+**Research:** Gateway support is a property of the deployed service, not of the user's configuration, and it can change with an upgrade, so storing it as a setting would let a single rejection outlive the behaviour it recorded. The retry is cheap and already bounded, and its outcome is the only evidence that distinguishes "the suffix was refused" from "the request was refused".
+
+**Decision:** `src/inlineCompletion.ts` defines `MAX_SUFFIX_CHARS` at 1000, the `suffix` field on `CompletionRequest`, and `createCompletionSuffixSupport`, which returns an in-memory `CompletionSuffixSupport` with `supports` and `markUnsupported`; nothing is written to settings or `globalState`. `buildCompletionRequest` omits the suffix when support is false or the cursor sits at end of file, and `trimSuffixOverlap` drops the longest start of the suffix that a suggestion repeats at its end so restated code is not inserted twice, with a suggestion left holding nothing but that overlap discarded instead of inserted. `requestInlineCompletion` sends the suffix once, and only when the response is an HTTP 400 or 422 ? the statuses in `SUFFIX_REJECTION_STATUSES` ? retries once through `sendCompletionOnce` without it. If that retry fails, the original outcome is returned and the model is not blamed; `markUnsupported` runs only after the retry succeeds, so a failed request can never teach the session the wrong lesson. `src/inlineCompletionProvider.ts` creates one `suffixSupport` per provider and passes it on every request, so the memory spans documents within a session but not a reload.
+
+**Follow-up:** The flag is dropped on reload and relearned on the first 400 or 422. That is deliberate; persisting it becomes worth revisiting only if a gateway starts rejecting the field on every request.
