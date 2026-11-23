@@ -5,6 +5,8 @@ import type { OpenAIUsage } from "./openai/types";
 import { quotaSummaryItems, type QuotaSummaryItem } from "./quotaCatalog";
 import { addUsage, formatHistory, normalizeHistory, type DailyUsage } from "./usageHistory";
 import { buildTooltipMarkdown, lowCreditsActive, statusBarText } from "./usagePresentation";
+import { normalizeProfileIds } from "./profiles";
+import { activeProfileName, statusBarProfileLabel } from "./profilePicker";
 
 const HISTORY_KEY = "nanBuilders.localUsageHistory";
 
@@ -117,9 +119,24 @@ export class UsageTracker implements vscode.Disposable {
     const localTotal = this.promptTokens + this.completionTokens;
     const frozen = this.accountCreditsFrozen();
     const low = this.lowCredits();
-    this.item.text = statusBarText(headline, localTotal, frozen, low);
+    const profiles = this.profiles();
+    this.item.text = statusBarText(
+      headline,
+      localTotal,
+      frozen,
+      low,
+      statusBarProfileLabel(profiles, this.activeProfileSetting()),
+    );
     this.item.backgroundColor = low ? new vscode.ThemeColor("statusBarItem.warningBackground") : undefined;
-    this.item.tooltip = this.buildTooltip();
+    this.item.tooltip = this.buildTooltip(activeProfileName(profiles, this.activeProfileSetting()));
+  }
+
+  private profiles(): readonly string[] {
+    return normalizeProfileIds(vscode.workspace.getConfiguration("nanBuilders").get<unknown>("profiles", []));
+  }
+
+  private activeProfileSetting(): string {
+    return vscode.workspace.getConfiguration("nanBuilders").get<string>("activeProfile", "");
   }
 
   private lowCredits(): boolean {
@@ -138,13 +155,14 @@ export class UsageTracker implements vscode.Disposable {
     return this.account?.snapshot?.report.credits?.frozen === true;
   }
 
-  private buildTooltip(): vscode.MarkdownString {
+  private buildTooltip(activeProfile: string | undefined): vscode.MarkdownString {
     const md = new vscode.MarkdownString();
     md.supportThemeIcons = true;
     md.appendMarkdown(
       buildTooltipMarkdown({
         snapshot: this.account?.snapshot,
         error: this.account?.lastError,
+        activeProfile,
         requests: this.requests,
         promptTokens: this.promptTokens,
         completionTokens: this.completionTokens,

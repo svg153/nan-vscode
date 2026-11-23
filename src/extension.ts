@@ -5,6 +5,7 @@ import { HttpEndpointConsentDeniedError, HttpEndpointGuard } from "./httpEndpoin
 import { NanInlineCompletionProvider } from "./inlineCompletionProvider";
 import { buildCompletionModelPickItems, completionModelFromPick } from "./completionModelPicker";
 import { buildAvailableModelPickItems, type AvailableModelOption } from "./availableModelPicker";
+import { buildProfilePickItems, profileFromPick } from "./profilePicker";
 import { NanChatModelProvider, ModelDiscoveryError } from "./provider";
 import { collectDiagnostics, formatConnectionOk, formatConnectionWarning, selectHostModels } from "./providerDiagnostics";
 import {
@@ -323,6 +324,9 @@ export function activate(context: vscode.ExtensionContext): {
     ),
     vscode.commands.registerCommand("nanBuilders.setReasoningEffort", () => setModelReasoningEffort(provider)),
     vscode.commands.registerCommand("nanBuilders.setCompletionModel", () => setCompletionModel(provider)),
+    vscode.commands.registerCommand("nanBuilders.switchProfile", () =>
+      switchActiveProfile(provider, () => refreshAccountUsage({ force: true })),
+    ),
     vscode.commands.registerCommand("nanBuilders.showUsage", () => {
       const picker = vscode.window.createQuickPick<vscode.QuickPickItem>();
       picker.title = "NaN Builders usage";
@@ -1016,6 +1020,46 @@ async function clearModelAssignment(provider: NanChatModelProvider): Promise<voi
   vscode.window.showInformationMessage(
     `NaN Builders: ${picked.modelId} is no longer assigned to profile "${picked.profileId}".`,
   );
+}
+
+/**
+ * "Switch Active Profile": one-step quick pick over the configured profiles.
+ * Writes through `writeProfileSettings`, so validation, the settings order, and
+ * the configuration listener that refreshes models and the status bar all stay
+ * in one place. Only profile ids are shown; keys never leave SecretStorage.
+ */
+async function switchActiveProfile(
+  provider: NanChatModelProvider,
+  onKeyChanged?: () => Promise<void>,
+): Promise<void> {
+  const settings = profileSettings();
+  if (settings.profiles.length === 0) {
+    const choice = await vscode.window.showInformationMessage(
+      "NaN Builders: no API key profiles are configured. Add a profile from Manage Provider to switch between keys.",
+      MANAGE_PROVIDER_ACTION,
+    );
+    if (choice === MANAGE_PROVIDER_ACTION) {
+      await vscode.commands.executeCommand("nanBuilders.manage");
+    }
+    return;
+  }
+  const active = resolveActiveProfile(settings);
+  const pick = await vscode.window.showQuickPick(buildProfilePickItems(settings.profiles, active), {
+    title: "NaN Builders: Switch Active Profile",
+    placeHolder: "Profile used by models without a profile::model assignment",
+  });
+  const profileId = profileFromPick(pick);
+  if (!profileId) {
+    return;
+  }
+  if (profileId === active) {
+    vscode.window.showInformationMessage(`NaN Builders: profile "${profileId}" is already the active profile.`);
+    return;
+  }
+  await writeProfileSettings(settings.profiles, profileId);
+  provider.refresh();
+  await onKeyChanged?.();
+  vscode.window.showInformationMessage(`NaN Builders: profile "${profileId}" is now the active profile.`);
 }
 
 /** Per-profile actions: activate, key, rename, delete. */
