@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { isCompletionExcluded } from "./completionExclusions";
 import { DEFAULT_API_BASE_URL, SECRET_API_KEY } from "./constants";
 import { diagnostic } from "./diagnostics";
 import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
@@ -36,6 +37,20 @@ export class NanInlineCompletionProvider implements vscode.InlineCompletionItemP
     token: vscode.CancellationToken,
   ): Promise<vscode.InlineCompletionItem[] | undefined> {
     this.activeRequest?.abort();
+    const configuration = vscode.workspace.getConfiguration("nanBuilders");
+    // Checked before any request, queue slot, or usage record so an excluded
+    // document costs nothing and stays silent while typing.
+    if (
+      isCompletionExcluded({
+        languageId: document.languageId,
+        filePath: document.uri.fsPath,
+        excludedLanguages: configuration.get<string[]>("completionExcludedLanguages"),
+        excludedGlobs: configuration.get<string[]>("completionExcludedGlobs"),
+      })
+    ) {
+      diagnostic("inline.excluded");
+      return undefined;
+    }
     const controller = new AbortController();
     this.activeRequest = controller;
     const cancellation = token.onCancellationRequested(() => controller.abort());
@@ -47,10 +62,7 @@ export class NanInlineCompletionProvider implements vscode.InlineCompletionItemP
       if (controller.signal.aborted) {
         return undefined;
       }
-      const model = vscode.workspace
-        .getConfiguration("nanBuilders")
-        .get<string>("completionModel", "")
-        .trim();
+      const model = configuration.get<string>("completionModel", "").trim();
       if (!model || controller.signal.aborted) {
         return undefined;
       }
@@ -72,9 +84,7 @@ export class NanInlineCompletionProvider implements vscode.InlineCompletionItemP
       }
 
       const outcome = await requestInlineCompletion({
-        baseUrl: vscode.workspace
-          .getConfiguration("nanBuilders")
-          .get<string>("apiBaseUrl", DEFAULT_API_BASE_URL),
+        baseUrl: configuration.get<string>("apiBaseUrl", DEFAULT_API_BASE_URL),
         apiKey,
         userAgent: userAgent(),
         request,
