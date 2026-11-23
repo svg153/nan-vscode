@@ -286,3 +286,112 @@ The only variant this decision leaves open is the opt-in `failover-on-429` of #1
 **Deviations from the issue text:** three, all deliberate. First, the issue names 502/503/504; the implementation retries every 5xx, because `ProviderError` has no status field and `gateway_error` is the classified form of all of them (504 arrives as `timeout`). Narrowing it would mean teaching `src/providerErrors.ts` a status it deliberately does not expose, so a superset is the smaller and more coherent change. Second, the `Retry-After` and backoff cap is 8 s, which the issue did not fix; it is documented in the setting and in the README rather than left implicit. Third, tests live in `test/retry` policy cases inside `test/provider.test.ts` (pure) plus end-to-end cases in `test/providerDiscovery.test.ts` (fake timers, real `Response` objects), because the provider's fetch harness lives there and duplicating it would be worse than an extra file's worth of tests.
 
 **Follow-up:** Inline completions are excluded on purpose — they are opt-in, latency-critical, and a retry would show ghost text for a cursor that has moved — so if that ever changes it needs its own budget. A retried request is a billed attempt, so if retries ever become frequent enough to matter, prefer making the gateway rarer (the queue) over raising the default. Two open items belong to other work: `nanBuilders.maxParallelRequests` still caps at 7 while Premium allows 10, and the per-model concurrency of 5 on `mimo-v2.6-flash`, `qwen3.6` and `gemma4` is invisible to a per-key queue.
+
+## AUTONOMOUS-DECISION: choose the inline completion model from a command, without touching the request
+
+**Question:** #175 exposes the inline completion model as a command instead of a hand-edited setting, and the feature is turned off by clearing `nanBuilders.completionModel`. Should the command also change how ghost text is requested, and where should the picker rows live?
+
+**Options:**
+
+- Build a second completion path for the chosen model, with its own discovery and defaults.
+- Add a command that only writes the existing setting, leaving the `/completions` payload, the debounce, and the default-off behaviour unchanged (chosen).
+- Enable inline completions by default so the command always has a model to show. Rejected: ghost text is opt-in and each request is billed.
+
+**Research:** `src/inlineCompletionProvider.ts` reads `nanBuilders.completionModel` on every invocation, and `src/extension.ts` already registers or disposes the provider from a `syncInlineCompletions()` call inside the `onDidChangeConfiguration` listener. `provideLanguageModelChatInformation({ silent: true })` is the same cache the chat model picker fills, so the command can reuse discovery instead of adding a request path.
+
+**Decision:** `nanBuilders.setCompletionModel` opens a QuickPick built by `buildCompletionModelPickItems` in the `vscode`-free `src/completionModelPicker.ts`. `completionModelFromPick` maps a row to the setting value: a model id writes it, the `DISABLE_COMPLETION_MODEL_LABEL` row writes `""`, and a dismissed picker returns `undefined`, so nothing is written. `setCompletionModel` in `src/extension.ts` performs discovery and the global configuration update; the existing listener registers or disposes the provider. The `/completions` payload, the debounce, and the default-off behaviour are unchanged, and a discovery failure or an empty model list leaves the setting untouched behind a non-modal warning.
+
+**Follow-up:** If inline completions ever become opt-in per language instead of per model, revisit the disable row; today it is the only path that clears the setting without the settings UI.
+
+## AUTONOMOUS-DECISION: the profile picker is a pure module and reuses the settings listener
+
+**Question:** #184/#193 switches the active profile from the command palette and shows that profile in the status bar tooltip. Where should the QuickPick rows and the status bar label live, and how should the label learn that the active profile changed?
+
+**Options:**
+
+- Build the rows inline in `src/extension.ts` and refresh the status bar with new event wiring.
+- Extract the rows and the label into a `vscode`-free module, and let the existing `onDidChangeConfiguration` -> `provider.refresh()` path carry the update (chosen).
+
+**Research:** `UsageTracker` already renders the status bar text and imports `statusBarProfileLabel`, and `src/extension.ts` refreshes the provider and the usage view from one `workspace.onDidChangeConfiguration` handler. A second notification path would duplicate that refresh and could show a label that disagrees with routing. `resolveActiveProfile` is the single precedence rule, so marking a row without it could show an "active" profile that is not the one serving requests.
+
+**Decision:** `src/profilePicker.ts` imports no `vscode` and owns `buildProfilePickItems`, `profileFromPick`, and `statusBarProfileLabel`. `buildProfilePickItems` marks the profile returned by `resolveActiveProfile`, so an empty or stale `nanBuilders.activeProfile` still displays the routing truth; `profileFromPick` returns the id to write, or `undefined` when the picker is dismissed; `statusBarProfileLabel` returns a name only when more than one profile is configured, because a single profile adds noise without an action. `switchActiveProfile` writes through `writeProfileSettings` and calls `provider.refresh()`, and the label follows through the existing configuration listener, so no new wiring was added. Only profile ids are shown; keys stay in SecretStorage.
+
+**Follow-up:** Keep any future status bar profile text in this module rather than formatting it in `UsageTracker`, so the pure rows and the label cannot disagree about which profile is active.
+
+## AUTONOMOUS-DECISION: a small glob matcher and a zero-cost exclusion guard
+
+**Question:** #189 skips inline completions for excluded languages and file patterns, but the check runs on every keystroke and the repository avoids new runtime dependencies. Which glob syntax should be supported, how should casing behave, and where should the guard sit?
+
+**Options:**
+
+- Use a general glob library, or expand braces and character classes by hand so patterns behave like `.gitignore`.
+- Support only `**`, `*` and `?` in a hand-rolled `globToRegExp`, match case-insensitively on every platform, and return before any request work (chosen).
+
+**Research:** Inline completions are latency-sensitive, so the guard should be pure and cheap; `src/completionExclusions.ts` imports neither `vscode` nor a package. VS Code file globs are case-insensitive on Windows, and a setting typed with different casing must not change the outcome on another platform, which is why the compiled expression always uses the `i` flag. A pattern without a leading `**` may match at any depth (`*.pem` matches `src/a.pem`), mirroring VS Code file globs, and both `/` and `\` are accepted as separators. Braces and character classes are deliberately not expanded: they carry most of the dialect ambiguity, and the smaller language is the easier contract to document.
+
+**Decision:** `src/completionExclusions.ts` holds `DEFAULT_COMPLETION_EXCLUDED_LANGUAGES` (`plaintext`, `dotenv`, `properties`), `DEFAULT_COMPLETION_EXCLUDED_GLOBS` (`**/.env*`, `**/*.pem`, `**/*.key`, `**/secrets/**`), `isCompletionExcluded`, `globToRegExp`, and `readStringList`. `readStringList` returns `undefined` for a hand-edited non-array value, so the defaults still apply instead of breaking completion. In `src/inlineCompletionProvider.ts` the guard runs after the previous request is aborted and before the secret is read, the request is built, a queue slot is taken, or usage is recorded, so an excluded document costs nothing and stays silent; the run emits the `inline.excluded` diagnostic and returns `undefined`.
+
+**Follow-up:** Add brace or character-class support only when a reported pattern needs it, and extend `globToRegExp` rather than swapping in a library, so the guard stays dependency-free.
+
+## AUTONOMOUS-DECISION: a stale discovered catalog outranks the curated one, never a live discovery
+
+**Question:** #196 keeps the model picker usable while `/v1/models` is failing. Where should the last live list live, how old may it be, and what may it outrank?
+
+**Options:**
+
+- Keep only the curated catalog when discovery fails (the behaviour before #196).
+- Persist the last live list in `globalState`, serve it first on failure, and re-validate every entry on read (chosen).
+- Persist it in workspace settings or a file so it can be inspected and edited. Rejected: it is per-machine state, not configuration, and it must not enter a repository.
+
+**Research:** The curated catalog is conservative by design and cannot know about models added to the gateway after the release, while the last live list is the only record of what the user's key could actually call. It is also the more likely list to be stale, so it may stand in only while a fresh discovery is failing. `globalState` is per-machine and never enters a workspace, which matches state that should not be shared or committed.
+
+**Decision:** `src/modelPersistence.ts` defines the envelope under `PERSISTED_MODELS_KEY` (`nanBuilders.lastDiscoveredModels`) with `PERSISTED_MODELS_VERSION` 1 and `MAX_PERSISTED_MODEL_AGE_MS` of 30 days. `serializeModelList` rebuilds each entry through `parseDiscoveredModel`, so only ids and documented metadata fields are stored; `parsePersistedModelList` returns `undefined` for a non-string, unparsable JSON, an unknown version, a missing or out-of-range `savedAt` (including a future timestamp), or no valid entry, and drops individual malformed entries instead of the whole list. In `src/provider.ts`, `persistDiscoveredModels` writes only after a successful non-empty discovery and catches a storage failure as `models.persist.failed`, because persistence may never break the picker; `persistedCatalogModels` re-filters the parsed list with the current `includeUnknownModels` and `discoveryMode` settings and marks every model `persisted`, so `toModelInfo(metadata, fallback?)` renders `NaN Builders - not live-verified`. When discovery fails the order is persisted list, then the curated static catalog; a live discovery always replaces both, and `auto` mode never falls back to the curated catalog because it targets third-party endpoints.
+
+**Follow-up:** If NaN ever ships model metadata in `/v1/models`, most of the curated catalog can go and the fallback age cap can be revisited once gateway outages are measured.
+
+## AUTONOMOUS-DECISION: one redacted report behind show and copy
+
+**Question:** #195 copies the diagnostics report to the clipboard so it can be pasted into a bug report. Should the copy command build its own text, and how can its redaction stay identical to "Show Diagnostics"?
+
+**Options:**
+
+- Let the copy command assemble its own report from the same pieces; the two outputs can then drift silently.
+- Extract the snapshot and the report into shared helpers used by both commands, and prefix the clipboard text with a paste notice (chosen).
+
+**Research:** Clipboard text is likely to be pasted in public, so a difference in redaction between the two commands is a leak rather than a cosmetic bug. The report already carries versions, counts, model ids, and display-only endpoints; `REDACTED` in `src/providerDiagnostics.ts` masks credentials in URLs and parameters, and key values are never read.
+
+**Decision:** `src/extension.ts` splits the work into `diagnosticsInput` and `diagnosticsReport`. `diagnosticsInput` selects host models first because discovery mutates the provider state the report describes, reads secret names only, and returns a `DiagnosticsInput`; `diagnosticsReport` calls `collectDiagnostics` and turns a failure into a user-facing error. `showDiagnostics` and `copyDiagnostics` both consume `diagnosticsReport`, and only `copyDiagnostics` wraps it with `formatClipboardReport`, which prepends an HTML comment stating that the report is safe to paste and contains no keys or `Authorization` headers. `DIAGNOSTICS_COPIED_MESSAGE` confirms the copy, and a clipboard write failure surfaces its own message. Redaction stays in `src/providerDiagnostics.ts` and is applied once to the shared report, so the two commands cannot diverge.
+
+**Follow-up:** If the report ever includes a new category of user data, redact it in `collectDiagnostics` or `formatClipboardReport`, not in either command, so the single redaction path survives.
+
+## AUTONOMOUS-DECISION: the available-models picker reports live metadata and never moves the chat model
+
+**Question:** #190 adds a command that lists the models the configured key can call. Which numbers may the list show, and should selecting a row apply that model to the chat?
+
+**Options:**
+
+- Show every field the extension can produce, including curated values for models the live response did not describe.
+- Show `maxOutputTokens` and the capability flags only when they came from a live `/v1/models` response, and make selecting a row a read-only copy instead of a model switch (chosen).
+- Let the row selection call `selectChatModels`, so the command doubles as a model switcher. Rejected: a lookup the user ran to inspect their key would silently change the conversation they are in.
+
+**Research:** The curated catalog in `src/modelCatalog.ts` is a release-time guess: it cannot know the output ceiling, the modalities, or the tool support of the key that is actually configured, so rendering those fields as if they had been observed would be a promise the extension cannot keep. `provideLanguageModelChatInformation({ silent: true })` already returns the live list behind the same cache the chat picker fills, so the command reads a value it already has instead of adding a second request path.
+
+**Decision:** `src/provider.ts` records the live response in `lastDiscoveryMetadata` and exposes it through `cachedModelMetadata()`. The field is set only by a successful discovery and cleared on a base URL change, a key change, a discovery failure, the curated static fallback, and `refresh()`, so it cannot outlive the state it described and `undefined` means "these models are not live-verified". `src/availableModelPicker.ts` imports no `vscode` and exports `AvailableModelOption`, `AvailableModelPickItem`, `buildAvailableModelPickItems` and `formatTokenCount`; rows are deduplicated by id, the first occurrence of a duplicate wins, and the capability line is rendered from the same option the numbers come from. `showAvailableModels` in `src/extension.ts` builds the options through `toAvailableModelOptions` and refuses to show a list at all when `cachedModelMetadata()` is `undefined` — no live proof, no picker — rather than advertising curated numbers for a key nobody has verified. Selecting a row writes the model id to the clipboard and confirms it, so neither the chat model selection, the `profile::model` routing, nor `nanBuilders.completionModel` can change as a side effect of looking at the list.
+
+**Follow-up:** If a controlled way to switch the chat model from a command ever exists, add it as its own command and keep this one read-only.
+
+## AUTONOMOUS-DECISION: the fill-in-the-middle suffix is session-scoped and blamed only when the retry works
+
+**Question:** #188 sends the code after the cursor as a `suffix`, so a fill-in-the-middle gateway can complete in the middle of a file instead of guessing. Some gateways reject the field. Where should that knowledge live, and when may a model be marked suffix-unsupported?
+
+**Options:**
+
+- Persist the support flag in settings or `globalState`, so one rejection is remembered across reloads.
+- Keep the flag in memory for the session, retry once without the suffix, and mark the model unsupported only after that retry succeeds (chosen).
+- Skip the suffix permanently for any model that rejects it. Rejected: a failure that has nothing to do with the suffix would disable it for good.
+
+**Research:** Gateway support is a property of the deployed service, not of the user's configuration, and it can change with an upgrade, so storing it as a setting would let a single rejection outlive the behaviour it recorded. The retry is cheap and already bounded, and its outcome is the only evidence that distinguishes "the suffix was refused" from "the request was refused".
+
+**Decision:** `src/inlineCompletion.ts` defines `MAX_SUFFIX_CHARS` at 1000, the `suffix` field on `CompletionRequest`, and `createCompletionSuffixSupport`, which returns an in-memory `CompletionSuffixSupport` with `supports` and `markUnsupported`; nothing is written to settings or `globalState`. `buildCompletionRequest` omits the suffix when support is false or the cursor sits at end of file, and `trimSuffixOverlap` drops the longest start of the suffix that a suggestion repeats at its end so restated code is not inserted twice, with a suggestion left holding nothing but that overlap discarded instead of inserted. `requestInlineCompletion` sends the suffix once and retries once through `sendCompletionOnce`, without it, only when the response is an HTTP 400 or 422 — the statuses in `SUFFIX_REJECTION_STATUSES`. If that retry fails, the original outcome is returned and the model is not blamed; `markUnsupported` runs only after the retry succeeds, so a failed request can never teach the session the wrong lesson. `src/inlineCompletionProvider.ts` creates one `suffixSupport` per provider and passes it on every request, so the memory spans documents within a session but not a reload.
+
+**Follow-up:** The flag is dropped on reload and relearned on the first 400 or 422. That is deliberate; persisting it becomes worth revisiting only if a gateway starts rejecting the field on every request.
