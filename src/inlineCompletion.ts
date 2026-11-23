@@ -12,11 +12,16 @@ import type { SlotLease, SlotQueueRegistry } from "./openai/slotQueue";
 
 /** Maximum prompt characters sent per request (tail ending at the cursor). */
 export const MAX_PROMPT_CHARS = 4000;
+/** Maximum suffix characters sent per request (head starting at the cursor). */
+export const MAX_SUFFIX_CHARS = 1000;
 /** Maximum characters returned as a ghost-text suggestion. */
 export const MAX_SUGGESTION_CHARS = 1000;
 /** Conservative generation budget so a suggestion stays interactive. */
 export const MAX_COMPLETION_TOKENS = 64;
 export const INLINE_COMPLETION_DEBOUNCE_MS = 150;
+
+/** Client-error statuses a gateway answers when a request carries an unknown field. */
+const SUFFIX_REJECTION_STATUSES: ReadonlySet<number> = new Set([400, 422]);
 
 export type InlineCompletionScheduler = (delayMs: number, signal: AbortSignal) => Promise<void>;
 
@@ -34,8 +39,33 @@ export async function waitForInlineCompletionDebounce(
 export interface CompletionRequest {
   model: string;
   prompt: string;
+  /** Text right after the cursor for fill-in-the-middle; absent when unsupported or empty. */
+  suffix?: string;
   max_tokens: number;
   temperature: number;
+}
+
+/**
+ * Session-scoped memory of models whose gateway rejected the `suffix` field.
+ * In memory only: a fresh extension session tries the suffix again instead of
+ * persisting a capability guess in settings or global state.
+ */
+export interface CompletionSuffixSupport {
+  supports(modelId: string): boolean;
+  markUnsupported(modelId: string): void;
+}
+
+export function createCompletionSuffixSupport(): CompletionSuffixSupport {
+  const unsupported = new Set<string>();
+  return {
+    supports: (modelId) => !unsupported.has(modelId.trim()),
+    markUnsupported: (modelId) => {
+      const id = modelId.trim();
+      if (id) {
+        unsupported.add(id);
+      }
+    },
+  };
 }
 
 export type CompletionFailureReason = "cancelled" | "http" | "network" | "malformed" | "empty" | "too_large";
@@ -59,14 +89,17 @@ export interface CompletionUsageRecorder {
 /**
  * Build the request body for one completion, or `undefined` when the feature
  * cannot run (no model configured, or nothing typed yet before the cursor).
- * The cursor offset is clamped to the document bounds, and the prompt is
- * clamped to the last {@link MAX_PROMPT_CHARS} characters before the cursor;
- * only documented API fields are produced.
+ * The cursor offset is clamped to the document bounds, the prompt is clamped to
+ * the last {@link MAX_PROMPT_CHARS} characters before the cursor, and the
+ * suffix to the next {@link MAX_SUFFIX_CHARS} characters after it; only
+ * documented API fields are produced.
  */
 export function buildCompletionRequest(options: {
   model: string;
   documentText: string;
   cursorOffset: number;
+  /** `false` when this model's gateway rejected `suffix` in this session. */
+  supportsSuffix?: boolean;
 }): CompletionRequest | undefined {
   const model = options.model.trim();
   if (!model) {
@@ -78,12 +111,37 @@ export function buildCompletionRequest(options: {
   if (!prompt.trim()) {
     return undefined;
   }
+  const suffix =
+    options.supportsSuffix === false ? "" : text.slice(offset, Math.min(text.length, offset + MAX_SUFFIX_CHARS));
   return {
     model,
     prompt,
+    ...(suffix ? { suffix } : {}),
     max_tokens: MAX_COMPLETION_TOKENS,
     temperature: 0,
   };
+}
+
+/**
+ * Drop the end of a suggestion that repeats the start of the suffix, so a
+ * fill-in-the-middle model that restates the following code does not duplicate
+ * it when inserted. The longest overlap wins; no overlap leaves the text
+ * unchanged.
+ */
+export function trimSuffixOverlap(suggestion: string, suffix: string): string {
+  const limit = Math.min(suggestion.length, suffix.length);
+  for (let length = limit; length > 0; length -= 1) {
+    if (suggestion.endsWith(suffix.slice(0, length))) {
+      return suggestion.slice(0, suggestion.length - length);
+    }
+  }
+  return suggestion;
+}
+
+function withoutSuffix(request: CompletionRequest): CompletionRequest {
+  const body: CompletionRequest = { ...request };
+  delete body.suffix;
+  return body;
 }
 
 /**
@@ -155,21 +213,78 @@ export async function recordCompletionUsage(
   }
 }
 
-/**
- * POST one completion. Never throws: HTTP failures, aborts, network errors,
- * and malformed bodies map to a non-ok outcome so callers can drop stale text.
- */
-export async function requestInlineCompletion(options: {
+/** Transport settings shared by every attempt of one completion request. */
+interface CompletionTransport {
   baseUrl: string;
   apiKey: string;
   userAgent: string;
-  request: CompletionRequest;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
   endpointAuthorizer?: HttpEndpointAuthorizer;
   /** Shared chat + inline slots for this API key, when queueing is enabled. */
   slotQueues?: Pick<SlotQueueRegistry, "acquire">;
-}): Promise<CompletionOutcome> {
+}
+
+/**
+ * POST one completion. Never throws: HTTP failures, aborts, network errors,
+ * and malformed bodies map to a non-ok outcome so callers can drop stale text.
+ *
+ * When a gateway rejects the `suffix` field with a client error, the request is
+ * retried once without it and the model is remembered as suffix-less for the
+ * session, so suggestions keep working on fill-in-the-middle unaware gateways.
+ */
+export async function requestInlineCompletion(
+  options: CompletionTransport & {
+    request: CompletionRequest;
+    /** Session memory of models whose gateway rejected `suffix`. */
+    suffixSupport?: CompletionSuffixSupport;
+  },
+): Promise<CompletionOutcome> {
+  const request = options.request;
+  const suffix =
+    request.suffix && (options.suffixSupport?.supports(request.model) ?? true) ? request.suffix : "";
+  const first = await sendCompletionOnce(options, suffix ? { ...request, suffix } : withoutSuffix(request));
+  if (first.ok) {
+    return suffix ? trimOverlap(first, suffix) : first;
+  }
+  if (!suffix || !isSuffixRejection(first)) {
+    return first;
+  }
+  if (options.signal?.aborted) {
+    return { ok: false, reason: "cancelled" };
+  }
+  const retry = await sendCompletionOnce(options, withoutSuffix(request));
+  if (!retry.ok) {
+    return retry;
+  }
+  options.suffixSupport?.markUnsupported(request.model);
+  return trimOverlap(retry, suffix);
+}
+
+function isSuffixRejection(outcome: CompletionOutcome): boolean {
+  return (
+    !outcome.ok && outcome.reason === "http" && SUFFIX_REJECTION_STATUSES.has(outcome.status ?? 0)
+  );
+}
+
+function trimOverlap(
+  outcome: Extract<CompletionOutcome, { ok: true }>,
+  suffix: string,
+): CompletionOutcome {
+  const text = trimSuffixOverlap(outcome.text, suffix);
+  if (text === outcome.text) {
+    return outcome;
+  }
+  if (!text.trim()) {
+    return { ok: false, reason: "empty" };
+  }
+  return { ...outcome, text };
+}
+
+async function sendCompletionOnce(
+  options: CompletionTransport,
+  body: CompletionRequest,
+): Promise<CompletionOutcome> {
   if (options.signal?.aborted) {
     return { ok: false, reason: "cancelled" };
   }
@@ -209,7 +324,7 @@ export async function requestInlineCompletion(options: {
           "Content-Type": "application/json",
           "User-Agent": options.userAgent,
         },
-        body: JSON.stringify(options.request),
+        body: JSON.stringify(body),
         signal: options.signal ?? null,
       });
     } catch {

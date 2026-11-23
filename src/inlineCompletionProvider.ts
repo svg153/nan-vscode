@@ -5,9 +5,11 @@ import { diagnostic } from "./diagnostics";
 import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
 import {
   buildCompletionRequest,
+  createCompletionSuffixSupport,
   recordCompletionUsage,
   requestInlineCompletion,
   waitForInlineCompletionDebounce,
+  type CompletionSuffixSupport,
 } from "./inlineCompletion";
 import type { SlotQueueRegistry } from "./openai/slotQueue";
 import { describeRoute, normalizeProfileIds, profileSecretName, resolveModelRoute } from "./profiles";
@@ -20,6 +22,8 @@ import type { UsageTracker } from "./usageTracker";
  */
 export class NanInlineCompletionProvider implements vscode.InlineCompletionItemProvider {
   private activeRequest?: AbortController;
+  /** Session-only: models whose gateway rejected `suffix`, so it is not resent. */
+  private readonly suffixSupport: CompletionSuffixSupport = createCompletionSuffixSupport();
 
   constructor(
     private readonly secrets: vscode.SecretStorage,
@@ -74,6 +78,7 @@ export class NanInlineCompletionProvider implements vscode.InlineCompletionItemP
         model,
         documentText: document.getText(),
         cursorOffset: document.offsetAt(position),
+        supportsSuffix: this.suffixSupport.supports(model),
       });
       if (!request) {
         return undefined;
@@ -91,6 +96,7 @@ export class NanInlineCompletionProvider implements vscode.InlineCompletionItemP
         signal: controller.signal,
         endpointAuthorizer: this.endpointAuthorizer,
         slotQueues: this.slots,
+        suffixSupport: this.suffixSupport,
       });
       diagnostic(
         "inline.complete",
