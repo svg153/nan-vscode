@@ -4,6 +4,7 @@ import { configureDiagnosticFile, diagnostic } from "./diagnostics";
 import { HttpEndpointConsentDeniedError, HttpEndpointGuard } from "./httpEndpointGuard";
 import { NanInlineCompletionProvider } from "./inlineCompletionProvider";
 import { buildCompletionModelPickItems, completionModelFromPick } from "./completionModelPicker";
+import { buildAvailableModelPickItems, type AvailableModelOption } from "./availableModelPicker";
 import { NanChatModelProvider, ModelDiscoveryError } from "./provider";
 import { collectDiagnostics, formatConnectionOk, formatConnectionWarning, selectHostModels } from "./providerDiagnostics";
 import {
@@ -30,7 +31,7 @@ import {
   SlotQueueRegistry,
   resolveMaxParallelRequests,
 } from "./openai/slotQueue";
-import { getKnownModel, resolveReasoningEffort } from "./modelCatalog";
+import { getKnownModel, resolveReasoningEffort, toDisplayMetadata, type ModelMetadata } from "./modelCatalog";
 import { AccountUsageService, accountModelRows, windowCredits } from "./accountUsage";
 import { compactTokens } from "./quotaCatalog";
 import { API_REQUESTS_CUTOFF_DATE, CACHED_TOKENS_CUTOFF_DATE, CREDITS_CUTOFF_DATE, type UsageCredits } from "./usageApi";
@@ -316,6 +317,7 @@ export function activate(context: vscode.ExtensionContext): {
       vscode.window.showInformationMessage("NaN Builders model list refreshed.");
     }),
     vscode.commands.registerCommand("nanBuilders.testConnection", () => testConnection(provider)),
+    vscode.commands.registerCommand("nanBuilders.showModels", () => showAvailableModels(provider)),
     vscode.commands.registerCommand("nanBuilders.showDiagnostics", () =>
       showDiagnostics(context, provider, reportOutputChannel()),
     ),
@@ -613,6 +615,93 @@ async function setCompletionModel(provider: NanChatModelProvider): Promise<void>
 /** Configured inline completion model, or "" when the feature is off. */
 function currentCompletionModel(): string {
   return vscode.workspace.getConfiguration("nanBuilders").get<string>("completionModel", "").trim();
+}
+
+/**
+ * "Show Available Models": lists the chat models the configured key can reach,
+ * with context and capability hints, and copies the selected id for
+ * `profile::model` routing or `nanBuilders.completionModel`. Discovery goes
+ * through the same cached path as the chat and inline-completion pickers, so a
+ * warm cache answers without a second `/v1/models` request.
+ */
+async function showAvailableModels(provider: NanChatModelProvider): Promise<void> {
+  const credential = await provider.configuredCredential();
+  if (!credential.apiKey) {
+    const choice = await vscode.window.showWarningMessage(
+      credential.profileId
+        ? `NaN Builders profile "${credential.profileId}" has no API key. Add one to list the models it can use.`
+        : "No NaN Builders API key is configured. Add one to list the models your key can use.",
+      MANAGE_PROVIDER_ACTION,
+    );
+    if (choice === MANAGE_PROVIDER_ACTION) {
+      await vscode.commands.executeCommand("nanBuilders.manage");
+    }
+    return;
+  }
+
+  const cancellation = new vscode.CancellationTokenSource();
+  // A failure recorded by an earlier command must not veto a warm cache, so
+  // only a failure produced by this discovery call blocks the picker.
+  const previousFailure = provider.discoveryError();
+  let models: vscode.LanguageModelChatInformation[];
+  try {
+    models = await provider.provideLanguageModelChatInformation({ silent: true }, cancellation.token);
+  } finally {
+    cancellation.dispose();
+  }
+  const failure = provider.discoveryError();
+  if (failure && failure !== previousFailure) {
+    vscode.window.showWarningMessage(formatConnectionWarning(provider.getBaseUrl(), failure));
+    return;
+  }
+
+  const metadata = provider.cachedModelMetadata();
+  if (!metadata) {
+    // Curated static fallback: live discovery returned no chat model, so this
+    // list would advertise access the configured key may not have.
+    vscode.window.showWarningMessage(formatConnectionWarning(provider.getBaseUrl(), undefined));
+    return;
+  }
+
+  const items = buildAvailableModelPickItems(toAvailableModelOptions(models, metadata));
+  if (items.length === 0) {
+    vscode.window.showWarningMessage(
+      "NaN Builders found no usable chat models for the configured API key. Run 'NaN Builders: Test Connection' to diagnose the key and endpoint.",
+    );
+    return;
+  }
+
+  const pick = await vscode.window.showQuickPick(items, {
+    title: "NaN Builders: Available Models",
+    placeHolder: "Copy a model id for profile::model routing or nanBuilders.completionModel",
+    matchOnDescription: true,
+    matchOnDetail: true,
+  });
+  if (!pick) {
+    return;
+  }
+  await vscode.env.clipboard.writeText(pick.model);
+  diagnostic("showModels.copied", { model: pick.model });
+  vscode.window.showInformationMessage(`NaN Builders: copied ${pick.model} to the clipboard.`);
+}
+
+function toAvailableModelOptions(
+  models: readonly vscode.LanguageModelChatInformation[],
+  metadata: readonly ModelMetadata[],
+): AvailableModelOption[] {
+  const byId = new Map(metadata.map((model) => [model.id, model]));
+  return models.map((model) => {
+    const info = byId.get(model.id) ?? toDisplayMetadata(model.id);
+    return {
+      id: model.id,
+      name: info.name,
+      contextWindow: info.contextWindow,
+      maxOutputTokens: info.maxOutputTokens,
+      imageInput: info.imageInput,
+      toolCalling: info.toolCalling,
+      largerModel: info.largerModel,
+    };
+  });
 }
 
 type ProviderAction =
