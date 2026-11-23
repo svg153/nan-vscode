@@ -40,6 +40,7 @@
     "onCommand:nanBuilders.manage",
     "onCommand:nanBuilders.refreshModels",
     "onCommand:nanBuilders.showUsage",
+    "onCommand:nanBuilders.showModels",
     "onCommand:nanBuilders.testConnection",
     "onCommand:nanBuilders.showDiagnostics",
     "onCommand:nanBuilders.copyDiagnostics",
@@ -104,6 +105,11 @@
         "command": "nanBuilders.showUsage",
         "category": "NaN Builders",
         "title": "Show Usage"
+      },
+      {
+        "command": "nanBuilders.showModels",
+        "category": "NaN Builders",
+        "title": "Show Available Models"
       },
       {
         "command": "nanBuilders.testConnection",

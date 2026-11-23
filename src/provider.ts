@@ -131,6 +131,8 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   private cache: CachedModels | undefined;
   private nativeBaseUrl: string | undefined;
   private lastDiscoveryError: DiscoveryFailure | undefined;
+  /** Metadata for the last live-verified list, even when the cache TTL is 0. */
+  private lastDiscoveryMetadata: readonly ModelMetadata[] | undefined;
   /** Conversations already warned about, so the trim warning appears once. */
   private readonly warnedTrimmedConversations = new Set<string>();
   /** Per-key cooldown applied by the opt-in throttle failover (#144). */
@@ -170,10 +172,12 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     if (nativeBaseUrl !== this.nativeBaseUrl) {
       this.nativeBaseUrl = nativeBaseUrl;
       this.cache = undefined;
+      this.lastDiscoveryMetadata = undefined;
     }
     if (nativeApiKey && nativeApiKey !== (await this.context.secrets.get(SECRET_API_KEY))) {
       await this.context.secrets.store(SECRET_API_KEY, nativeApiKey);
       this.cache = undefined;
+      this.lastDiscoveryMetadata = undefined;
       this.changedEmitter.fire();
     }
 
@@ -201,6 +205,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       }
       discoveryFailed = true;
       this.lastDiscoveryError = toDiscoveryFailure(error);
+      this.lastDiscoveryMetadata = undefined;
       diagnostic("models.fetch.failed", {
         errorName: error instanceof Error ? error.name : typeof error,
         message: error instanceof Error ? error.message.slice(0, 200) : typeof error,
@@ -235,6 +240,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     }
     if (discoveryMode === "curated" && (discoveryFailed || vsCodeModels.length === 0)) {
       diagnostic("models.provide.staticFallback", { discoveryFailed, liveChatCount: vsCodeModels.length });
+      this.lastDiscoveryMetadata = undefined;
       return this.staticCatalogModels();
     }
 
@@ -246,6 +252,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       models: vsCodeModels,
       expiresAt: Date.now() + Math.max(0, cacheSeconds) * 1000,
     };
+    this.lastDiscoveryMetadata = chatModels.map((model) => toDisplayMetadata(model.id, model));
     diagnostic("models.provide.complete", { discoveredIdCount: models.length, chatModelCount: vsCodeModels.length });
     return vsCodeModels;
   }
@@ -772,6 +779,16 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     return this.cache?.models.map((model) => model.id) ?? knownChatModelIds();
   }
 
+  /**
+   * Display metadata for the last live-verified discovery, aligned by id with
+   * the models `provideLanguageModelChatInformation` last returned. `undefined`
+   * means the models in hand are the curated static fallback, which is not
+   * live-verified for the configured key.
+   */
+  cachedModelMetadata(): readonly ModelMetadata[] | undefined {
+    return this.lastDiscoveryMetadata;
+  }
+
   /** Last model-discovery failure; already stripped of response bodies. */
   discoveryError(): DiscoveryFailure | undefined {
     return this.lastDiscoveryError;
@@ -779,6 +796,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
 
   refresh(): void {
     this.cache = undefined;
+    this.lastDiscoveryMetadata = undefined;
     this.changedEmitter.fire();
   }
 
