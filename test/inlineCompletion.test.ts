@@ -4,12 +4,15 @@ import {
   MAX_COMPLETION_TOKENS,
   INLINE_COMPLETION_DEBOUNCE_MS,
   MAX_PROMPT_CHARS,
+  MAX_SUFFIX_CHARS,
   MAX_SUGGESTION_CHARS,
   buildCompletionRequest,
+  createCompletionSuffixSupport,
   parseCompletionResponse,
   parseCompletionUsage,
   recordCompletionUsage,
   requestInlineCompletion,
+  trimSuffixOverlap,
   waitForInlineCompletionDebounce,
   type CompletionOutcome,
 } from "../src/inlineCompletion";
@@ -81,6 +84,60 @@ test("buildCompletionRequest stays within documented bounds and fields", () => {
   assert.ok(request.prompt.length <= MAX_PROMPT_CHARS);
   // oxlint-disable-next-line unicorn/no-array-sort
   assert.deepEqual(Object.keys(request).sort(), ["max_tokens", "model", "prompt", "temperature"]);
+});
+
+test("buildCompletionRequest sends a bounded suffix after a mid-document cursor", () => {
+  const before = "const value = ";
+  const after = "compute(" + "y".repeat(MAX_SUFFIX_CHARS * 2);
+  const request = buildCompletionRequest({
+    model: "glm5.3-flash",
+    documentText: before + after,
+    cursorOffset: before.length,
+  });
+  assert.ok(request);
+  assert.equal(request.prompt, before);
+  assert.equal(request.suffix, after.slice(0, MAX_SUFFIX_CHARS));
+  assert.equal(request.suffix?.length, MAX_SUFFIX_CHARS);
+});
+
+test("buildCompletionRequest omits the suffix at the end of the document", () => {
+  const request = buildCompletionRequest({
+    model: "glm5.3-flash",
+    documentText: "const x = 1",
+    cursorOffset: 11,
+  });
+  assert.ok(request);
+  assert.equal("suffix" in request, false);
+  // oxlint-disable-next-line unicorn/no-array-sort
+  assert.deepEqual(Object.keys(request).sort(), ["max_tokens", "model", "prompt", "temperature"]);
+});
+
+test("buildCompletionRequest omits the suffix for models that rejected it", () => {
+  const request = buildCompletionRequest({
+    model: "glm5.3-flash",
+    documentText: "const value = 1;",
+    cursorOffset: 14,
+    supportsSuffix: false,
+  });
+  assert.ok(request);
+  assert.equal("suffix" in request, false);
+});
+
+test("trimSuffixOverlap removes the suggestion tail that repeats the suffix start", () => {
+  assert.equal(trimSuffixOverlap("return total", "total_balance;"), "return ");
+  assert.equal(trimSuffixOverlap("total_balance;", "total_balance; rest"), "");
+  assert.equal(trimSuffixOverlap("alpha", "beta"), "alpha");
+  assert.equal(trimSuffixOverlap("", "suffix"), "");
+});
+
+test("createCompletionSuffixSupport remembers rejected models per session", () => {
+  const support = createCompletionSuffixSupport();
+  assert.equal(support.supports("glm5.3-flash"), true);
+  support.markUnsupported(" glm5.3-flash ");
+  assert.equal(support.supports("glm5.3-flash"), false);
+  assert.equal(support.supports("qwen3.8-flash"), true);
+  support.markUnsupported("   ");
+  assert.equal(support.supports(""), true);
 });
 
 test("inline debounce uses the fixed quiet period and an injectable scheduler", async () => {
@@ -305,6 +362,97 @@ test("requestInlineCompletion posts a bounded payload to {base}/completions", as
     max_tokens: 64,
     temperature: 0,
   });
+});
+
+test("requestInlineCompletion retries once without suffix and remembers the model", async () => {
+  const bodies: Array<Record<string, unknown>> = [];
+  const fetchImpl = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    bodies.push(body);
+    return "suffix" in body
+      ? jsonResponse({ error: { message: "Unsupported parameter: suffix" } }, 400)
+      : jsonResponse({ choices: [{ text: "done" }] });
+  }) as unknown as typeof fetch;
+  const suffixSupport = createCompletionSuffixSupport();
+  const options = {
+    baseUrl: "https://api.example.com/v1",
+    apiKey: "sk-test",
+    userAgent: "test",
+    request: {
+      model: "glm5.3-flash",
+      prompt: "const ",
+      suffix: "value = 1;",
+      max_tokens: 64,
+      temperature: 0,
+    },
+    suffixSupport,
+    fetchImpl,
+  };
+
+  assert.deepEqual(await requestInlineCompletion(options), { ok: true, text: "done" });
+  assert.equal(bodies.length, 2);
+  assert.equal(bodies[0].suffix, "value = 1;");
+  assert.equal("suffix" in bodies[1], false);
+  assert.equal(suffixSupport.supports("glm5.3-flash"), false);
+
+  bodies.length = 0;
+  assert.deepEqual(await requestInlineCompletion(options), { ok: true, text: "done" });
+  assert.equal(bodies.length, 1);
+  assert.equal("suffix" in bodies[0], false);
+});
+
+test("requestInlineCompletion does not blame the suffix when the retry also fails", async () => {
+  let calls = 0;
+  const fetchImpl = (async () => {
+    calls += 1;
+    return jsonResponse({}, 400);
+  }) as unknown as typeof fetch;
+  const suffixSupport = createCompletionSuffixSupport();
+
+  const outcome = await requestInlineCompletion({
+    baseUrl: "https://api.example.com/v1",
+    apiKey: "sk-test",
+    userAgent: "test",
+    request: {
+      model: "glm5.3-flash",
+      prompt: "const ",
+      suffix: "value = 1;",
+      max_tokens: 64,
+      temperature: 0,
+    },
+    suffixSupport,
+    fetchImpl,
+  });
+
+  assert.deepEqual(outcome, { ok: false, reason: "http", status: 400 });
+  assert.equal(calls, 2);
+  assert.equal(suffixSupport.supports("glm5.3-flash"), true);
+});
+
+test("requestInlineCompletion trims a suggestion that repeats the suffix start", async () => {
+  const respond = (text: string) =>
+    (() => Promise.resolve(jsonResponse({ choices: [{ text }] }))) as unknown as typeof fetch;
+  const options = {
+    baseUrl: "https://api.example.com/v1",
+    apiKey: "sk-test",
+    userAgent: "test",
+    request: {
+      model: "glm5.3-flash",
+      prompt: "function f() { return ",
+      suffix: "total_balance;\n}",
+      max_tokens: 64,
+      temperature: 0,
+    },
+  };
+
+  assert.deepEqual(await requestInlineCompletion({ ...options, fetchImpl: respond("return total") }), {
+    ok: true,
+    text: "return ",
+  });
+  assert.deepEqual(
+    await requestInlineCompletion({ ...options, fetchImpl: respond("total_balance;\n}") }),
+    { ok: false, reason: "empty" },
+  );
 });
 
 test("requestInlineCompletion surfaces the usage reported with a suggestion", async () => {
