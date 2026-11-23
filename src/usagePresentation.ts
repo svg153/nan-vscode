@@ -13,6 +13,8 @@ import type { DailyUsage } from "./usageHistory";
 export interface TooltipInput {
   readonly snapshot?: AccountUsageSnapshot;
   readonly error?: AccountUsageError;
+  /** Profile whose key serves unassigned models; an id only, never a key. */
+  readonly activeProfile?: string;
   readonly requests: number;
   readonly promptTokens: number;
   readonly completionTokens: number;
@@ -155,20 +157,27 @@ export function escapeMarkdown(text: string): string {
  * exists, otherwise the compact local session total, otherwise the documented
  * initial state. A frozen credit pool always wins: requests are being refused,
  * so the percentage is no longer the actionable information.
+ *
+ * `profileName` is appended only when the caller decided it is worth showing
+ * (more than one profile configured), so the single-profile and shared-key
+ * cases keep the shortest label.
  */
 export function statusBarText(
   headlinePercent: number | undefined,
   localTotal: number,
   frozen = false,
   lowCredits = false,
+  profileName?: string,
 ): string {
+  const profile = profileName?.trim();
+  const suffix = profile ? ` \u00b7 ${profile}` : "";
   if (headlinePercent !== undefined && frozen) {
-    return "$(warning) NaN frozen";
+    return `$(warning) NaN frozen${suffix}`;
   }
   if (headlinePercent !== undefined) {
-    return `${lowCredits ? "$(warning)" : "$(graph)"} NaN ${formatPercent(headlinePercent)}%`;
+    return `${lowCredits ? "$(warning)" : "$(graph)"} NaN ${formatPercent(headlinePercent)}%${suffix}`;
   }
-  return localTotal > 0 ? `$(graph) NaN ${compact(localTotal)}` : "$(sparkle) NaN";
+  return localTotal > 0 ? `$(graph) NaN ${compact(localTotal)}${suffix}` : `$(sparkle) NaN${suffix}`;
 }
 
 /** Plan credits still available, with the exact (unrounded) share of the allowance. */
@@ -239,6 +248,12 @@ export class LowCreditWatcher {
 export function buildTooltipMarkdown(input: TooltipInput): string {
   const lines: string[] = [];
   const { snapshot, error } = input;
+
+  // The active profile is the first thing the tooltip answers, because it
+  // names which account's credits the rest of the report describes.
+  if (input.activeProfile) {
+    lines.push(`$(account) **Active profile**: ${escapeMarkdown(input.activeProfile)}\n\n---\n\n`);
+  }
 
   if (snapshot) {
     const report = snapshot.report;
