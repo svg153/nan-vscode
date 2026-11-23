@@ -129,6 +129,10 @@ When you hold more than one NaN API key (for example a work key and a personal k
 
 **Everything else** uses the profile marked active: **Manage profiles**, pick a profile, **Use as active profile** (stored in `nanBuilders.activeProfile`; empty means the first configured profile).
 
+**Switch in one step:** run **NaN Builders: Switch Active Profile** from the Command Palette. It lists the configured profile IDs, marks the active one, and writes `nanBuilders.activeProfile` as soon as you pick a different profile; dismissing the picker writes nothing. Models are refreshed and the next chat request uses the new profile's key. With no profiles configured the command keeps `nanBuilders.activeProfile` untouched and points you to **NaN Builders: Manage Provider** instead of opening an empty list.
+
+**Status bar hint:** the existing status bar item (see `nanBuilders.showStatusBar`) names the active profile in its tooltip. When more than one profile is configured, the text also shows the profile name next to the usage figure (for example `NaN 42% · work`), so the key serving requests is visible without opening a picker. Only profile IDs appear; keys are never displayed.
+
 Key resolution per request, first match wins:
 
 1. The native **Manage Models → API Key** value, when VS Code supplies one.

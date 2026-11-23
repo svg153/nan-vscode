@@ -94,6 +94,15 @@ test("status bar replaces the percentage with a frozen warning when the credit p
   assert.equal(statusBarText(undefined, 0, true), "$(sparkle) NaN");
 });
 
+test("status bar appends the active profile only when the caller supplies one", () => {
+  assert.equal(statusBarText(42, 1_500, false, false, "work"), "$(graph) NaN 42% · work");
+  assert.equal(statusBarText(undefined, 1_500, false, false, "work"), "$(graph) NaN 1.5K · work");
+  assert.equal(statusBarText(undefined, 0, false, false, "work"), "$(sparkle) NaN · work");
+  assert.equal(statusBarText(42, 1_500, true, false, "work"), "$(warning) NaN frozen · work");
+  assert.equal(statusBarText(42, 1_500, false, false, "  "), "$(graph) NaN 42%");
+  assert.equal(statusBarText(42, 1_500), "$(graph) NaN 42%");
+});
+
 test("compact formats magnitudes with one decimal below ten units", () => {
   assert.equal(compact(0), "0");
   assert.equal(compact(999), "999");
@@ -466,4 +475,42 @@ test("status bar shows a warning style while credits are low and keeps frozen ah
   assert.equal(statusBarText(92, 0, false, false), "$(graph) NaN 92%");
   assert.equal(statusBarText(92, 0, true, true), "$(warning) NaN frozen");
   assert.equal(statusBarText(undefined, 1_500, false, true), "$(graph) NaN 1.5K");
+});
+
+test("tooltip names the active profile without exposing key material", () => {
+  const md = buildTooltipMarkdown({
+    snapshot: snapshot(),
+    activeProfile: "work",
+    requests: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    quotaItems,
+    history: [],
+  });
+  assert.match(md, /^\$\(account\) \*\*Active profile\*\*: work\n\n---\n\n/);
+  assert.equal(md.includes("sk-"), false);
+});
+
+test("tooltip omits the active profile line when no profile serves requests", () => {
+  const md = buildTooltipMarkdown({
+    requests: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    quotaItems,
+    history: [],
+  });
+  assert.doesNotMatch(md, /Active profile/);
+});
+
+test("tooltip escapes a profile id so it cannot inject markdown", () => {
+  const md = buildTooltipMarkdown({
+    activeProfile: "work[billing](https://bad.example)",
+    requests: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    quotaItems,
+    history: [],
+  });
+  assert.equal(md.includes("[billing]("), false);
+  assert.match(md, /Active profile\*\*: work\\\[billing\\\]/);
 });

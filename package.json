@@ -42,7 +42,8 @@
     "onCommand:nanBuilders.showUsage",
     "onCommand:nanBuilders.testConnection",
     "onCommand:nanBuilders.showDiagnostics",
-    "onCommand:nanBuilders.setCompletionModel"
+    "onCommand:nanBuilders.setCompletionModel",
+    "onCommand:nanBuilders.switchProfile"
   ],
   "main": "./out/src/extension.js",
   "contributes": {
@@ -92,6 +93,11 @@
         "command": "nanBuilders.setCompletionModel",
         "category": "NaN Builders",
         "title": "Set Inline Completion Model"
+      },
+      {
+        "command": "nanBuilders.switchProfile",
+        "category": "NaN Builders",
+        "title": "Switch Active Profile"
       },
       {
         "command": "nanBuilders.showUsage",
