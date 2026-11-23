@@ -12,6 +12,11 @@ import {
   type DiscoveredModel,
   type ModelMetadata,
 } from "./modelCatalog";
+import {
+  PERSISTED_MODELS_KEY,
+  parsePersistedModelList,
+  serializeModelList,
+} from "./modelPersistence";
 import { historyConversationKey, trimHistoryToBudget } from "./openai/historyTrim";
 import { convertMessages, convertTools, RequestTimeoutError } from "./openai/request";
 import { countContentTokens, estimateTokens } from "./openai/tokens";
@@ -132,7 +137,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
   private readonly cooldowns = new ThrottleCooldowns();
 
   constructor(
-    private readonly context: Pick<vscode.ExtensionContext, "secrets">,
+    private readonly context: Pick<vscode.ExtensionContext, "secrets" | "globalState">,
     private readonly usage: Pick<UsageTracker, "record">,
     private readonly endpointAuthorizer: HttpEndpointAuthorizer,
     /** Per-credential slots shared with inline completions. */
@@ -189,6 +194,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     try {
       models = await this.fetchModelIds(apiKey, token);
       this.lastDiscoveryError = undefined;
+      await this.persistDiscoveredModels(models);
     } catch (error) {
       if (isAbortError(error)) {
         return [];
@@ -215,11 +221,18 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     const chatModels = filterDiscoveredModels(models, includeUnknown, discoveryMode);
     const vsCodeModels = chatModels.map((m) => this.toVsCodeModel(m));
 
-    // Static catalog fallback (curated mode): if /v1/models fails or returns
-    // no usable chat model, never leave the picker empty. The curated catalog
-    // is served marked as not live-verified and is not cached, so the next
-    // refresh retries the endpoint. Auto mode targets third-party servers,
-    // where the NaN catalog would be misleading, so it keeps the live result.
+    // Discovery-failure fallback: prefer the list persisted by the last
+    // successful live discovery, then the curated catalog. Both are served
+    // marked as not live-verified and are not cached, so the next refresh
+    // retries the endpoint. Auto mode targets third-party servers, where the
+    // NaN catalog would be misleading, so it never falls back to it.
+    if (discoveryFailed) {
+      const persisted = this.persistedCatalogModels(includeUnknown, discoveryMode);
+      if (persisted.length > 0) {
+        diagnostic("models.provide.persistedFallback", { modelCount: persisted.length });
+        return persisted;
+      }
+    }
     if (discoveryMode === "curated" && (discoveryFailed || vsCodeModels.length === 0)) {
       diagnostic("models.provide.staticFallback", { discoveryFailed, liveChatCount: vsCodeModels.length });
       return this.staticCatalogModels();
@@ -551,6 +564,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     try {
       const models = await this.fetchModelIds(apiKey, source.token);
       this.lastDiscoveryError = undefined;
+      await this.persistDiscoveredModels(models);
       return models.map((model) => model.id);
     } catch (error) {
       this.lastDiscoveryError = toDiscoveryFailure(error);
@@ -1016,10 +1030,45 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
 
   /** Curated catalog served when live discovery failed or returned nothing usable. */
   private staticCatalogModels(): vscode.LanguageModelChatInformation[] {
-    return knownChatModelIds().map((id) => this.toModelInfo(toDisplayMetadata(id), true));
+    return knownChatModelIds().map((id) => this.toModelInfo(toDisplayMetadata(id), "static"));
   }
 
-  private toModelInfo(metadata: ModelMetadata, unverified = false): vscode.LanguageModelChatInformation {
+  /**
+   * Last successful live discovery, served when the endpoint is unreachable.
+   * The persisted entries are re-filtered with the current settings and are
+   * always marked as not live-verified.
+   */
+  private persistedCatalogModels(
+    includeUnknown: boolean,
+    discoveryMode: "curated" | "auto",
+  ): vscode.LanguageModelChatInformation[] {
+    const models = parsePersistedModelList(this.context.globalState.get<unknown>(PERSISTED_MODELS_KEY));
+    if (!models) {
+      return [];
+    }
+    return filterDiscoveredModels(models, includeUnknown, discoveryMode).map((model) =>
+      this.toModelInfo(toDisplayMetadata(model.id, model), "persisted"),
+    );
+  }
+
+  /** Stores the last live discovery result; persistence never breaks the picker. */
+  private async persistDiscoveredModels(models: readonly DiscoveredModel[]): Promise<void> {
+    if (models.length === 0) {
+      return;
+    }
+    try {
+      await this.context.globalState.update(PERSISTED_MODELS_KEY, serializeModelList(models));
+    } catch (error) {
+      diagnostic("models.persist.failed", {
+        errorName: error instanceof Error ? error.name : typeof error,
+      });
+    }
+  }
+
+  private toModelInfo(
+    metadata: ModelMetadata,
+    fallback?: "static" | "persisted",
+  ): vscode.LanguageModelChatInformation {
     const known = getKnownModel(metadata.id);
     // Reserve a 10% input budget margin against tokenizer divergence: a
     // full-context request can still 400 when the server tokenizes differently.
@@ -1034,15 +1083,17 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       version: "1",
       maxInputTokens: Math.max(1, inputBudget),
       maxOutputTokens: metadata.maxOutputTokens,
-      detail: unverified ? "NaN Builders - not live-verified" : known ? "NaN Builders" : "NaN Builders - metadata unknown",
+      detail: fallback ? "NaN Builders - not live-verified" : known ? "NaN Builders" : "NaN Builders - metadata unknown",
       tooltip: [
-        unverified
-          ? `Static NaN Builders catalog (${metadata.name}); live model discovery failed or returned no chat models. Access is not verified for the current API key.`
-          : known
-            ? `NaN Builders hosted ${metadata.name}`
-            : metadata.toolCalling
-              ? "Auto-discovered from the configured endpoint. Capabilities come from endpoint metadata."
-              : "Auto-discovered from the configured endpoint. Tool calling is disabled until metadata is known.",
+        fallback === "persisted"
+          ? `Last discovered NaN Builders catalog (${metadata.name}); live model discovery failed, so access is not verified for the current API key.`
+          : fallback === "static"
+            ? `Static NaN Builders catalog (${metadata.name}); live model discovery failed or returned no chat models. Access is not verified for the current API key.`
+            : known
+              ? `NaN Builders hosted ${metadata.name}`
+              : metadata.toolCalling
+                ? "Auto-discovered from the configured endpoint. Capabilities come from endpoint metadata."
+                : "Auto-discovered from the configured endpoint. Tool calling is disabled until metadata is known.",
         billingDescription(metadata),
         reasoningDescription(metadata),
         ...(known?.reasoningEffortValues?.length ? [`Current effort: ${this.resolveEffort(metadata.id, undefined)}.`] : []),
