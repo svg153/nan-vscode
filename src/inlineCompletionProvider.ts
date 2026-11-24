@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { isCompletionExcluded } from "./completionExclusions";
+import { resolveCompletionDebounceMs, resolveCompletionMaxTokens } from "./completionTuning";
 import { DEFAULT_API_BASE_URL, SECRET_API_KEY } from "./constants";
 import { diagnostic } from "./diagnostics";
 import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
@@ -79,12 +80,20 @@ export class NanInlineCompletionProvider implements vscode.InlineCompletionItemP
         documentText: document.getText(),
         cursorOffset: document.offsetAt(position),
         supportsSuffix: this.suffixSupport.supports(model),
+        // Read per request so a settings edit applies without a reload.
+        maxTokens: resolveCompletionMaxTokens(configuration.get<unknown>("completionMaxTokens")),
       });
       if (!request) {
         return undefined;
       }
 
-      if (!(await waitForInlineCompletionDebounce(controller.signal))) {
+      if (
+        !(await waitForInlineCompletionDebounce(
+          controller.signal,
+          undefined,
+          resolveCompletionDebounceMs(configuration.get<unknown>("completionDebounceMs")),
+        ))
+      ) {
         return undefined;
       }
 
