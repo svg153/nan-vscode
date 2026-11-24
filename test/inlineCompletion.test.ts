@@ -86,6 +86,16 @@ test("buildCompletionRequest stays within documented bounds and fields", () => {
   assert.deepEqual(Object.keys(request).sort(), ["max_tokens", "model", "prompt", "temperature"]);
 });
 
+test("buildCompletionRequest uses a resolved token budget override", () => {
+  const request = buildCompletionRequest({
+    model: "glm5.3-flash",
+    documentText: "const value = ",
+    cursorOffset: 14,
+    maxTokens: 128,
+  });
+  assert.equal(request?.max_tokens, 128);
+});
+
 test("buildCompletionRequest sends a bounded suffix after a mid-document cursor", () => {
   const before = "const value = ";
   const after = "compute(" + "y".repeat(MAX_SUFFIX_CHARS * 2);
@@ -151,6 +161,21 @@ test("inline debounce uses the fixed quiet period and an injectable scheduler", 
   assert.equal(ready, true);
   assert.deepEqual(delays, [INLINE_COMPLETION_DEBOUNCE_MS]);
   assert.equal(INLINE_COMPLETION_DEBOUNCE_MS, 150);
+});
+
+test("inline debounce uses a resolved quiet period override", async () => {
+  const controller = new AbortController();
+  const delays: number[] = [];
+  const ready = await waitForInlineCompletionDebounce(
+    controller.signal,
+    async (delayMs) => {
+      delays.push(delayMs);
+    },
+    400,
+  );
+
+  assert.equal(ready, true);
+  assert.deepEqual(delays, [400]);
 });
 
 test("inline debounce resolves as canceled when its signal aborts", async () => {

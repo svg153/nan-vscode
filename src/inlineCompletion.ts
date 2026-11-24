@@ -5,6 +5,7 @@
  * cancellation, and malformed responses without a VS Code host.
  */
 
+import { DEFAULT_COMPLETION_DEBOUNCE_MS, DEFAULT_COMPLETION_MAX_TOKENS } from "./completionTuning";
 import type { HttpEndpointAuthorizer } from "./httpEndpointGuard";
 import type { OpenAIUsage } from "./openai/types";
 import { MAX_JSON_RESPONSE_BYTES, ResponseTooLargeError, readBoundedJson } from "./responseBody";
@@ -17,8 +18,8 @@ export const MAX_SUFFIX_CHARS = 1000;
 /** Maximum characters returned as a ghost-text suggestion. */
 export const MAX_SUGGESTION_CHARS = 1000;
 /** Conservative generation budget so a suggestion stays interactive. */
-export const MAX_COMPLETION_TOKENS = 64;
-export const INLINE_COMPLETION_DEBOUNCE_MS = 150;
+export const MAX_COMPLETION_TOKENS = DEFAULT_COMPLETION_MAX_TOKENS;
+export const INLINE_COMPLETION_DEBOUNCE_MS = DEFAULT_COMPLETION_DEBOUNCE_MS;
 
 /** Client-error statuses a gateway answers when a request carries an unknown field. */
 const SUFFIX_REJECTION_STATUSES: ReadonlySet<number> = new Set([400, 422]);
@@ -28,11 +29,12 @@ export type InlineCompletionScheduler = (delayMs: number, signal: AbortSignal) =
 export async function waitForInlineCompletionDebounce(
   signal: AbortSignal,
   schedule: InlineCompletionScheduler = scheduleDelay,
+  delayMs: number = INLINE_COMPLETION_DEBOUNCE_MS,
 ): Promise<boolean> {
   if (signal.aborted) {
     return false;
   }
-  await schedule(INLINE_COMPLETION_DEBOUNCE_MS, signal);
+  await schedule(delayMs, signal);
   return !signal.aborted;
 }
 
@@ -100,6 +102,8 @@ export function buildCompletionRequest(options: {
   cursorOffset: number;
   /** `false` when this model's gateway rejected `suffix` in this session. */
   supportsSuffix?: boolean;
+  /** Resolved `nanBuilders.completionMaxTokens`; defaults to {@link MAX_COMPLETION_TOKENS}. */
+  maxTokens?: number;
 }): CompletionRequest | undefined {
   const model = options.model.trim();
   if (!model) {
@@ -117,7 +121,7 @@ export function buildCompletionRequest(options: {
     model,
     prompt,
     ...(suffix ? { suffix } : {}),
-    max_tokens: MAX_COMPLETION_TOKENS,
+    max_tokens: options.maxTokens ?? MAX_COMPLETION_TOKENS,
     temperature: 0,
   };
 }

@@ -208,6 +208,20 @@
           "default": "",
           "description": "Model ID for opt-in inline (ghost-text) completions. Empty disables the feature and no completion request is sent. Requests use POST /completions with the last 4,000 characters before the cursor, are aborted when you keep typing, and never show stale text."
                 },
+                "nanBuilders.completionMaxTokens": {
+                  "type": "integer",
+                  "default": 64,
+                  "minimum": 16,
+                  "maximum": 512,
+                  "markdownDescription": "Maximum completion tokens requested for each inline (ghost-text) suggestion. Higher values allow longer multi-line suggestions but cost more and take longer to arrive; lower values keep suggestions short and cheap. Values outside 16-512 or non-integer values fall back to 64. Read on every trigger, so edits take effect without reloading the window."
+                },
+                "nanBuilders.completionDebounceMs": {
+                  "type": "integer",
+                  "default": 150,
+                  "minimum": 0,
+                  "maximum": 2000,
+                  "markdownDescription": "Quiet period in milliseconds between the latest keystroke and an inline (ghost-text) request. Raise it to send fewer requests while typing; `0` requests as soon as the cursor settles. Values outside 0-2000 or non-integer values fall back to 150. Read on every trigger, so edits take effect without reloading the window."
+                },
                 "nanBuilders.completionExcludedLanguages": {
                   "type": "array",
                   "default": ["plaintext", "dotenv", "properties"],
