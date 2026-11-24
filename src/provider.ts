@@ -30,6 +30,7 @@ import {
   type ChatTimeouts,
 } from "./openai/timeouts";
 import type { OpenAIUsage } from "./openai/types";
+import { reportNativeChatUsage } from "./nativeChatUsage";
 import { httpError, parseRetryAfter, sanitizeErrorBody, toProviderError } from "./providerErrors";
 import {
   DEFAULT_MAX_RETRIES,
@@ -315,7 +316,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     // benches that key and retries the same logical request once on the next
     // profile that has its own key (#144).
     const plan = this.failoverPlan(model.id, credential);
-    await runWithFailover(plan, this.cooldowns, async (candidate, resolved, index) => {
+    const completed = await runWithFailover(plan, this.cooldowns, async (candidate, resolved, index) => {
       if (index > 0) {
         // The first attempt is already logged by `resolveCredential`.
         diagnostic("chat.credential", {
@@ -332,7 +333,22 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
         // actually documents, for the profile serving this attempt.
         reasoning_effort: this.resolveEffort(model.id, options.modelOptions, candidate.profileId),
       };
-      await this.streamChat(model, attemptBody, toolMapping, resolved.apiKey, progress, token, startedAt);
+      return this.streamChat(model, attemptBody, toolMapping, resolved.apiKey, progress, token, startedAt);
+    });
+
+    // Reported once for the whole request, never per attempt: the usage of the
+    // attempt that finally settled it, which is the one the user paid for. A
+    // retry or profile hop that never streamed reports nothing, and neither a
+    // cancelled nor a truncated turn counts as a completed request.
+    reportNativeChatUsage(completed.value, {
+      enabled: vscode.workspace.getConfiguration("nanBuilders").get<boolean>("experimentalNativeChatUsage", false),
+      version: vscode.version,
+      cancelled: token.isCancellationRequested,
+      // Deliberately opt-in: "usage" LanguageModelDataPart is not a stable VS Code API.
+      DataPart: (vscode as unknown as {
+        LanguageModelDataPart?: new (data: Uint8Array, mimeType: string) => vscode.LanguageModelResponsePart;
+      }).LanguageModelDataPart,
+      report: (part) => progress.report(part),
     });
   }
 
@@ -340,6 +356,10 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
    * Sends one chat request with `apiKey` and streams the reply into `progress`.
    * Extracted from the chat entry point so the opt-in failover can repeat the
    * same logical request with another profile's key and its own slot.
+   *
+   * Returns the usage the provider reported for this attempt, so the caller can
+   * emit the experimental native Chat usage once for the settled request. An
+   * attempt that failed, was cancelled or was truncated reports nothing.
    */
   private async streamChat(
     model: vscode.LanguageModelChatInformation,
@@ -349,13 +369,14 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
     progress: vscode.Progress<vscode.LanguageModelResponsePart>,
     token: vscode.CancellationToken,
     startedAt: number,
-  ): Promise<void> {
+  ): Promise<OpenAIUsage | undefined> {
     let timeoutController: ChatTimeoutController | undefined;
     let attempt: AttemptSignal | undefined;
     const cancellation = cancellationSignal(token, () => timeoutController?.settle());
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     let slot: SlotLease | undefined;
     let chunkCount = 0;
+    let lastUsage: OpenAIUsage | undefined;
     try {
       const sent = await this.sendChatWithRetries(model, requestBody, apiKey, token, cancellation.signal);
       timeoutController = sent.timeoutController;
@@ -373,7 +394,6 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
       reader = response.body.getReader();
       const textDecoder = new TextDecoder();
       const streamDecoder = new OpenAIStreamDecoder();
-      let lastUsage: OpenAIUsage | undefined;
       const reportStreamEvents = (events: StreamEvent[]): void => {
         for (const event of events) {
           if (token.isCancellationRequested) {
@@ -423,6 +443,7 @@ export class NanChatModelProvider implements vscode.LanguageModelChatProvider, v
             "NaN ended the turn before producing a reply because it reached its reasoning-only limit. Try a shorter prompt or a model with adjustable reasoning.",
           );
         }
+        return lastUsage;
       }
     } catch (error) {
       // A connect timeout now ends the retry loop by throwing the timer error

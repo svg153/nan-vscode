@@ -4,11 +4,13 @@ import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
+import { supportsNativeChatUsage } from "../src/nativeChatUsage";
 
 export async function run(): Promise<void> {
   let chatRequest: Record<string, unknown> | undefined;
   let completionRequest: Record<string, unknown> | undefined;
   let completionRequests = 0;
+  let retryOnceAttempts = 0;
   const routedRequests: string[] = [];
   let originalGlobalFetch: typeof fetch | undefined;
   let cancelResponse: http.ServerResponse | undefined;
@@ -85,6 +87,16 @@ export async function run(): Promise<void> {
         return;
       }
       const messages = chatRequest.messages as Array<{ content?: string }>;
+      if (messages.some(({ content }) => content === "RETRY_ONCE")) {
+        retryOnceAttempts += 1;
+        if (retryOnceAttempts === 1) {
+          // Pre-stream throttle: the extension retries on its own key before any
+          // byte is streamed, so the settled turn must still report usage once.
+          response.writeHead(429, { "Content-Type": "application/json", "Retry-After": "0" });
+          response.end(JSON.stringify({ error: { message: "rate limit exceeded", code: "rate_limit_exceeded" } }));
+          return;
+        }
+      }
       if (messages.some(({ content }) => content === "TRUNCATE_NOW")) {
         response.writeHead(200, { "Content-Type": "text/event-stream" });
         response.end([
@@ -132,6 +144,8 @@ export async function run(): Promise<void> {
   } | undefined;
   let previousBaseUrl: string | undefined;
   let previousCompletionModel: string | undefined;
+  let previousExperimentalNativeUsage: boolean | undefined;
+  let previousMaxRetries: number | undefined;
   let config: vscode.WorkspaceConfiguration | undefined;
   let source: vscode.CancellationTokenSource | undefined;
   let timeout: NodeJS.Timeout | undefined;
@@ -159,7 +173,10 @@ export async function run(): Promise<void> {
     config = vscode.workspace.getConfiguration("nanBuilders");
     previousBaseUrl = config.get<string>("apiBaseUrl");
     previousCompletionModel = config.get<string>("completionModel");
+    previousExperimentalNativeUsage = config.get<boolean>("experimentalNativeChatUsage");
+    previousMaxRetries = config.get<number>("maxRetries");
     await config.update("completionModel", "", vscode.ConfigurationTarget.Global);
+    await config.update("experimentalNativeChatUsage", false, vscode.ConfigurationTarget.Global);
     testApi = await extension.activate();
     assert.ok(testApi, `Test hook missing (extension path ${extension.extensionPath}).`);
     const activeTestApi = testApi;
@@ -261,6 +278,67 @@ export async function run(): Promise<void> {
       completionTokens: 1,
     }]);
 
+    // Opt-in smoke test. Inspect the raw stream data part only when the host
+    // exposes the experimental constructor; native UI rendering still requires
+    // manual Local and Copilot Agent Host verification.
+    await config.update("experimentalNativeChatUsage", true, vscode.ConfigurationTarget.Global);
+    const optedInResponse = await model.sendRequest(
+      [vscode.LanguageModelChatMessage.User("Reply with exactly NAN_OK.")], {}, source.token,
+    );
+    let optedInText = "";
+    const usageParts: Uint8Array[] = [];
+    for await (const part of optedInResponse.stream) {
+      if (part instanceof vscode.LanguageModelTextPart) {
+        optedInText += part.value;
+      }
+      const candidate = part as unknown as { mimeType?: string; data?: Uint8Array };
+      if (candidate.mimeType === "usage" && candidate.data instanceof Uint8Array) {
+        usageParts.push(candidate.data);
+      }
+    }
+    assert.equal(optedInText, "NAN_OK");
+    const nativeUsageSupported = supportsNativeChatUsage(vscode.version)
+      && typeof (vscode as unknown as { LanguageModelDataPart?: unknown }).LanguageModelDataPart === "function";
+    if (nativeUsageSupported) {
+      assert.equal(usageParts.length, 1, "Enabled supported host must receive exactly one usage part.");
+      assert.deepEqual(JSON.parse(new TextDecoder().decode(usageParts[0])), {
+        prompt_tokens: 2, completion_tokens: 1, total_tokens: 3,
+      });
+    } else {
+      assert.equal(usageParts.length, 0, "Unsupported host must not receive experimental usage.");
+    }
+
+    // Retry composition: the first attempt is throttled before the stream starts
+    // and is retried on the same key, yet the settled turn reports usage once.
+    await config.update("maxRetries", 2, vscode.ConfigurationTarget.Global);
+    retryOnceAttempts = 0;
+    const retriedResponse = await model.sendRequest(
+      [vscode.LanguageModelChatMessage.User("RETRY_ONCE")], {}, source.token,
+    );
+    let retriedText = "";
+    const retriedUsageParts: Uint8Array[] = [];
+    for await (const part of retriedResponse.stream) {
+      if (part instanceof vscode.LanguageModelTextPart) {
+        retriedText += part.value;
+      }
+      const candidate = part as unknown as { mimeType?: string; data?: Uint8Array };
+      if (candidate.mimeType === "usage" && candidate.data instanceof Uint8Array) {
+        retriedUsageParts.push(candidate.data);
+      }
+    }
+    assert.equal(retryOnceAttempts, 2, "A pre-stream throttle must be retried once on the same key.");
+    assert.equal(retriedText, "NAN_OK");
+    assert.equal(
+      retriedUsageParts.length,
+      nativeUsageSupported ? 1 : 0,
+      "A retried turn must report usage once for the settled request, never per attempt.",
+    );
+    if (nativeUsageSupported) {
+      assert.deepEqual(JSON.parse(new TextDecoder().decode(retriedUsageParts[0])), {
+        prompt_tokens: 2, completion_tokens: 1, total_tokens: 3,
+      });
+    }
+
     assert.equal(await testApi.clearTestUsageHistory(), true);
     assert.deepEqual(testApi.readTestUsageHistory(), []);
 
@@ -271,16 +349,23 @@ export async function run(): Promise<void> {
       {},
       requestToken,
     );
+    const truncatedUsageParts: Uint8Array[] = [];
     await assert.rejects(
       async () => {
-        for await (const _part of truncatedResponse.stream) {
+        for await (const part of truncatedResponse.stream) {
           // A reasoning-only truncation must not look like a successful empty reply.
+          const candidate = part as unknown as { mimeType?: string; data?: Uint8Array };
+          if (candidate.mimeType === "usage" && candidate.data instanceof Uint8Array) {
+            truncatedUsageParts.push(candidate.data);
+          }
         }
       },
       /NaN ended the turn before producing a reply because it reached its reasoning-only limit/,
     );
+    assert.equal(truncatedUsageParts.length, 0, "A truncated turn must not report native usage.");
 
     const cancellation = new vscode.CancellationTokenSource();
+    let cancelledUsageParts = 0;
     try {
       const cancelRequestReceived = new Promise<void>((resolve, reject) => {
         const requestTimeout = setTimeout(() => reject(new Error("Mock cancellation request was not received.")), 5_000);
@@ -297,17 +382,23 @@ export async function run(): Promise<void> {
         cancellation.token,
       );
       const consume = (async () => {
-        for await (const _part of cancelStream.stream) {
+        for await (const part of cancelStream.stream) {
           // The mock holds this stream open until the cancellation token aborts it.
+          const candidate = part as unknown as { mimeType?: string };
+          if (candidate.mimeType === "usage") {
+            cancelledUsageParts += 1;
+          }
         }
       })();
       await cancelRequestReceived;
       cancellation.cancel();
       await assert.doesNotReject(consume);
+      assert.equal(cancelledUsageParts, 0, "A cancelled turn must not report native usage.");
     } finally {
       cancellation.dispose();
       cancelResponse?.end();
     }
+    await config.update("experimentalNativeChatUsage", false, vscode.ConfigurationTarget.Global);
 
     // Inline ghost-text: opt-in via nanBuilders.completionModel, bounded payload.
     // Documentos con scheme "file" para cubrir el path registrado por el proveedor
@@ -402,6 +493,8 @@ export async function run(): Promise<void> {
     if (config) {
       await config.update("apiBaseUrl", previousBaseUrl, vscode.ConfigurationTarget.Global);
       await config.update("completionModel", previousCompletionModel, vscode.ConfigurationTarget.Global);
+      await config.update("experimentalNativeChatUsage", previousExperimentalNativeUsage, vscode.ConfigurationTarget.Global);
+      await config.update("maxRetries", previousMaxRetries, vscode.ConfigurationTarget.Global);
     }
     if (originalGlobalFetch) {
       globalThis.fetch = originalGlobalFetch;
